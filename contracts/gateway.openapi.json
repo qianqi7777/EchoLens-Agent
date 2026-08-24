@@ -1,0 +1,451 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "EchoLens Agent Model Gateway",
+    "version": "0.1.0",
+    "description": "Client contract for authentication state, model discovery, and transparent model inference. The Gateway has no local tool execution authority."
+  },
+  "servers": [
+    { "url": "https://gateway.example.com" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Gateway process is healthy",
+            "content": {
+              "application/json": {
+                "example": { "status": "ok", "service_version": "0.1.0" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oauth/device_authorization": {
+      "post": {
+        "operationId": "createDeviceAuthorization",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id", "scope"],
+                "properties": {
+                  "client_id": { "type": "string" },
+                  "scope": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device authorization started",
+            "content": {
+              "application/json": {
+                "example": {
+                  "device_code": "device-code-example",
+                  "user_code": "ABCD-EFGH",
+                  "verification_uri": "https://gateway.example.com/device",
+                  "verification_uri_complete": "https://gateway.example.com/device?user_code=ABCD-EFGH",
+                  "expires_in": 900,
+                  "interval": 5
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oauth/token": {
+      "post": {
+        "operationId": "pollDeviceToken",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["grant_type", "device_code", "client_id"],
+                "properties": {
+                  "grant_type": { "const": "urn:ietf:params:oauth:grant-type:device_code" },
+                  "device_code": { "type": "string" },
+                  "client_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Access token issued",
+            "content": {
+              "application/json": {
+                "example": {
+                  "access_token": "redacted-example-token",
+                  "token_type": "Bearer",
+                  "expires_in": 900,
+                  "refresh_token": "redacted-example-refresh-token",
+                  "scope": "models:read inference:create account:read"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/OAuthPending"
+          }
+        }
+      }
+    },
+    "/v1/auth/status": {
+      "get": {
+        "operationId": "getAuthStatus",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Current Gateway authentication state",
+            "content": {
+              "application/json": {
+                "examples": {
+                  "signed_in": {
+                    "value": {
+                      "status": "signed_in",
+                      "account": { "id": "acct_example", "display_name": "Example User" },
+                      "expires_at": "2026-08-24T12:15:00Z"
+                    }
+                  },
+                  "signed_out": {
+                    "value": { "status": "signed_out" }
+                  },
+                  "token_expired": {
+                    "value": { "status": "token_expired" }
+                  }
+                },
+                "schema": { "$ref": "#/components/schemas/AuthStatus" }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationError"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "operationId": "listModels",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Models available to the current account",
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "value": {
+                      "object": "list",
+                      "data": [
+                        {
+                          "id": "deepseek-chat",
+                          "protocols": ["chat_completions"],
+                          "default_protocol": "chat_completions",
+                          "capabilities": {
+                            "max_context_tokens": 64000,
+                            "supports_streaming": true,
+                            "supports_tool_calls": true,
+                            "supports_parallel_tool_calls": true,
+                            "supports_structured_output": false,
+                            "supports_prompt_caching": true,
+                            "supports_usage_reporting": true
+                          }
+                        },
+                        {
+                          "id": "responses-example",
+                          "protocols": ["responses"],
+                          "default_protocol": "responses",
+                          "capabilities": {
+                            "max_context_tokens": 128000,
+                            "supports_streaming": true,
+                            "supports_tool_calls": true,
+                            "supports_parallel_tool_calls": true,
+                            "supports_structured_output": true,
+                            "supports_prompt_caching": true,
+                            "supports_usage_reporting": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "schema": { "$ref": "#/components/schemas/ModelList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/AuthenticationError" },
+          "403": { "$ref": "#/components/responses/EntitlementError" },
+          "503": { "$ref": "#/components/responses/UpstreamUnavailable" }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "createChatCompletion",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transparent Chat Completions response",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "chatcmpl_gateway_example",
+                  "choices": [{ "finish_reason": "stop", "message": { "role": "assistant", "content": "gateway ok" } }],
+                  "usage": { "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/AuthenticationError" },
+          "429": { "$ref": "#/components/responses/RateLimitError" },
+          "503": { "$ref": "#/components/responses/UpstreamUnavailable" }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "operationId": "createResponse",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transparent Responses API response",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "resp_gateway_example",
+                  "status": "completed",
+                  "output": [{
+                    "type": "message",
+                    "id": "msg_gateway_example",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "gateway ok" }]
+                  }],
+                  "usage": { "input_tokens": 5, "output_tokens": 2, "total_tokens": 7 }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/AuthenticationError" },
+          "429": { "$ref": "#/components/responses/RateLimitError" },
+          "503": { "$ref": "#/components/responses/UpstreamUnavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    },
+    "schemas": {
+      "AuthStatus": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "enum": [
+              "not_configured",
+              "signed_out",
+              "device_authorization_pending",
+              "signed_in",
+              "token_expired",
+              "revoked",
+              "gateway_unreachable",
+              "entitlement_denied"
+            ]
+          },
+          "account": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string" },
+              "display_name": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "expires_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ProviderCapabilities": {
+        "type": "object",
+        "required": [
+          "max_context_tokens",
+          "supports_streaming",
+          "supports_tool_calls",
+          "supports_parallel_tool_calls",
+          "supports_structured_output",
+          "supports_prompt_caching",
+          "supports_usage_reporting"
+        ],
+        "properties": {
+          "max_context_tokens": { "type": "integer", "minimum": 1 },
+          "supports_streaming": { "type": "boolean" },
+          "supports_tool_calls": { "type": "boolean" },
+          "supports_parallel_tool_calls": { "type": "boolean" },
+          "supports_structured_output": { "type": "boolean" },
+          "supports_prompt_caching": { "type": "boolean" },
+          "supports_usage_reporting": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "ModelDescriptor": {
+        "type": "object",
+        "required": ["id", "protocols", "default_protocol", "capabilities"],
+        "properties": {
+          "id": { "type": "string" },
+          "protocols": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "enum": ["chat_completions", "responses"] }
+          },
+          "default_protocol": { "enum": ["chat_completions", "responses"] },
+          "capabilities": { "$ref": "#/components/schemas/ProviderCapabilities" }
+        },
+        "additionalProperties": false
+      },
+      "ModelList": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": { "const": "list" },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ModelDescriptor" }
+          }
+        },
+        "additionalProperties": false
+      },
+      "GatewayError": {
+        "type": "object",
+        "required": ["error", "request_id"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable"],
+            "properties": {
+              "code": {
+                "enum": [
+                  "authentication_required",
+                  "invalid_token",
+                  "token_expired",
+                  "insufficient_scope",
+                  "model_not_allowed",
+                  "quota_exceeded",
+                  "rate_limited",
+                  "upstream_unavailable",
+                  "upstream_timeout",
+                  "request_too_large",
+                  "content_blocked"
+                ]
+              },
+              "message": { "type": "string" },
+              "retryable": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          },
+          "request_id": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "responses": {
+      "OAuthPending": {
+        "description": "Device authorization is still pending",
+        "content": {
+          "application/json": {
+            "example": { "error": "authorization_pending" }
+          }
+        }
+      },
+      "AuthenticationError": {
+        "description": "Authentication failed",
+        "content": {
+          "application/json": {
+            "examples": {
+              "signed_out": {
+                "value": {
+                  "error": { "code": "authentication_required", "message": "Login required", "retryable": false },
+                  "request_id": "req_auth_example"
+                }
+              },
+              "token_expired": {
+                "value": {
+                  "error": { "code": "token_expired", "message": "Token expired", "retryable": false },
+                  "request_id": "req_expired_example"
+                }
+              }
+            },
+            "schema": { "$ref": "#/components/schemas/GatewayError" }
+          }
+        }
+      },
+      "EntitlementError": {
+        "description": "Account cannot access this operation",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": { "code": "model_not_allowed", "message": "Model not allowed", "retryable": false },
+              "request_id": "req_entitlement_example"
+            },
+            "schema": { "$ref": "#/components/schemas/GatewayError" }
+          }
+        }
+      },
+      "RateLimitError": {
+        "description": "Gateway rate limit exceeded",
+        "headers": {
+          "Retry-After": { "schema": { "type": "integer", "minimum": 0 } }
+        },
+        "content": {
+          "application/json": {
+            "example": {
+              "error": { "code": "rate_limited", "message": "Too many requests", "retryable": true },
+              "request_id": "req_rate_example"
+            },
+            "schema": { "$ref": "#/components/schemas/GatewayError" }
+          }
+        }
+      },
+      "UpstreamUnavailable": {
+        "description": "Configured upstream provider is unavailable",
+        "content": {
+          "application/json": {
+            "example": {
+              "error": { "code": "upstream_unavailable", "message": "Upstream unavailable", "retryable": true },
+              "request_id": "req_upstream_example"
+            },
+            "schema": { "$ref": "#/components/schemas/GatewayError" }
+          }
+        }
+      }
+    }
+  }
+}

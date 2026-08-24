@@ -3,20 +3,30 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx src/cli.ts",
-    "test": "tsx --test src/runtime/*.test.ts",
+    "setup": "tsx src/cli.ts --setup",
+    "verify:provider": "tsx scripts/verify-provider.ts",
+    "test:classification": "tsx scripts/check-test-classification.ts",
+    "test:unit": "tsx --test src/config/startup-config.test.ts src/runtime/runtime.test.ts src/runtime/structured-output.test.ts src/runtime/tool-errors.test.ts src/runtime/tool-schema.test.ts",
+    "test:contract": "tsx --test src/context/instruction-contract.test.ts src/providers/gateway/gateway-client.test.ts src/providers/openai-compatible/openai-compatible.test.ts src/providers/openai-compatible/provider-hardening.test.ts src/runtime/model-router.test.ts",
+    "test:security": "tsx --test src/runtime/path-policy.test.ts src/runtime/tool-output.test.ts",
+    "test:performance": "tsx --test src/runtime/workspace-tools.performance.test.ts",
+    "test": "npm run test:classification && npm run test:unit && npm run test:contract && npm run test:security",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "check:ci": "npm run check && npm run test:performance",
+    "audit": "npm audit --audit-level=high"
   },
   "dependencies": {
-    "ink": "^7.1.1",
-    "ink-text-input": "^6.0.0",
-    "react": "^19.2.0"
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@types/react": "^19.2.0",
     "tsx": "^4.23.0",
     "typescript": "5.9.3"
   }

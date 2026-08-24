@@ -1,5 +1,7 @@
 import type { Permission, ToolContext, ToolResult } from './types.js';
 import { ToolRegistry } from './tool-registry.js';
+import { toolFailure } from './tool-result.js';
+import { hardenToolResult } from './tool-output.js';
 
 export interface ToolExecutorOptions {
   maxCalls?: number;
@@ -33,38 +35,65 @@ export class ToolExecutor {
     args: Record<string, unknown>,
     context: ToolContext,
   ): Promise<ToolResult> {
-    const tool = this.registry.get(name);
+    return hardenToolResult(await this.invokeRaw(name, args, context), this.maxOutputChars);
+  }
+
+  private async invokeRaw(
+    name: string,
+    args: Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<ToolResult> {
+    let tool;
+    try {
+      tool = this.registry.get(name);
+    } catch {
+      return toolFailure('invalid', 'unknown_tool', `未知工具：${name}`, {
+        data: { toolName: name },
+      });
+    }
     if (this.callCount >= this.maxCalls) {
-      return this.result('error', '已达到本回合工具调用预算', 'budget_exhausted');
+      return toolFailure('failed', 'budget_exhausted', '已达到本回合工具调用预算', {
+        data: { maxCalls: this.maxCalls },
+      });
     }
     if (!context.allowedPermissions.has(tool.permission)) {
-      return this.result('denied', `没有工具权限：${tool.permission}`, 'permission_denied');
+      return toolFailure('denied', 'permission_denied', `没有工具权限：${tool.permission}`, {
+        data: { permission: tool.permission },
+      });
     }
 
-    const validationError = validateArgs(tool.inputSchema.required ?? [], args);
-    if (validationError) return this.result('error', validationError, 'invalid_arguments');
+    const validation = this.registry.validate(name, args);
+    if (!validation.valid) {
+      return toolFailure('invalid', 'invalid_arguments', '工具参数不符合 Schema', {
+        data: { issues: validation.issues },
+      });
+    }
+    if (context.signal.aborted) return toolFailure('cancelled', 'cancelled', '工具调用已取消');
 
     this.callCount += 1;
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    context.signal.addEventListener('abort', abort, { once: true });
+    const controlState = { timedOut: false, cancelled: false };
 
     try {
-      const result = await withTimeout(
-        tool.execute(args, { ...context, signal: controller.signal }),
+      const result = await withExecutionControls(
+        Promise.resolve().then(() => tool.execute(args, { ...context, signal: controller.signal })),
         this.timeoutMs,
         controller,
+        context.signal,
+        controlState,
       );
-      return {
-        ...result,
-        content: truncate(result.content, this.maxOutputChars),
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const timeout = message === 'TOOL_TIMEOUT';
-      return this.result(timeout ? 'timeout' : 'error', message, timeout ? 'timeout' : 'tool_failed');
-    } finally {
-      context.signal.removeEventListener('abort', abort);
+      return result;
+    } catch {
+      if (controlState.timedOut) {
+        return toolFailure('timeout', 'timeout', '工具执行超时', {
+          retryable: true,
+          data: { timeoutMs: this.timeoutMs },
+        });
+      }
+      if (controlState.cancelled || context.signal.aborted) {
+        return toolFailure('cancelled', 'cancelled', '工具调用已取消');
+      }
+      return toolFailure('failed', 'tool_failed', '工具执行失败');
     }
   }
 
@@ -72,37 +101,37 @@ export class ToolExecutor {
     this.callCount = 0;
   }
 
-  private result(status: ToolResult['status'], content: string, summary: string): ToolResult {
-    return { status, content, summary, evidenceIds: [] };
-  }
 }
 
-function validateArgs(required: string[], args: Record<string, unknown>): string | null {
-  const missing = required.filter((key) => args[key] === undefined || args[key] === null);
-  return missing.length ? `缺少工具参数：${missing.join(', ')}` : null;
-}
-
-function truncate(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  return `${value.slice(0, limit)}\n[output truncated: ${value.length - limit} chars]`;
-}
-
-async function withTimeout<T>(
+async function withExecutionControls<T>(
   promise: Promise<T>,
   timeoutMs: number,
   controller: AbortController,
+  externalSignal: AbortSignal,
+  state: { timedOut: boolean; cancelled: boolean },
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
+      state.timedOut = true;
       controller.abort();
       reject(new Error('TOOL_TIMEOUT'));
     }, timeoutMs);
   });
+  const cancellation = new Promise<never>((_, reject) => {
+    abort = () => {
+      state.cancelled = true;
+      controller.abort(externalSignal.reason);
+      reject(new Error('TOOL_CANCELLED'));
+    };
+    if (externalSignal.aborted) abort();
+    else externalSignal.addEventListener('abort', abort, { once: true });
+  });
   try {
-    return await Promise.race([promise, timeout]);
+    return await Promise.race([promise, timeout, cancellation]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (abort) externalSignal.removeEventListener('abort', abort);
   }
 }
-

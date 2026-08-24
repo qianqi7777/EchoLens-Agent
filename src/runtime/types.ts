@@ -1,3 +1,11 @@
+import type {
+  ToolError,
+  ToolExecutionStatus,
+  ToolOutputMetadata,
+} from '../core/messages.js';
+import type { Permission } from '../core/permissions.js';
+export type { Permission } from '../core/permissions.js';
+
 /**
  * Agent Runtime 的共享类型。
  *
@@ -5,31 +13,35 @@
  * 模型 SDK，同时保证工具执行、事件记录和终端 UI 使用同一套数据契约。
  */
 
-export type Permission =
-  | 'workspace.read'
-  | 'workspace.write'
-  | 'process.exec'
-  | 'network.request';
+export type JsonSchemaPrimitive = string | number | boolean | null;
+export type JsonSchemaTypeName = 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
 
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
-  toolCallId?: string;
-  toolName?: string;
-  toolCalls?: ToolCall[];
-}
-
-export interface JsonSchema {
-  type: 'object';
-  properties?: Record<string, { type: string; description?: string }>;
+export interface JsonSchemaNode {
+  type?: JsonSchemaTypeName | JsonSchemaTypeName[];
+  description?: string;
+  enum?: JsonSchemaPrimitive[];
+  const?: JsonSchemaPrimitive;
+  format?: string;
+  pattern?: string;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  items?: JsonSchemaNode;
+  properties?: Record<string, JsonSchemaNode>;
   required?: string[];
-  additionalProperties?: boolean;
+  additionalProperties?: boolean | JsonSchemaNode;
+}
+
+export interface JsonSchema extends JsonSchemaNode {
+  type: 'object';
+  properties?: Record<string, JsonSchemaNode>;
+  additionalProperties: false;
 }
 
 export interface ToolSpec {
@@ -46,37 +58,27 @@ export interface ToolContext {
   signal: AbortSignal;
 }
 
-export interface ToolResult {
-  status: 'ok' | 'error' | 'denied' | 'timeout';
+interface ToolResultBase {
   content: string;
   summary: string;
+  data?: unknown;
+  outputMetadata?: ToolOutputMetadata;
   evidenceIds: string[];
 }
 
-export interface ModelToolDefinition {
-  name: string;
-  description: string;
-  parameters: JsonSchema;
+export interface ToolSuccessResult extends ToolResultBase {
+  status: 'ok';
+  error?: never;
 }
 
-export interface ModelRequest {
-  messages: ChatMessage[];
-  tools?: ModelToolDefinition[];
-  signal?: AbortSignal;
+export interface ToolFailureResult extends ToolResultBase {
+  status: Exclude<ToolExecutionStatus, 'ok'>;
+  error: ToolError;
 }
 
-export interface ModelResponse {
-  text: string;
-  toolCalls: ToolCall[];
-}
-
-export interface ChatModel {
-  readonly model: string;
-  complete(request: ModelRequest): Promise<ModelResponse>;
-}
+export type ToolResult = ToolSuccessResult | ToolFailureResult;
 
 export interface AgentTraceItem {
   type: 'model' | 'tool' | 'warning';
   message: string;
 }
-
