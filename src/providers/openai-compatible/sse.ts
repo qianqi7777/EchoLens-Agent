@@ -16,7 +16,8 @@ export async function* parseSse(
   try {
     while (true) {
       const { value, done } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done }).replaceAll('\r\n', '\n');
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replaceAll('\r\n', '\n');
       if (buffer.length > MAX_SSE_EVENT_CHARS && !buffer.includes('\n\n')) {
         throw new Error('SSE 单事件超过大小上限');
       }

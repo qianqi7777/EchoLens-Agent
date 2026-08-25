@@ -39,7 +39,13 @@ import {
   type StructuredOutputResult,
   type FinalSummary,
 } from './structured-output.js';
-import type { AgentTraceItem, Permission, ToolContext, ToolResult } from './types.js';
+import type {
+  AgentTraceItem,
+  Permission,
+  ToolContext,
+  ToolResult,
+  ToolSpec,
+} from './types.js';
 
 export interface AgentRunResult {
   answer: string;
@@ -405,6 +411,17 @@ export class ReactAgent {
             callId: call.callId,
           },
         });
+        if (decision.decision === 'require_approval') {
+          await emit(machine, eventSink, {
+            payload: {
+              type: 'approval.requested',
+              approvalId: `${machine.runId}:${call.callId}`,
+              callId: call.callId,
+              permission: this.registry.get(call.name).permission,
+              reasonCode: decision.reasonCode,
+            },
+          });
+        }
         if (decision.decision === 'allow') {
           started = performance.now();
           await emit(machine, eventSink, {
@@ -442,6 +459,15 @@ export class ReactAgent {
         result: item,
       },
     });
+    const observation = result.status === 'ok'
+      ? workspaceFileObservation(
+          this.registry,
+          call,
+          outcome.decision.normalizedArguments,
+          result.evidenceIds,
+        )
+      : undefined;
+    if (observation) await emit(machine, eventSink, { payload: observation });
     return { call, result, item };
   }
 
@@ -510,8 +536,30 @@ export class ReactAgent {
     await emit(machine, eventSink, {
       payload: { type: 'run.completed', answer: rawAnswer, degraded },
     });
-    return finishRun(rawAnswer, machine, degraded, state, checkpoint);
+    return finishRun(rawAnswer, machine, degraded, state, checkpoint, parsed);
   }
+}
+
+function workspaceFileObservation(
+  registry: ToolRegistry,
+  call: ToolCallItem,
+  arguments_: Record<string, unknown>,
+  evidenceIds: string[],
+): Extract<AgentEventIntent['payload'], { type: 'workspace.file.observed' }> | undefined {
+  let observation: ToolSpec['observation'];
+  try {
+    observation = registry.get(call.name).observation;
+  } catch {
+    return undefined;
+  }
+  if (observation?.type !== 'workspace.file') return undefined;
+  return {
+    type: 'workspace.file.observed',
+    operation: observation.operation,
+    path: typeof arguments_.path === 'string' ? arguments_.path : '.',
+    evidenceIds: [...evidenceIds],
+    callId: call.callId,
+  };
 }
 
 function toolResultItem(
@@ -567,8 +615,8 @@ function finishRun(
   degraded: boolean,
   state: RunState,
   checkpoint: AgentCheckpoint,
+  finalSummary: StructuredOutputResult<FinalSummary> = parseFinalSummary(rawAnswer),
 ): AgentRunResult {
-  const finalSummary = parseFinalSummary(rawAnswer);
   return {
     answer: finalSummary.verified ? finalSummary.value.answer : rawAnswer,
     items: machine.items,

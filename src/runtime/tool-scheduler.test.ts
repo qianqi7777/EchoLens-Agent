@@ -118,6 +118,40 @@ test('副作用工具不会与前后只读波次交叉', async () => {
   assert.ok(timeline.indexOf('start:read-3') > timeline.indexOf('end:write-2'));
 });
 
+test('并行工具不能穿透 ToolExecutor 调用预算', async () => {
+  const registry = new ToolRegistry();
+  let executions = 0;
+  registry.register({
+    name: 'budgeted_read',
+    description: '受预算限制的只读工具',
+    permission: 'workspace.read',
+    effect: 'read',
+    inputSchema: { type: 'object', additionalProperties: false },
+    async execute() {
+      executions += 1;
+      return toolSuccess('ok', 'ok');
+    },
+  });
+  const executor = new ToolExecutor(registry, { maxCalls: 2 });
+  const context = {
+    workspaceRoot: process.cwd(),
+    allowedPermissions: new Set(['workspace.read' as const]),
+    signal: new AbortController().signal,
+  };
+
+  const outcomes = await Promise.all(Array.from({ length: 10 }, () => executor.invokeWithDecision(
+    'budgeted_read',
+    {},
+    context,
+    async () => delay(5),
+  )));
+
+  assert.equal(executions, 2);
+  assert.equal(outcomes.filter((outcome) => outcome.result.status === 'ok').length, 2);
+  assert.equal(outcomes.filter((outcome) => outcome.result.error?.code === 'budget_exhausted').length, 8);
+  assert.equal(executor.callsUsed(), 2);
+});
+
 function parallelProvider(requests: ProviderRequest[]): ModelProvider {
   let turn = 0;
   return {

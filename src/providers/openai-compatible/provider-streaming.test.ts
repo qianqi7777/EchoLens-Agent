@@ -4,6 +4,7 @@ import { textMessage } from '../../core/messages.js';
 import { ProviderError } from '../provider-error.js';
 import type { ProviderStreamEvent } from '../types.js';
 import { OpenAICompatibleProvider } from './client.js';
+import { parseSse } from './sse.js';
 
 test('Chat SSE 增量文本与分片工具参数合并为最终结果', async () => {
   let requestBody: Record<string, unknown> | undefined;
@@ -149,6 +150,20 @@ test('已输出增量后流中断不会自动重放', async () => {
       && error.retryable === false,
   );
   assert.equal(calls, 1);
+});
+
+test('SSE 可解析跨网络分片的 CRLF 事件边界', async () => {
+  const chunks = ['data: first\r', '\n\r', '\ndata: second\r\n\r\n'];
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    },
+  });
+
+  const records = [];
+  for await (const record of parseSse(body)) records.push(record);
+  assert.deepEqual(records.map((record) => record.data), ['first', 'second']);
 });
 
 async function collect(stream: AsyncIterable<ProviderStreamEvent>): Promise<ProviderStreamEvent[]> {

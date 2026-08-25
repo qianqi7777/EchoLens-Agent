@@ -3,6 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { createEventRenderer } from '../cli-event-renderer.js';
 import {
   isMessageItem,
   messageText,
@@ -18,6 +19,7 @@ import type {
   ProviderResult,
   ProviderStreamEvent,
 } from '../providers/types.js';
+import type { AgentEvent } from '../session/events.js';
 import { ReactAgent } from './react-loop.js';
 import { ToolExecutor } from './tool-executor.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -64,12 +66,13 @@ test('ReactAgent completes a tool round trip', async () => {
   await writeFile(join(workspace, 'hello.ts'), 'export const hello = true;\n');
   const registry = new ToolRegistry();
   registerWorkspaceTools(registry);
+  const events: AgentEvent[] = [];
   const result = await new ReactAgent(
     new ScriptedModel(),
     registry,
     new ToolExecutor(registry),
     { workspaceRoot: workspace },
-  ).run('读取 hello.ts');
+  ).run('读取 hello.ts', [], undefined, { onEvent: (event) => { events.push(event); } });
 
   assert.equal(result.answer, '已读取目标文件。');
   assert.equal(result.trace.some((item) => item.type === 'tool'), true);
@@ -81,6 +84,15 @@ test('ReactAgent completes a tool round trip', async () => {
   assert.ok(finalMessage && isMessageItem(finalMessage));
   assert.equal(messageText(finalMessage), result.answer);
   assert.doesNotMatch(JSON.stringify(result.items), /tool_calls|tool_call_id/);
+  assert.equal(events.some((event) => event.payload.type === 'workspace.file.observed'
+    && event.payload.operation === 'read'
+    && event.payload.path === 'hello.ts'
+    && event.payload.callId === 'call-1'), true);
+  const toolLogs: string[] = [];
+  const toolRenderer = createEventRenderer({ write: () => {}, log: (value) => { toolLogs.push(value); } });
+  events.forEach(toolRenderer.onEvent);
+  assert.equal(toolLogs.some((line) => line === '[tool] read_file started'), true);
+  assert.equal(toolLogs.some((line) => /^\[tool\] read_file ok \d+ms$/u.test(line)), true);
 });
 
 test('ReactAgent records a pure text response as the final assistant item', async () => {
@@ -227,6 +239,7 @@ test('ReactAgent projects streaming text and usage into Runtime events', async (
     },
     async *stream(): AsyncGenerator<ProviderStreamEvent> {
       yield { type: 'response.started', requestId: 'stream-request' };
+      yield { type: 'transport.retry', attempt: 2, delayMs: 10, code: 'rate_limit' };
       yield { type: 'output_text.delta', delta: '流式' };
       yield { type: 'output_text.delta', delta: '完成' };
       yield {
@@ -252,4 +265,50 @@ test('ReactAgent projects streaming text and usage into Runtime events', async (
     .join(''), '流式完成');
   assert.equal(events.some((event) => event.payload.type === 'usage.recorded'
     && event.payload.usage.totalTokens === 7), true);
+  const writes: string[] = [];
+  const logs: string[] = [];
+  const renderer = createEventRenderer({
+    write: (value) => { writes.push(value); },
+    log: (value) => { logs.push(value); },
+  });
+  events.forEach(renderer.onEvent);
+  renderer.finish();
+  assert.equal(writes.join(''), '流式完成\n');
+  assert.equal(logs.includes('[model] step 1 started'), true);
+  assert.equal(logs.includes('[model] retry 2 (rate_limit)'), true);
+
+  renderer.onEvent({
+    version: 1,
+    eventId: 'tool-without-start',
+    sessionId: 'renderer-test',
+    turnId: 'renderer-turn',
+    runId: 'renderer-run',
+    seq: 1,
+    timestamp: new Date(0).toISOString(),
+    payload: {
+      type: 'model.output.delta',
+      step: 0,
+      delta: 'partial',
+    },
+  });
+  renderer.onEvent({
+    version: 1,
+    eventId: 'denied-tool',
+    sessionId: 'renderer-test',
+    turnId: 'renderer-turn',
+    runId: 'renderer-run',
+    seq: 2,
+    timestamp: new Date(0).toISOString(),
+    payload: {
+      type: 'tool.completed',
+      callId: 'denied-call',
+      toolName: 'guarded_tool',
+      callIndex: 0,
+      status: 'denied',
+      elapsedMs: 0,
+      evidenceIds: [],
+    },
+  });
+  assert.equal(writes.join('').endsWith('partial\n'), true);
+  assert.equal(logs.at(-1), '[tool] guarded_tool denied 0ms');
 });

@@ -11,6 +11,8 @@ import {
 } from '../core/messages.js';
 import type { Permission } from '../core/permissions.js';
 import { systemPolicyMessage } from '../core/system-policy.js';
+import { ChatCompletionsCodec } from '../providers/openai-compatible/chat-codec.js';
+import { ResponsesCodec } from '../providers/openai-compatible/responses-codec.js';
 import { ContextManager } from './context-manager.js';
 import { InstructionLoader } from './instruction-loader.js';
 
@@ -110,7 +112,7 @@ test('evidence 与 metadata 投影不发送原始工具内容', async (context) 
   assert.doesNotMatch(JSON.stringify(metadata.items), /file:src\/index\.ts:1/u);
 });
 
-test('极小预算压缩后仍保留 tool_call 与 tool_result 关联', async (context) => {
+test('极小预算压缩后仍保留可编码的原始工具调用', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-context-'));
   context.after(() => rm(root, { recursive: true, force: true }));
   const manager = new ContextManager({
@@ -130,7 +132,21 @@ test('极小预算压缩后仍保留 tool_call 与 tool_result 关联', async (c
   assert.ok(call?.type === 'tool_call');
   assert.ok(result?.type === 'tool_result');
   assert.equal(result.callId, call.callId);
+  assert.deepEqual(call.arguments, { path: 'src/index.ts' });
+  assert.equal(call.rawArguments, undefined);
   assert.ok(built.estimatedTokens <= 512);
+
+  const chat = new ChatCompletionsCodec().encode('model', { items: built.items });
+  const chatMessages = chat.body.messages as Array<Record<string, unknown>>;
+  const assistant = chatMessages.find((message) => Array.isArray(message.tool_calls));
+  const chatCall = (assistant?.tool_calls as Array<Record<string, unknown>>)[0];
+  const chatFunction = chatCall?.function as Record<string, unknown>;
+  assert.deepEqual(JSON.parse(chatFunction.arguments as string), { path: 'src/index.ts' });
+
+  const responses = new ResponsesCodec().encode('model', { items: built.items });
+  const responseInput = responses.body.input as Array<Record<string, unknown>>;
+  const responseCall = responseInput.find((item) => item.type === 'function_call');
+  assert.deepEqual(JSON.parse(responseCall?.arguments as string), { path: 'src/index.ts' });
 });
 
 function longHistory(): ConversationItem[] {

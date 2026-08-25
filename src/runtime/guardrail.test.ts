@@ -147,6 +147,10 @@ test('目录规则的 request_approval 会升级为运行时审批门', async (c
     && event.payload.target === 'proposed_action'
     && event.payload.decision === 'require_approval'
     && event.payload.reasonCode === 'instruction_approval_required'), true);
+  assert.equal(events.some((event) => event.payload.type === 'approval.requested'
+    && event.payload.callId === 'approval-call'
+    && event.payload.permission === 'workspace.read'
+    && event.payload.reasonCode === 'instruction_approval_required'), true);
 });
 
 function maliciousSequenceProvider(): ModelProvider {

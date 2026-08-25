@@ -1,6 +1,7 @@
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
+import { createEventRenderer } from './cli-event-renderer.js';
 import { ensureStartupConfiguration } from './config/startup-config.js';
 import {
   JsonlEventStore,
@@ -10,7 +11,7 @@ import {
   ToolExecutor,
   ToolRegistry,
   registerWorkspaceTools,
-  type AgentEvent,
+  type AgentRunResult,
 } from './runtime/index.js';
 
 const terminal = readline.createInterface({ input, output });
@@ -49,6 +50,32 @@ if (!model) {
     storeOptions: { flushEachEvent: false },
   });
   let activeTurn: AbortController | undefined;
+  const executeTurn = async (
+    operation: (
+      signal: AbortSignal,
+      onEvent: ReturnType<typeof createEventRenderer>['onEvent'],
+    ) => Promise<AgentRunResult>,
+    errorLabel = '运行失败',
+  ): Promise<void> => {
+    activeTurn = new AbortController();
+    const renderer = createEventRenderer();
+    try {
+      const result = await operation(activeTurn.signal, renderer.onEvent);
+      renderer.finish();
+      if (!renderer.renderedText || model.capabilities.supportsStructuredOutput) {
+        console.log(`\n${result.answer}`);
+      }
+      console.log(`[${result.state}] turn=${result.turnId}`);
+      if (!result.finalSummary.verified && result.state === 'completed') {
+        console.error('结构化结果校验失败：以上内容作为未验证 raw 输出显示。');
+      }
+    } catch (error) {
+      renderer.finish();
+      console.error(`${errorLabel}：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      activeTurn = undefined;
+    }
+  };
   terminal.on('SIGINT', () => {
     if (activeTurn && !activeTurn.signal.aborted) {
       output.write('\n正在取消当前 Turn...\n');
@@ -77,42 +104,15 @@ if (!model) {
         continue;
       }
       if (prompt.startsWith('/steer ')) {
-        try {
+        await executeTurn(async (signal, onEvent) => {
           await session.steer(prompt.slice('/steer '.length));
-          activeTurn = new AbortController();
-          const renderer = createEventRenderer();
-          const result = await session.resume(activeTurn.signal, renderer.onEvent);
-          renderer.finish();
-          if (!renderer.renderedText || model.capabilities.supportsStructuredOutput) {
-            console.log(`\n${result.answer}`);
-          }
-          console.log(`[${result.state}] turn=${result.turnId}`);
-        } catch (error) {
-          console.error(`Steering 失败：${error instanceof Error ? error.message : String(error)}`);
-        } finally {
-          activeTurn = undefined;
-        }
+          return session.resume(signal, onEvent);
+        }, 'Steering 失败');
         continue;
       }
-      try {
-        activeTurn = new AbortController();
-        const renderer = createEventRenderer();
-        const result = prompt === '/resume'
-          ? await session.resume(activeTurn.signal, renderer.onEvent)
-          : await session.run(prompt, activeTurn.signal, renderer.onEvent);
-        renderer.finish();
-        if (!renderer.renderedText || model.capabilities.supportsStructuredOutput) {
-          console.log(`\n${result.answer}`);
-        }
-        console.log(`[${result.state}] turn=${result.turnId}`);
-        if (!result.finalSummary.verified && result.state === 'completed') {
-          console.error('结构化结果校验失败：以上内容作为未验证 raw 输出显示。');
-        }
-      } catch (error) {
-        console.error(`运行失败：${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        activeTurn = undefined;
-      }
+      await executeTurn((signal, onEvent) => prompt === '/resume'
+        ? session.resume(signal, onEvent)
+        : session.run(prompt, signal, onEvent));
     }
   } finally {
     await session.close();
@@ -132,36 +132,4 @@ async function resolveRequestedSession(
   const sessions = await JsonlEventStore.list(sessionRoot);
   if (!sessions[0]) throw new Error('没有可恢复的 Session');
   return sessions[0].sessionId;
-}
-
-function createEventRenderer(): {
-  renderedText: boolean;
-  onEvent: (event: AgentEvent) => void;
-  finish: () => void;
-} {
-  const state = { renderedText: false, lineOpen: false };
-  return {
-    get renderedText() { return state.renderedText; },
-    onEvent(event) {
-      if (event.payload.type === 'model.output.delta') {
-        output.write(event.payload.delta);
-        state.renderedText = true;
-        state.lineOpen = true;
-      } else if (event.payload.type === 'tool.started') {
-        if (state.lineOpen) output.write('\n');
-        console.log(`[tool] ${event.payload.toolName} started`);
-        state.lineOpen = false;
-      } else if (event.payload.type === 'tool.completed') {
-        console.log(
-          `[tool] ${event.payload.toolName} ${event.payload.status} ${event.payload.elapsedMs}ms`,
-        );
-      } else if (event.payload.type === 'model.retry') {
-        console.log(`[model] retry ${event.payload.attempt} (${event.payload.code})`);
-      }
-    },
-    finish() {
-      if (state.lineOpen) output.write('\n');
-      state.lineOpen = false;
-    },
-  };
 }

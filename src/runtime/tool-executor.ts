@@ -85,11 +85,25 @@ export class ToolExecutor {
     }
 
     let decision = await this.actionGuardrail.evaluate(tool, args, context);
+    let reservedCall = false;
     if (decision.decision === 'allow' && this.callCount >= this.maxCalls) {
       decision = deniedDecision('budget_exhausted', '已达到本回合工具调用预算', args);
+    } else if (decision.decision === 'allow') {
+      this.callCount += 1;
+      reservedCall = true;
     }
-    await onDecision?.(decision);
+    try {
+      await onDecision?.(decision);
+    } catch (error) {
+      if (reservedCall) this.callCount -= 1;
+      throw error;
+    }
     if (decision.decision === 'deny') {
+      if (decision.reasonCode === 'budget_exhausted') {
+        return wrap(decision, toolFailure('failed', 'budget_exhausted', decision.reason, {
+          data: { maxCalls: this.maxCalls },
+        }), this.maxOutputChars);
+      }
       return wrap(decision, toolFailure('denied', 'permission_denied', decision.reason, {
         data: decisionData(decision),
       }), this.maxOutputChars);
@@ -100,10 +114,10 @@ export class ToolExecutor {
       }), this.maxOutputChars);
     }
     if (context.signal.aborted) {
+      if (reservedCall) this.callCount -= 1;
       return wrap(decision, toolFailure('cancelled', 'cancelled', '工具调用已取消'), this.maxOutputChars);
     }
 
-    this.callCount += 1;
     const controller = new AbortController();
     const controlState = { timedOut: false, cancelled: false };
 

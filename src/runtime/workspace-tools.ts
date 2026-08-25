@@ -34,6 +34,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     name: 'read_file',
     description: '读取工作区内文件的指定行范围。',
     permission: 'workspace.read',
+    observation: { type: 'workspace.file', operation: 'read' },
     inputSchema: schema({
       path: pathProperty,
       start: { type: 'integer', minimum: 1, maximum: 1_000_000 },
@@ -45,6 +46,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     name: 'grep',
     description: '在工作区源码中搜索文本，跳过供应商和构建目录。',
     permission: 'workspace.read',
+    observation: { type: 'workspace.file', operation: 'search' },
     inputSchema: schema({
       pattern: { type: 'string', minLength: 1, maxLength: 2000 },
       path: pathProperty,
@@ -55,6 +57,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     name: 'list_files',
     description: '列出工作区内的源码文件，帮助 Agent 建立目录上下文。',
     permission: 'workspace.read',
+    observation: { type: 'workspace.file', operation: 'list' },
     inputSchema: schema({ path: pathProperty }, []),
     execute: listFiles,
   });

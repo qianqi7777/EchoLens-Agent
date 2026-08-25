@@ -49,6 +49,10 @@ export interface ToolSpec {
   description: string;
   permission: Permission;
   effect?: 'read' | 'write' | 'process' | 'network' | 'external';
+  observation?: {
+    type: 'workspace.file';
+    operation: 'read' | 'search' | 'list';
+  };
   inputSchema: JsonSchema;
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
 }

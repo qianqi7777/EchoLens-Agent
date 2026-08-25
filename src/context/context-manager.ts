@@ -211,7 +211,7 @@ function largestShrinkableItem(items: ConversationItem[]): ConversationItem | un
 function shrinkableLength(item: ConversationItem): number {
   if (item.type === 'message') return messageText(item).length;
   if (item.type === 'tool_result') return item.output.content.length;
-  return item.rawArguments?.length ?? JSON.stringify(item.arguments).length;
+  return 0;
 }
 
 function shrinkItem(item: ConversationItem): void {
@@ -221,9 +221,6 @@ function shrinkItem(item: ConversationItem): void {
   } else if (item.type === 'tool_result') {
     item.output.content = truncateText(item.output.content, target);
     item.data = undefined;
-  } else {
-    item.rawArguments = truncateText(item.rawArguments ?? JSON.stringify(item.arguments), target);
-    item.arguments = { compacted: true };
   }
 }
 

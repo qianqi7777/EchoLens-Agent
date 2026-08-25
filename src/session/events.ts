@@ -3,6 +3,7 @@ import type {
   ToolExecutionStatus,
   ToolResultItem,
 } from '../core/messages.js';
+import type { Permission } from '../core/permissions.js';
 import type { ProviderStopReason, TokenUsage } from '../providers/types.js';
 
 export const AGENT_EVENT_VERSION = 1 as const;
@@ -56,6 +57,20 @@ export type AgentEventPayload =
       decision: 'allow' | 'deny' | 'redact' | 'require_approval';
       reasonCode: string;
       callId?: string;
+    }
+  | {
+      type: 'approval.requested';
+      approvalId: string;
+      callId: string;
+      permission: Permission;
+      reasonCode: string;
+    }
+  | {
+      type: 'workspace.file.observed';
+      operation: 'read' | 'search' | 'list';
+      path: string;
+      evidenceIds: string[];
+      callId: string;
     }
   | { type: 'checkpoint.saved'; checkpoint: AgentCheckpoint }
   | { type: 'verification.completed'; verified: boolean; issueCount: number }

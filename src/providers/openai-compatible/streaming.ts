@@ -1,4 +1,3 @@
-import { textMessage } from '../../core/messages.js';
 import type {
   ProviderResult,
   ProviderStreamEvent,
@@ -6,7 +5,7 @@ import type {
 } from '../types.js';
 import { ChatCompletionsCodec } from './chat-codec.js';
 import { ResponsesCodec } from './responses-codec.js';
-import { isRecord, nonNegativeNumber, toolCallItem } from './shared.js';
+import { isRecord, nonNegativeNumber } from './shared.js';
 import type { OpenAICompatibleProtocol } from './types.js';
 import type { SseRecord } from './sse.js';
 
@@ -58,14 +57,6 @@ async function* decodeChatStream(
     }
   }
   if (!completed && finishReason === undefined) throw new Error('Chat Completions SSE 未正常结束');
-  const toolCalls = [...calls.entries()].sort(([left], [right]) => left - right)
-    .map(([index, call]) => toolCallItem(
-      `chat-tool-call-${call.id}`,
-      call.id,
-      call.name,
-      call.arguments,
-      index,
-    ));
   const payload = {
     id,
     choices: [{
@@ -87,11 +78,7 @@ async function* decodeChatStream(
       prompt_cache_hit_tokens: usage.cachedInputTokens,
     } : undefined,
   };
-  const decoded = new ChatCompletionsCodec().decode(payload, requestId ?? id);
-  const result: ProviderResult = {
-    ...decoded,
-    output: [textMessage(`chat-message-${id ?? 'stream'}`, 'assistant', text), ...toolCalls],
-  };
+  const result = new ChatCompletionsCodec().decode(payload, requestId ?? id);
   yield { type: 'response.completed', result };
 }
 
