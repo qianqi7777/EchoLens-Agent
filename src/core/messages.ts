@@ -6,6 +6,7 @@ export type ToolErrorCode =
   | 'unknown_tool'
   | 'invalid_arguments'
   | 'permission_denied'
+  | 'approval_required'
   | 'budget_exhausted'
   | 'timeout'
   | 'cancelled'
@@ -53,6 +54,7 @@ export interface ToolOutputMetadata {
   returnedChars: number;
   truncated: boolean;
   redactions: string[];
+  guardrailFlags?: string[];
 }
 
 export interface MessageItem {
@@ -71,6 +73,7 @@ export interface ToolCallItem {
   rawArguments?: string;
   argumentParseError?: string;
   callIndex: number;
+  dependsOn?: string[];
 }
 
 export interface ToolResultItem {

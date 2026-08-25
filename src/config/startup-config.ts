@@ -120,6 +120,7 @@ async function directConfiguration(
     AGENT_DIRECT_PROTOCOL: protocol,
     AGENT_DIRECT_CREDENTIAL_REF: 'env:AGENT_DIRECT_API_KEY',
     AGENT_DIRECT_PRIVACY: 'full-context',
+    AGENT_DIRECT_STREAMING: 'true',
     AGENT_DIRECT_API_KEY: apiKey,
     AGENT_WORKSPACE_ROOT: env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   };

@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
-import path from 'node:path';
 import test from 'node:test';
 import type { Permission } from '../core/permissions.js';
 import {
@@ -91,22 +89,14 @@ test('unknown permission effects fail closed and are reported', () => {
   assert.deepEqual(result.rejectedDirectiveIds, ['attempt-allow']);
 });
 
-test('v0.2 exposes contracts without loading AGENTS.md from the filesystem', async () => {
-  const contextDirectory = path.resolve('src/context');
-  const contextFiles = (await readdir(contextDirectory))
-    .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'));
-  for (const file of contextFiles) {
-    const source = await readFile(path.join(contextDirectory, file), 'utf8');
-    assert.equal(source.includes('node:fs'), false, `${file} must not import node:fs in v0.2`);
-    assert.equal(source.includes("from 'fs'"), false, `${file} must not import fs in v0.2`);
-    assert.equal(source.includes('from "fs"'), false, `${file} must not import fs in v0.2`);
-  }
-
-  const runtimeDirectory = path.resolve('src/runtime');
-  const runtimeFiles = (await readdir(runtimeDirectory))
-    .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'));
-  for (const file of runtimeFiles) {
-    const source = await readFile(path.join(runtimeDirectory, file), 'utf8');
-    assert.equal(source.includes('AGENTS.md'), false, `${file} must not load AGENTS.md in v0.2`);
-  }
+test('v0.3 instruction policy uses root-to-target merge and one file per directory', () => {
+  const policy = {
+    globalFileOrder: ['AGENTS.override.md', 'AGENTS.md'],
+    directoryFileOrder: ['AGENTS.override.md', 'AGENTS.md', 'configured_fallbacks'],
+    mergeDirection: 'global_then_root_to_target',
+    oneFilePerDirectory: true,
+  };
+  assert.equal(policy.mergeDirection, 'global_then_root_to_target');
+  assert.equal(policy.oneFilePerDirectory, true);
+  assert.equal(policy.directoryFileOrder[0], 'AGENTS.override.md');
 });

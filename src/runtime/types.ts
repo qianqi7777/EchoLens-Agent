@@ -48,6 +48,7 @@ export interface ToolSpec {
   name: string;
   description: string;
   permission: Permission;
+  effect?: 'read' | 'write' | 'process' | 'network' | 'external';
   inputSchema: JsonSchema;
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
 }
@@ -55,6 +56,7 @@ export interface ToolSpec {
 export interface ToolContext {
   workspaceRoot: string;
   allowedPermissions: ReadonlySet<Permission>;
+  approvalRequiredPermissions?: ReadonlySet<Permission>;
   signal: AbortSignal;
 }
 

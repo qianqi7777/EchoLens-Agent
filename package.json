@@ -1,6 +1,6 @@
 {
   "name": "echolens-agent",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,9 +11,9 @@
     "setup": "tsx src/cli.ts --setup",
     "verify:provider": "tsx scripts/verify-provider.ts",
     "test:classification": "tsx scripts/check-test-classification.ts",
-    "test:unit": "tsx --test src/config/startup-config.test.ts src/runtime/runtime.test.ts src/runtime/structured-output.test.ts src/runtime/tool-errors.test.ts src/runtime/tool-schema.test.ts",
-    "test:contract": "tsx --test src/context/instruction-contract.test.ts src/providers/gateway/gateway-client.test.ts src/providers/openai-compatible/openai-compatible.test.ts src/providers/openai-compatible/provider-hardening.test.ts src/runtime/model-router.test.ts",
-    "test:security": "tsx --test src/runtime/path-policy.test.ts src/runtime/tool-output.test.ts",
+    "test:unit": "tsx --test src/config/startup-config.test.ts src/context/context-manager.test.ts src/runtime/runtime.test.ts src/runtime/structured-output.test.ts src/runtime/tool-errors.test.ts src/runtime/tool-scheduler.test.ts src/runtime/tool-schema.test.ts",
+    "test:contract": "tsx --test src/context/instruction-contract.test.ts src/providers/gateway/gateway-client.test.ts src/providers/openai-compatible/openai-compatible.test.ts src/providers/openai-compatible/provider-hardening.test.ts src/providers/openai-compatible/provider-streaming.test.ts src/runtime/model-router.test.ts src/session/jsonl-event-store.test.ts src/session/session-runtime.test.ts",
+    "test:security": "tsx --test src/runtime/guardrail.test.ts src/runtime/path-policy.test.ts src/runtime/tool-output.test.ts",
     "test:performance": "tsx --test src/runtime/workspace-tools.performance.test.ts",
     "test": "npm run test:classification && npm run test:unit && npm run test:contract && npm run test:security",
     "typecheck": "tsc --noEmit",

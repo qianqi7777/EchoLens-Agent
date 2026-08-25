@@ -28,6 +28,7 @@ test('PathPolicy rejects Windows namespace, ADS, short-name, reserved, and escap
     { input: 'CON.txt', code: 'reserved_name' },
     { input: 'folder.\\file.ts', code: 'trailing_dot_or_space' },
     { input: '.git\\config', code: 'git_metadata_denied' },
+    { input: '.echolens\\sessions\\private.jsonl', code: 'private_metadata_denied' },
   ];
 
   for (const example of cases) {

@@ -18,6 +18,13 @@ export interface RetryExecution<T> {
   elapsedMs: number;
 }
 
+export interface RetryNotification {
+  failedAttempt: number;
+  nextAttempt: number;
+  delayMs: number;
+  code: string;
+}
+
 const defaults: RetryPolicyOptions = {
   maxRetries: 2,
   baseDelayMs: 500,
@@ -32,6 +39,7 @@ export async function runWithRetry<T>(
   operation: (attempt: number, remainingBudgetMs: number) => Promise<T>,
   overrides: RetryPolicyOverrides = {},
   signal?: AbortSignal,
+  onRetry?: (notification: RetryNotification) => void | Promise<void>,
 ): Promise<RetryExecution<T>> {
   const policy = { ...defaults, ...overrides };
   const startedAt = policy.now();
@@ -69,6 +77,13 @@ export async function runWithRetry<T>(
       if (elapsedMs + delayMs >= policy.totalBudgetMs) {
         throw providerError.withAttemptMetadata(attempts, elapsedMs);
       }
+
+      await onRetry?.({
+        failedAttempt: attempts,
+        nextAttempt: attempts + 1,
+        delayMs,
+        code: providerError.code ?? providerError.kind,
+      });
 
       try {
         await policy.sleep(delayMs, signal);

@@ -24,6 +24,7 @@ export interface DirectRouteConfig {
   protocol: OpenAICompatibleProtocol;
   credentialRef: string;
   privacy: PrivacyLevel;
+  streaming?: boolean;
 }
 
 export interface GatewayRouteConfig {
@@ -104,8 +105,6 @@ export class ModelRouter {
 
   inspect(): RouteStatus {
     if (this.parsed.issue) return this.parsed.issue;
-    const privacyStatus = unsupportedPrivacyStatus(this.parsed.config);
-    if (privacyStatus) return privacyStatus;
     return statusFor(
       this.parsed.config,
       'configured',
@@ -126,8 +125,6 @@ export class ModelRouter {
   async connect(signal?: AbortSignal): Promise<ModelRouteConnection> {
     if (this.parsed.issue) return { status: this.parsed.issue, provider: null };
     const config = this.parsed.config;
-    const privacyStatus = unsupportedPrivacyStatus(config);
-    if (privacyStatus) return { status: privacyStatus, provider: null };
     const credential = await this.credentialResolver.resolve(config.credentialRef, {
       purpose: config.route === 'direct' ? 'direct_provider' : 'gateway_access',
       audience: config.route === 'direct' ? config.providerUrl : config.gatewayUrl,
@@ -157,7 +154,10 @@ export class ModelRouter {
         baseUrl: config.providerUrl,
         apiKey: credential.value,
         protocol: config.protocol,
-        capabilities: this.options.directCapabilities,
+        capabilities: {
+          supportsStreaming: config.streaming ?? true,
+          ...this.options.directCapabilities,
+        },
         fetch: this.options.fetch,
         requestTimeoutMs: this.options.requestTimeoutMs,
       });
@@ -276,7 +276,8 @@ export function parseModelRouteConfig(env: NodeJS.ProcessEnv): ParsedConfig {
     const providerUrl = serviceUrl(env.AGENT_DIRECT_BASE_URL);
     const credentialRef = required(env.AGENT_DIRECT_CREDENTIAL_REF);
     const protocol = protocolValue(env.AGENT_DIRECT_PROTOCOL);
-    if (!model || !providerUrl || !credentialRef || !protocol) {
+    const streaming = booleanValue(env.AGENT_DIRECT_STREAMING, true);
+    if (!model || !providerUrl || !credentialRef || !protocol || streaming === undefined) {
       return issue(
         'invalid_config',
         'direct_config_invalid',
@@ -285,7 +286,7 @@ export function parseModelRouteConfig(env: NodeJS.ProcessEnv): ParsedConfig {
       );
     }
     return {
-      config: { route: 'direct', providerUrl, model, protocol, credentialRef, privacy },
+      config: { route: 'direct', providerUrl, model, protocol, credentialRef, privacy, streaming },
     };
   }
 
@@ -336,18 +337,6 @@ function unavailable(
   return { provider: null, status: statusFor(config, state, false, reasonCode, reason) };
 }
 
-function unsupportedPrivacyStatus(config: ModelRouteConfig): RouteStatus | undefined {
-  return config.privacy === 'full-context'
-    ? undefined
-    : statusFor(
-        config,
-        'privacy_mode_unavailable',
-        false,
-        'privacy_mode_unavailable',
-        'v0.2 尚未实现上下文裁剪；metadata/evidence 模式拒绝发送模型请求',
-      );
-}
-
 function issue(
   state: RouteState,
   reasonCode: string,
@@ -378,6 +367,13 @@ function privacyValue(value: string | undefined): PrivacyLevel | undefined {
 
 function protocolValue(value: string | undefined): OpenAICompatibleProtocol | undefined {
   return value === 'chat_completions' || value === 'responses' ? value : undefined;
+}
+
+function booleanValue(value: string | undefined, defaultValue: boolean): boolean | undefined {
+  if (value === undefined || value.trim() === '') return defaultValue;
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  return undefined;
 }
 
 function serviceUrl(value: string | undefined): string | undefined {

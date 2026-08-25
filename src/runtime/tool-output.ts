@@ -36,6 +36,7 @@ export function hardenToolResult(result: ToolResult, maxOutputChars: number): To
     : redactTextWithReport(JSON.stringify({ error: safeError }));
   contentReport.redactions.forEach((kind) => redactions.add(kind));
   const content = truncate(contentReport.value, maxOutputChars);
+  const guardrailFlags = detectUntrustedOutput(contentReport.value);
   const outputMetadata = {
     hashAlgorithm: 'sha256' as const,
     contentHash: createHash('sha256').update(result.content, 'utf8').digest('hex'),
@@ -43,6 +44,7 @@ export function hardenToolResult(result: ToolResult, maxOutputChars: number): To
     returnedChars: content.length,
     truncated: content.length < contentReport.value.length,
     redactions: [...redactions].sort(),
+    guardrailFlags,
   };
 
   if (result.status === 'ok') {
@@ -87,6 +89,20 @@ export function createToolOutputContextItem(
   };
 }
 
+export function toolOutputGuardrailDecision(result: ToolResult): {
+  decision: 'allow' | 'redact';
+  reasonCode: string;
+} {
+  const metadata = result.outputMetadata;
+  if (metadata?.redactions.length) {
+    return { decision: 'redact', reasonCode: 'sensitive_output_redacted' };
+  }
+  if (metadata?.guardrailFlags?.length) {
+    return { decision: 'allow', reasonCode: 'untrusted_instruction_pattern_detected' };
+  }
+  return { decision: 'allow', reasonCode: 'untrusted_output_bounded' };
+}
+
 function truncate(value: string, limit: number): string {
   if (value.length <= limit) return value;
   let suffix = '\n[output truncated]';
@@ -95,4 +111,15 @@ function truncate(value: string, limit: number): string {
     suffix = `\n[output truncated: ${value.length - available} chars]`;
   }
   return `${value.slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
+}
+
+function detectUntrustedOutput(value: string): string[] {
+  const flags = new Set<string>();
+  if (/ignore\s+(all\s+)?previous\s+instructions?/iu.test(value)) flags.add('prompt_instruction');
+  if (/(system|developer)\s+(prompt|message)/iu.test(value)) flags.add('privileged_prompt_reference');
+  if (/<\|(?:system|developer)\|>/iu.test(value)) flags.add('role_token');
+  if (/execute\s+(?:this\s+)?(?:shell|command)|运行.{0,8}(?:命令|脚本)/iu.test(value)) {
+    flags.add('action_request');
+  }
+  return [...flags].sort();
 }

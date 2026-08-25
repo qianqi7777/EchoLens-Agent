@@ -1,4 +1,10 @@
-import type { ModelProvider, ProviderCapabilities, ProviderRequest, ProviderResult } from '../types.js';
+import type {
+  ModelProvider,
+  ProviderCapabilities,
+  ProviderRequest,
+  ProviderResult,
+  ProviderStreamEvent,
+} from '../types.js';
 import { cancelledProviderError, ProviderError, type ProviderErrorKind } from '../provider-error.js';
 import { safeProviderDetails } from '../redaction.js';
 import { createRequestSignal } from '../request-signal.js';
@@ -6,6 +12,8 @@ import { parseRetryAfter, runWithRetry, type RetryPolicyOverrides } from '../ret
 import { ChatCompletionsCodec } from './chat-codec.js';
 import { ResponsesCodec } from './responses-codec.js';
 import type { EncodedProviderRequest, OpenAICompatibleProviderOptions, ProtocolCodec } from './types.js';
+import { parseSse } from './sse.js';
+import { decodeProviderStream } from './streaming.js';
 
 const baseCapabilities: ProviderCapabilities = {
   maxContextTokens: 128_000,
@@ -39,14 +47,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResult> {
-    if (request.responseFormat && !this.capabilities.supportsStructuredOutput) {
-      throw new ProviderError({
-        kind: 'invalid_request',
-        message: '当前 Provider 未声明 Structured Outputs 能力',
-        retryable: false,
-        code: 'structured_output_unsupported',
-      });
-    }
+    this.validateRequest(request);
     const encoded = this.codec.encode(this.model, request);
     const execution = await runWithRetry(
       (_attempt, remainingBudgetMs) => this.completeOnce(
@@ -65,6 +66,141 @@ export class OpenAICompatibleProvider implements ModelProvider {
         elapsedMs: execution.elapsedMs,
       },
     };
+  }
+
+  async *stream(request: ProviderRequest): AsyncGenerator<ProviderStreamEvent> {
+    this.validateRequest(request);
+    if (!this.capabilities.supportsStreaming) {
+      throw new ProviderError({
+        kind: 'invalid_request',
+        message: '当前 Provider 未声明流式响应能力',
+        retryable: false,
+        code: 'streaming_unsupported',
+      });
+    }
+    const encoded = this.codec.encode(this.model, request);
+    const started = performance.now();
+    const retryEvents: ProviderStreamEvent[] = [];
+    const execution = await runWithRetry(
+      (_attempt, remainingBudgetMs) => this.openStreamOnce(
+        encoded,
+        request.signal,
+        Math.min(this.requestTimeoutMs, remainingBudgetMs),
+      ),
+      this.retry,
+      request.signal,
+      ({ nextAttempt, delayMs, code }) => {
+        retryEvents.push({ type: 'transport.retry', attempt: nextAttempt, delayMs, code });
+      },
+    );
+    for (const event of retryEvents) yield event;
+    const { response, attempt } = execution.value;
+    const requestId = response.headers.get('x-request-id') ?? undefined;
+    yield { type: 'response.started', requestId };
+    try {
+      for await (const event of decodeProviderStream(
+        this.codec.protocol,
+        parseSse(response.body),
+        requestId,
+      )) {
+        if (event.type === 'response.completed') {
+          yield {
+            ...event,
+            result: {
+              ...event.result,
+              transport: {
+                attempts: execution.attempts,
+                retries: execution.attempts - 1,
+                elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+              },
+            },
+          };
+        } else {
+          yield event;
+        }
+      }
+    } catch (error) {
+      if (error instanceof ProviderError) throw error;
+      if (request.signal?.aborted) throw cancelledProviderError(error);
+      if (attempt.timedOut()) {
+        throw new ProviderError({
+          kind: 'timeout',
+          message: '模型流在完成前超时',
+          retryable: false,
+          code: 'response_timeout',
+          requestId,
+          cause: error,
+        });
+      }
+      throw new ProviderError({
+        kind: 'protocol',
+        message: '模型流在完成前中断、超时或格式无效',
+        retryable: false,
+        code: 'response_stream_interrupted',
+        requestId,
+        cause: error,
+      });
+    } finally {
+      attempt.dispose();
+    }
+  }
+
+  private async openStreamOnce(
+    encoded: EncodedProviderRequest,
+    externalSignal: AbortSignal | undefined,
+    timeoutMs: number,
+  ): Promise<{ response: Response; attempt: ReturnType<typeof createRequestSignal> }> {
+    const attempt = createRequestSignal(externalSignal, timeoutMs, 'Model stream connection timed out');
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchImplementation(`${this.baseUrl}${encoded.endpoint}`, {
+          method: 'POST',
+          headers: {
+            accept: 'text/event-stream',
+            'content-type': 'application/json',
+            ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+          },
+          body: JSON.stringify({ ...encoded.body, stream: true }),
+          signal: attempt.signal,
+        });
+      } catch (error) {
+        if (externalSignal?.aborted) throw cancelledProviderError(error);
+        if (attempt.timedOut()) {
+          throw new ProviderError({
+            kind: 'timeout',
+            message: '模型流式连接超时',
+            retryable: true,
+            code: 'upstream_timeout',
+            cause: error,
+          });
+        }
+        throw new ProviderError({
+          kind: 'network',
+          message: '无法连接模型流式服务',
+          retryable: true,
+          code: 'network_error',
+          cause: error,
+        });
+      }
+      const requestId = response.headers.get('x-request-id') ?? undefined;
+      if (!response.ok) throw await providerHttpError(response, requestId);
+      return { response, attempt };
+    } catch (error) {
+      attempt.dispose();
+      throw error;
+    }
+  }
+
+  private validateRequest(request: ProviderRequest): void {
+    if (request.responseFormat && !this.capabilities.supportsStructuredOutput) {
+      throw new ProviderError({
+        kind: 'invalid_request',
+        message: '当前 Provider 未声明 Structured Outputs 能力',
+        retryable: false,
+        code: 'structured_output_unsupported',
+      });
+    }
   }
 
   private async completeOnce(

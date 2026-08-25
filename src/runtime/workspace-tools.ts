@@ -7,7 +7,9 @@ import { PathPolicy, PathPolicyError } from './path-policy.js';
 const sourceExtensions = new Set([
   '.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.java', '.kt', '.cs', '.cpp', '.h',
 ]);
-const ignoredDirectories = new Set(['.git', 'node_modules', '.venv', 'dist', 'build', '.echolens_index']);
+const ignoredDirectories = new Set([
+  '.git', '.echolens', 'node_modules', '.venv', 'dist', 'build', '.echolens_index',
+]);
 const pathProperty: JsonSchemaNode = { type: 'string', minLength: 1, maxLength: 4096 };
 const pathPolicies = new Map<string, Promise<PathPolicy>>();
 

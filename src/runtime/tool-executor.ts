@@ -2,11 +2,22 @@ import type { Permission, ToolContext, ToolResult } from './types.js';
 import { ToolRegistry } from './tool-registry.js';
 import { toolFailure } from './tool-result.js';
 import { hardenToolResult } from './tool-output.js';
+import {
+  DefaultProposedActionGuardrail,
+  type ProposedActionDecision,
+  type ProposedActionGuardrail,
+} from './action-guardrail.js';
 
 export interface ToolExecutorOptions {
   maxCalls?: number;
   timeoutMs?: number;
   maxOutputChars?: number;
+  actionGuardrail?: ProposedActionGuardrail;
+}
+
+export interface ToolInvocationOutcome {
+  result: ToolResult;
+  decision: ProposedActionDecision;
 }
 
 /**
@@ -19,6 +30,7 @@ export class ToolExecutor {
   private readonly maxCalls: number;
   private readonly timeoutMs: number;
   private readonly maxOutputChars: number;
+  private readonly actionGuardrail: ProposedActionGuardrail;
   private callCount = 0;
 
   constructor(
@@ -28,6 +40,7 @@ export class ToolExecutor {
     this.maxCalls = options.maxCalls ?? 24;
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.maxOutputChars = options.maxOutputChars ?? 12_000;
+    this.actionGuardrail = options.actionGuardrail ?? new DefaultProposedActionGuardrail();
   }
 
   async invoke(
@@ -35,40 +48,60 @@ export class ToolExecutor {
     args: Record<string, unknown>,
     context: ToolContext,
   ): Promise<ToolResult> {
-    return hardenToolResult(await this.invokeRaw(name, args, context), this.maxOutputChars);
+    return (await this.invokeWithDecision(name, args, context)).result;
   }
 
-  private async invokeRaw(
+  async invokeWithDecision(
     name: string,
     args: Record<string, unknown>,
     context: ToolContext,
-  ): Promise<ToolResult> {
+    onDecision?: (decision: ProposedActionDecision) => Promise<void>,
+  ): Promise<ToolInvocationOutcome> {
     let tool;
     try {
       tool = this.registry.get(name);
     } catch {
-      return toolFailure('invalid', 'unknown_tool', `未知工具：${name}`, {
+      const decision = deniedDecision('unknown_tool', `未知工具：${name}`, args);
+      await onDecision?.(decision);
+      return wrap(decision, toolFailure('invalid', 'unknown_tool', `未知工具：${name}`, {
         data: { toolName: name },
-      });
+      }), this.maxOutputChars);
     }
     if (this.callCount >= this.maxCalls) {
-      return toolFailure('failed', 'budget_exhausted', '已达到本回合工具调用预算', {
+      const decision = deniedDecision('budget_exhausted', '已达到本回合工具调用预算', args);
+      await onDecision?.(decision);
+      return wrap(decision, toolFailure('failed', 'budget_exhausted', '已达到本回合工具调用预算', {
         data: { maxCalls: this.maxCalls },
-      });
-    }
-    if (!context.allowedPermissions.has(tool.permission)) {
-      return toolFailure('denied', 'permission_denied', `没有工具权限：${tool.permission}`, {
-        data: { permission: tool.permission },
-      });
+      }), this.maxOutputChars);
     }
 
     const validation = this.registry.validate(name, args);
     if (!validation.valid) {
-      return toolFailure('invalid', 'invalid_arguments', '工具参数不符合 Schema', {
+      const decision = deniedDecision('invalid_arguments', '工具参数不符合 Schema', args);
+      await onDecision?.(decision);
+      return wrap(decision, toolFailure('invalid', 'invalid_arguments', '工具参数不符合 Schema', {
         data: { issues: validation.issues },
-      });
+      }), this.maxOutputChars);
     }
-    if (context.signal.aborted) return toolFailure('cancelled', 'cancelled', '工具调用已取消');
+
+    let decision = await this.actionGuardrail.evaluate(tool, args, context);
+    if (decision.decision === 'allow' && this.callCount >= this.maxCalls) {
+      decision = deniedDecision('budget_exhausted', '已达到本回合工具调用预算', args);
+    }
+    await onDecision?.(decision);
+    if (decision.decision === 'deny') {
+      return wrap(decision, toolFailure('denied', 'permission_denied', decision.reason, {
+        data: decisionData(decision),
+      }), this.maxOutputChars);
+    }
+    if (decision.decision === 'require_approval') {
+      return wrap(decision, toolFailure('denied', 'approval_required', decision.reason, {
+        data: decisionData(decision),
+      }), this.maxOutputChars);
+    }
+    if (context.signal.aborted) {
+      return wrap(decision, toolFailure('cancelled', 'cancelled', '工具调用已取消'), this.maxOutputChars);
+    }
 
     this.callCount += 1;
     const controller = new AbortController();
@@ -76,24 +109,31 @@ export class ToolExecutor {
 
     try {
       const result = await withExecutionControls(
-        Promise.resolve().then(() => tool.execute(args, { ...context, signal: controller.signal })),
+        Promise.resolve().then(() => tool.execute(
+          decision.normalizedArguments,
+          { ...context, signal: controller.signal },
+        )),
         this.timeoutMs,
         controller,
         context.signal,
         controlState,
       );
-      return result;
+      return wrap(decision, result, this.maxOutputChars);
     } catch {
       if (controlState.timedOut) {
-        return toolFailure('timeout', 'timeout', '工具执行超时', {
+        return wrap(decision, toolFailure('timeout', 'timeout', '工具执行超时', {
           retryable: true,
           data: { timeoutMs: this.timeoutMs },
-        });
+        }), this.maxOutputChars);
       }
       if (controlState.cancelled || context.signal.aborted) {
-        return toolFailure('cancelled', 'cancelled', '工具调用已取消');
+        return wrap(
+          decision,
+          toolFailure('cancelled', 'cancelled', '工具调用已取消'),
+          this.maxOutputChars,
+        );
       }
-      return toolFailure('failed', 'tool_failed', '工具执行失败');
+      return wrap(decision, toolFailure('failed', 'tool_failed', '工具执行失败'), this.maxOutputChars);
     }
   }
 
@@ -101,6 +141,38 @@ export class ToolExecutor {
     this.callCount = 0;
   }
 
+  restoreBudget(callsUsed: number): void {
+    if (!Number.isInteger(callsUsed) || callsUsed < 0) throw new Error('工具预算状态无效');
+    this.callCount = callsUsed;
+  }
+
+  callsUsed(): number {
+    return this.callCount;
+  }
+
+}
+
+function wrap(
+  decision: ProposedActionDecision,
+  result: ToolResult,
+  maxOutputChars: number,
+): ToolInvocationOutcome {
+  return { decision, result: hardenToolResult(result, maxOutputChars) };
+}
+
+function deniedDecision(
+  reasonCode: string,
+  reason: string,
+  args: Record<string, unknown>,
+): ProposedActionDecision {
+  return { decision: 'deny', reasonCode, reason, normalizedArguments: structuredClone(args) };
+}
+
+function decisionData(decision: ProposedActionDecision): Record<string, string> {
+  if (/^(?:invalid_path|path_|absolute_path|unc_path|device_path|drive_relative_path|alternate_data_stream|short_name|reserved_name|trailing_dot_or_space|git_metadata_denied|private_metadata_denied|reparse_point_denied|not_a_file|not_a_directory|file_too_large|workspace_changed|identity_unavailable|handle_identity_mismatch)/u.test(decision.reasonCode)) {
+    return { pathPolicyCode: decision.reasonCode };
+  }
+  return { guardrailReasonCode: decision.reasonCode };
 }
 
 async function withExecutionControls<T>(

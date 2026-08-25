@@ -17,6 +17,7 @@ export type PathPolicyErrorCode =
   | 'trailing_dot_or_space'
   | 'path_outside_workspace'
   | 'git_metadata_denied'
+  | 'private_metadata_denied'
   | 'reparse_point_denied'
   | 'path_not_found'
   | 'not_a_file'
@@ -251,6 +252,9 @@ export class PathPolicy {
     if (segments.some((segment) => segment.toLowerCase() === '.git')) {
       throw new PathPolicyError('git_metadata_denied', '拒绝访问 .git 内部目录');
     }
+    if (segments.some((segment) => segment.toLowerCase() === '.echolens')) {
+      throw new PathPolicyError('private_metadata_denied', '拒绝访问 .echolens 私有运行目录');
+    }
   }
 }
 
@@ -293,6 +297,9 @@ export function validateRelativePath(input: string): void {
     }
     if (segment.toLowerCase() === '.git') {
       throw new PathPolicyError('git_metadata_denied', '拒绝访问 .git 内部目录');
+    }
+    if (segment.toLowerCase() === '.echolens') {
+      throw new PathPolicyError('private_metadata_denied', '拒绝访问 .echolens 私有运行目录');
     }
   }
 }

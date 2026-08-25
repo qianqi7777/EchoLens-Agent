@@ -45,6 +45,12 @@ export interface ProviderRequest {
   signal?: AbortSignal;
 }
 
+export type ProviderStreamEvent =
+  | { type: 'response.started'; requestId?: string }
+  | { type: 'output_text.delta'; delta: string }
+  | { type: 'transport.retry'; attempt: number; delayMs: number; code: string }
+  | { type: 'response.completed'; result: ProviderResult };
+
 export interface ProviderResult {
   output: Array<MessageItem | ToolCallItem>;
   stopReason: ProviderStopReason;
@@ -65,4 +71,5 @@ export interface ModelProvider {
   readonly model: string;
   readonly capabilities: ProviderCapabilities;
   complete(request: ProviderRequest): Promise<ProviderResult>;
+  stream?(request: ProviderRequest): AsyncIterable<ProviderStreamEvent>;
 }

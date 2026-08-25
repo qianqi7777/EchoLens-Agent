@@ -11,7 +11,13 @@ import {
   type ToolCallItem,
   type ToolResultItem,
 } from '../core/messages.js';
-import type { ModelProvider, ProviderCapabilities, ProviderRequest, ProviderResult } from '../providers/types.js';
+import type {
+  ModelProvider,
+  ProviderCapabilities,
+  ProviderRequest,
+  ProviderResult,
+  ProviderStreamEvent,
+} from '../providers/types.js';
 import { ReactAgent } from './react-loop.js';
 import { ToolExecutor } from './tool-executor.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -161,11 +167,13 @@ test('ReactAgent keeps complete recent turns, unique IDs, and provider capabilit
   registerWorkspaceTools(registry);
   const agent = new ReactAgent(provider, registry, new ToolExecutor(registry), {
     workspaceRoot: process.cwd(),
-    maxHistoryTurns: 1,
+    maxHistoryTurns: 2,
   });
 
   const first = await agent.run('first', history);
-  assert.equal(requests[0]?.items[1]?.id, 'recent-user');
+  assert.equal(requests[0]?.items.some((item) => item.id === 'old-user'), false);
+  assert.equal(requests[0]?.items.some((item) => item.id === 'recent-user'), true);
+  assert.equal(requests[0]?.items.some((item) => item.id.startsWith('instruction-message:')), true);
   assert.equal(requests[0]?.tools, undefined);
   const replayedCalls = new Set(requests[0]?.items
     .filter((item): item is ToolCallItem => item.type === 'tool_call')
@@ -203,4 +211,45 @@ test('ReactAgent marks non-completed stop reasons as degraded', async () => {
   assert.equal(result.answer, 'partial answer');
   assert.equal(result.degraded, true);
   assert.equal(result.trace.some((item) => item.type === 'warning'), true);
+});
+
+test('ReactAgent projects streaming text and usage into Runtime events', async () => {
+  const registry = new ToolRegistry();
+  const provider: ModelProvider = {
+    model: 'stream-model',
+    capabilities: {
+      ...new ScriptedModel().capabilities,
+      supportsStreaming: true,
+      supportsStructuredOutput: false,
+    },
+    async complete(): Promise<ProviderResult> {
+      throw new Error('支持流式时不应调用 complete');
+    },
+    async *stream(): AsyncGenerator<ProviderStreamEvent> {
+      yield { type: 'response.started', requestId: 'stream-request' };
+      yield { type: 'output_text.delta', delta: '流式' };
+      yield { type: 'output_text.delta', delta: '完成' };
+      yield {
+        type: 'response.completed',
+        result: {
+          output: [textMessage('stream-final', 'assistant', '流式完成')],
+          stopReason: 'completed',
+          usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 },
+          requestId: 'stream-request',
+          transport: { attempts: 1, retries: 0, elapsedMs: 12 },
+        },
+      };
+    },
+  };
+  const events: import('../session/events.js').AgentEvent[] = [];
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: process.cwd(),
+  }).run('流式回答', [], undefined, { onEvent: (event) => { events.push(event); } });
+
+  assert.equal(result.answer, '流式完成');
+  assert.equal(events.filter((event) => event.payload.type === 'model.output.delta')
+    .map((event) => event.payload.type === 'model.output.delta' ? event.payload.delta : '')
+    .join(''), '流式完成');
+  assert.equal(events.some((event) => event.payload.type === 'usage.recorded'
+    && event.payload.usage.totalTokens === 7), true);
 });

@@ -189,7 +189,7 @@ test('gateway signed-out, expired-token, and upstream failures remain distinct',
   }
 });
 
-test('remote HTTP and unimplemented privacy projections fail closed before credentials or network', async () => {
+test('remote HTTP fails closed while implemented privacy routes connect explicitly', async () => {
   const insecure = ModelRouter.fromEnv({
     AGENT_MODEL_ROUTE: 'direct',
     AGENT_DIRECT_BASE_URL: 'http://provider.example/v1',
@@ -211,8 +211,9 @@ test('remote HTTP and unimplemented privacy projections fail closed before crede
     AGENT_DIRECT_PRIVACY: 'evidence',
   }, { credentialResolver: resolver });
   const connection = await projected.connect();
-  assert.equal(connection.provider, null);
-  assert.equal(connection.status.state, 'privacy_mode_unavailable');
-  assert.equal(projected.inspect().state, 'privacy_mode_unavailable');
-  assert.deepEqual(resolver.calls, []);
+  assert.ok(connection.provider);
+  assert.equal(connection.status.state, 'ready');
+  assert.equal(connection.status.privacy, 'evidence');
+  assert.equal(projected.inspect().state, 'configured');
+  assert.deepEqual(resolver.calls.map((call) => call.reference), ['vault:direct']);
 });
