@@ -46,7 +46,6 @@ test('云端向导只生成 Gateway 凭据引用', async () => {
       'y',
       'https://gateway.example.com',
       '',
-      'gateway-token-test',
     ]),
     env,
     projectRoot: 'D:\\EchoLens-Agent',
@@ -58,8 +57,10 @@ test('云端向导只生成 Gateway 凭据引用', async () => {
 
   assert.equal(result.route, 'gateway');
   assert.equal(env.AGENT_GATEWAY_MODEL, 'deepseek-chat');
-  assert.equal(env.AGENT_GATEWAY_CREDENTIAL_REF, 'env:AGENT_GATEWAY_ACCESS_TOKEN');
-  assert.match(written, /AGENT_GATEWAY_ACCESS_TOKEN="gateway-token-test"/u);
+  assert.equal(env.AGENT_GATEWAY_CREDENTIAL_REF, 'gateway-token:default');
+  assert.equal(env.AGENT_GATEWAY_PRIVACY, 'metadata');
+  assert.equal(env.AGENT_GATEWAY_PRIVACY_CONFIRMED, 'true');
+  assert.doesNotMatch(written, /^AGENT_GATEWAY_ACCESS_TOKEN=/mu);
   assert.doesNotMatch(written, /AGENT_DIRECT_API_KEY/u);
 });
 

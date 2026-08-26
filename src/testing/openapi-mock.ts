@@ -27,10 +27,13 @@ export async function startGatewayOpenApiMock(
     void handleRequest(document, selections, requests, request)
       .then((mock) => {
         response.statusCode = mock.status;
-        response.setHeader('content-type', 'application/json');
         response.setHeader('x-request-id', `mock-${requests.length}`);
         for (const [name, value] of Object.entries(mock.headers)) response.setHeader(name, value);
-        response.end(JSON.stringify(mock.body));
+        if (mock.body === undefined) response.end();
+        else {
+          response.setHeader('content-type', 'application/json');
+          response.end(JSON.stringify(mock.body));
+        }
       })
       .catch((error) => {
         response.statusCode = 500;
@@ -76,7 +79,7 @@ async function handleRequest(
   if (!unresolved) throw new Error(`OpenAPI response ${status} is missing for ${key}`);
   const response = resolveReference(document, unresolved);
   const media = response.content?.['application/json'];
-  if (!media) throw new Error(`OpenAPI JSON response ${status} is missing for ${key}`);
+  if (!media) return { status, headers: selection.headers ?? {}, body: undefined };
   const body = selectedExample(media, selection.example);
   return { status, headers: selection.headers ?? {}, body };
 }

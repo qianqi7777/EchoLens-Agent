@@ -145,18 +145,14 @@ async function gatewayConfiguration(
     env.AGENT_GATEWAY_URL ?? env.AGENT_DEFAULT_GATEWAY_URL,
   );
   const model = await askRequired(terminal, '云端模型', env.AGENT_GATEWAY_MODEL ?? 'deepseek-chat');
-  const accessToken = await askRequired(
-    terminal,
-    'Gateway Access Token（仅写入本机 .env.local，输入内容当前会显示）',
-    env.AGENT_GATEWAY_ACCESS_TOKEN,
-  );
+  notify('Gateway 不在首次设置中收集 Token。请完成设置后运行 npm run gateway:login。');
   return {
     AGENT_MODEL_ROUTE: 'gateway',
     AGENT_GATEWAY_URL: gatewayUrl,
     AGENT_GATEWAY_MODEL: model,
-    AGENT_GATEWAY_CREDENTIAL_REF: 'env:AGENT_GATEWAY_ACCESS_TOKEN',
-    AGENT_GATEWAY_PRIVACY: 'full-context',
-    AGENT_GATEWAY_ACCESS_TOKEN: accessToken,
+    AGENT_GATEWAY_CREDENTIAL_REF: 'gateway-token:default',
+    AGENT_GATEWAY_PRIVACY: 'metadata',
+    AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
     AGENT_WORKSPACE_ROOT: env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   };
 }

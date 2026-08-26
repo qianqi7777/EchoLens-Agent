@@ -6,6 +6,9 @@ coverage/
 .env.*
 !.env.example
 *.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .DS_Store
 Thumbs.db
 studydocs/

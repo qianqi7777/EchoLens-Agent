@@ -1,0 +1,23 @@
+[Unit]
+Description=EchoLens Model Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=echolens-gateway
+Group=echolens-gateway
+WorkingDirectory=/opt/echolens-agent/current
+EnvironmentFile=/etc/echolens-gateway/gateway.env
+ExecStart=/usr/bin/node server/model-gateway/dist/main.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/echolens-gateway
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

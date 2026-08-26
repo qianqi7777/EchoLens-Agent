@@ -10,6 +10,7 @@
 - 支持 Chat Completions 与 Responses 两种 Provider 协议
 - 支持流式文本、连接前分类重试、Usage 与 Request ID 追踪
 - 提供 Gateway 登录状态、模型能力目录和 OpenAPI 客户端契约
+- 提供独立 Gateway MVP：Device Flow、Token 刷新/撤销、固定上游代理、SSE、用量和限流
 - 执行 `list_files`、`read_file`、`grep` 只读工具
 - 使用单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
@@ -89,6 +90,10 @@ contracts/
 
 ## 当前边界
 
-这是只读代码 Agent，不是完整 Coding Agent。Gateway 服务端、设备登录、写文件、
-Shell、审批交互、沙箱和回滚尚未实现。远程 Gateway 客户端不具备读取工作区或执行
-本地工具的权限。
+这是只读代码 Agent，不是完整 Coding Agent。写文件、Shell、审批交互、沙箱和回滚仍未
+实现。远程 Gateway 只代理模型请求，不具备读取工作区或执行本地工具的权限。
+
+Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
+完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于
+`server/model-gateway/deploy/`。水平扩展前仍需将限流状态迁移到共享基础设施，并接入
+正式账号系统与云 Secret Store。

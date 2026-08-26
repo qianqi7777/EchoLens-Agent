@@ -41,6 +41,17 @@ test('route selection is explicit and legacy local/cloud routes only produce mig
     }).inspect().reasonCode,
     'privacy_not_configured',
   );
+  assert.equal(
+    ModelRouter.fromEnv({
+      AGENT_MODEL_ROUTE: 'gateway',
+      AGENT_GATEWAY_URL: 'https://gateway.example',
+      AGENT_GATEWAY_MODEL: 'model',
+      AGENT_GATEWAY_CREDENTIAL_REF: 'env:GATEWAY_TOKEN',
+      AGENT_GATEWAY_PRIVACY: 'metadata',
+      GATEWAY_TOKEN: 'unused',
+    }).inspect().reasonCode,
+    'gateway_privacy_confirmation_required',
+  );
 });
 
 test('direct route resolves only its own credential and exposes explicit capabilities', async () => {
@@ -84,6 +95,7 @@ test('gateway route uses its own credential, discovers capabilities, and execute
       AGENT_GATEWAY_MODEL: 'deepseek-chat',
       AGENT_GATEWAY_CREDENTIAL_REF: 'vault:gateway',
       AGENT_GATEWAY_PRIVACY: 'full-context',
+      AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
       AGENT_DIRECT_CREDENTIAL_REF: 'vault:direct',
     }, { credentialResolver: resolver });
 
@@ -115,6 +127,7 @@ test('gateway model discovery can select the Responses protocol without fallback
       AGENT_GATEWAY_MODEL: 'responses-example',
       AGENT_GATEWAY_CREDENTIAL_REF: 'env:GATEWAY_TOKEN',
       AGENT_GATEWAY_PRIVACY: 'full-context',
+      AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
       GATEWAY_TOKEN: 'gateway-token',
     });
     const connection = await router.connect();
@@ -138,6 +151,7 @@ test('gateway network failures are distinct from upstream model failures', async
     AGENT_GATEWAY_MODEL: 'deepseek-chat',
     AGENT_GATEWAY_CREDENTIAL_REF: 'env:GATEWAY_TOKEN',
     AGENT_GATEWAY_PRIVACY: 'full-context',
+    AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
     GATEWAY_TOKEN: 'gateway-token',
   }, {
     fetch: async () => { throw new TypeError('connection refused'); },
@@ -177,6 +191,7 @@ test('gateway signed-out, expired-token, and upstream failures remain distinct',
         AGENT_GATEWAY_MODEL: 'deepseek-chat',
         AGENT_GATEWAY_CREDENTIAL_REF: 'env:GATEWAY_TOKEN',
         AGENT_GATEWAY_PRIVACY: 'full-context',
+        AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
         GATEWAY_TOKEN: 'gateway-token',
       });
       const connection = await router.connect();

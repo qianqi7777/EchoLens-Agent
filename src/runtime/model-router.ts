@@ -1,5 +1,7 @@
 import {
   EnvironmentCredentialResolver,
+  CompositeCredentialResolver,
+  GatewayTokenCredentialResolver,
   type CredentialResolver,
 } from '../credentials/index.js';
 import {
@@ -91,7 +93,10 @@ export class ModelRouter {
   static fromEnv(env: NodeJS.ProcessEnv = process.env, options: ModelRouterOptions = {}): ModelRouter {
     return new ModelRouter(
       parseModelRouteConfig(env),
-      options.credentialResolver ?? new EnvironmentCredentialResolver(env),
+      options.credentialResolver ?? new CompositeCredentialResolver([
+        new EnvironmentCredentialResolver(env),
+        new GatewayTokenCredentialResolver(undefined, options.fetch),
+      ]),
       options,
     );
   }
@@ -293,6 +298,14 @@ export function parseModelRouteConfig(env: NodeJS.ProcessEnv): ParsedConfig {
   const model = required(env.AGENT_GATEWAY_MODEL);
   const gatewayUrl = serviceUrl(env.AGENT_GATEWAY_URL);
   const credentialRef = required(env.AGENT_GATEWAY_CREDENTIAL_REF);
+  if (env.AGENT_GATEWAY_PRIVACY_CONFIRMED !== 'true') {
+    return issue(
+      'invalid_config',
+      'gateway_privacy_confirmation_required',
+      '首次使用 Gateway 前必须确认远程上下文隐私提示',
+      requestedRoute,
+    );
+  }
   if (!model || !gatewayUrl || !credentialRef) {
     return issue(
       'invalid_config',

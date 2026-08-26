@@ -7,7 +7,8 @@ const packageJson = JSON.parse(await readFile('package.json', 'utf8')) as {
   scripts?: Record<string, string>;
 };
 const scripts = packageJson.scripts ?? {};
-const testFiles = await findTestFiles(path.resolve('src'));
+const testRoots = ['src', 'server'].map((directory) => path.resolve(directory));
+const testFiles = (await Promise.all(testRoots.map(findTestFiles))).flat().sort();
 const errors: string[] = [];
 
 for (const file of testFiles) {
