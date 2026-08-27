@@ -130,10 +130,18 @@ export class ModelRouter {
   async connect(signal?: AbortSignal): Promise<ModelRouteConnection> {
     if (this.parsed.issue) return { status: this.parsed.issue, provider: null };
     const config = this.parsed.config;
-    const credential = await this.credentialResolver.resolve(config.credentialRef, {
-      purpose: config.route === 'direct' ? 'direct_provider' : 'gateway_access',
-      audience: config.route === 'direct' ? config.providerUrl : config.gatewayUrl,
-    });
+    let credential;
+    try {
+      credential = await this.credentialResolver.resolve(config.credentialRef, {
+        purpose: config.route === 'direct' ? 'direct_provider' : 'gateway_access',
+        audience: config.route === 'direct' ? config.providerUrl : config.gatewayUrl,
+      });
+    } catch (error) {
+      if (config.route === 'gateway' && error instanceof GatewayClientError) {
+        return unavailable(config, gatewayState(error), error.code, error.message);
+      }
+      throw error;
+    }
 
     if (credential.status === 'unsupported_reference') {
       return unavailable(

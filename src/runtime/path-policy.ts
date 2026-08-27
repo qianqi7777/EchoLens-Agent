@@ -1,5 +1,5 @@
 import type { BigIntStats, Dirent } from 'node:fs';
-import { lstat, open, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readdir, realpath, stat, unlink, type FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 
 export const DEFAULT_MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
@@ -39,6 +39,11 @@ export class PathPolicyError extends Error {
 }
 
 export interface VerifiedFile {
+  canonicalPath: string;
+  handle: FileHandle;
+}
+
+export interface VerifiedCreateFile {
   canonicalPath: string;
   handle: FileHandle;
 }
@@ -123,6 +128,98 @@ export class PathPolicy {
       };
     } finally {
       await verified.handle.close();
+    }
+  }
+
+  async readFileBytes(
+    input: string,
+    maxBytes = DEFAULT_MAX_TEXT_FILE_BYTES,
+  ): Promise<{ canonicalPath: string; bytes: Buffer }> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > DEFAULT_MAX_TEXT_FILE_BYTES) {
+      throw new PathPolicyError('invalid_path', '文件读取上限必须是有效的正整数');
+    }
+    const verified = await this.openFile(input);
+    try {
+      const openedStat = await verified.handle.stat({ bigint: true }).catch((error) => {
+        throw ioError(error, '无法读取已打开文件大小');
+      });
+      if (openedStat.size > BigInt(maxBytes)) {
+        throw new PathPolicyError('file_too_large', `文件超过读取上限：${maxBytes} bytes`);
+      }
+      const buffer = Buffer.allocUnsafe(Math.min(maxBytes + 1, Number(openedStat.size) + 1));
+      const { bytesRead } = await verified.handle.read(buffer, 0, buffer.length, 0).catch((error) => {
+        throw ioError(error, '无法读取工作区文件');
+      });
+      const finalStat = await verified.handle.stat({ bigint: true }).catch((error) => {
+        throw ioError(error, '无法复核已打开文件大小');
+      });
+      if (bytesRead > maxBytes || finalStat.size > BigInt(maxBytes)) {
+        throw new PathPolicyError('file_too_large', `文件超过读取上限：${maxBytes} bytes`);
+      }
+      if (finalStat.size !== openedStat.size) {
+        throw new PathPolicyError('path_io_error', '文件在读取期间发生变化');
+      }
+      return { canonicalPath: verified.canonicalPath, bytes: buffer.subarray(0, bytesRead) };
+    } finally {
+      await verified.handle.close();
+    }
+  }
+
+  async openFileForWrite(input: string): Promise<VerifiedFile> {
+    const resolved = await this.resolveExisting(input, 'file');
+    const handle = await open(resolved.candidatePath, 'r+').catch((error) => {
+      throw ioError(error, '无法以写入方式打开工作区文件');
+    });
+    try {
+      const canonicalPath = await this.verifyHandle(resolved, handle, 'file');
+      return { canonicalPath, handle };
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  async createFile(input: string): Promise<VerifiedCreateFile> {
+    validateRelativePath(input);
+    await this.assertRootIdentity();
+    const candidatePath = path.resolve(this.workspaceRoot, input);
+    this.assertInside(candidatePath);
+    this.assertForbiddenSegments(candidatePath);
+    const parentPath = path.dirname(candidatePath);
+    const parentRelative = path.relative(this.workspaceRoot, parentPath) || '.';
+    await this.resolveExisting(parentRelative, 'directory');
+    try {
+      const handle = await open(candidatePath, 'wx+');
+      try {
+        const canonicalPath = await this.verifyNewHandle(input, candidatePath, handle);
+        return { canonicalPath, handle };
+      } catch (error) {
+        await handle.close();
+        await unlink(candidatePath).catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof PathPolicyError) throw error;
+      const code = isNodeError(error) && error.code === 'EEXIST' ? 'path_io_error' : undefined;
+      throw new PathPolicyError(code ?? 'path_io_error', code ? '目标文件已存在' : '无法创建工作区文件');
+    }
+  }
+
+  async deleteFile(input: string): Promise<string> {
+    const verified = await this.openFile(input);
+    try {
+      try {
+        await unlink(verified.canonicalPath);
+      } catch (error) {
+        // Some Windows file systems reject unlink while a read handle is open.
+        await verified.handle.close();
+        await unlink(verified.canonicalPath).catch((retryError) => {
+          throw ioError(retryError, '无法删除工作区文件');
+        });
+      }
+      return verified.canonicalPath;
+    } finally {
+      await verified.handle.close().catch(() => undefined);
     }
   }
 
@@ -212,6 +309,28 @@ export class PathPolicy {
       throw new PathPolicyError('handle_identity_mismatch', '路径在检查和打开之间发生变化');
     }
     return finalPath;
+  }
+
+  private async verifyNewHandle(input: string, candidatePath: string, handle: FileHandle): Promise<string> {
+    const handleStat = await handle.stat({ bigint: true }).catch((error) => {
+      throw ioError(error, '无法读取新建文件句柄');
+    });
+    if (!handleStat.isFile()) throw new PathPolicyError('not_a_file', '新建目标不是普通文件');
+    await this.assertRootIdentity();
+    const parentPath = path.dirname(candidatePath);
+    await this.assertNoLinkComponents(parentPath);
+    const canonicalPath = await realpath(candidatePath).catch((error) => {
+      throw ioError(error, '新建后无法解析目标路径');
+    });
+    this.assertInside(canonicalPath);
+    this.assertForbiddenSegments(canonicalPath);
+    const finalStat = await stat(canonicalPath, { bigint: true }).catch((error) => {
+      throw ioError(error, '新建后无法读取目标路径');
+    });
+    if (!sameIdentity(identity(handleStat), identity(finalStat))) {
+      throw new PathPolicyError('handle_identity_mismatch', `文件在创建期间发生变化：${input}`);
+    }
+    return canonicalPath;
   }
 
   private async assertRootIdentity(): Promise<void> {

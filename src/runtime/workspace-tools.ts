@@ -3,6 +3,8 @@ import type { JsonSchema, JsonSchemaNode, ToolContext, ToolResult } from './type
 import { ToolRegistry } from './tool-registry.js';
 import { toolFailure, toolSuccess } from './tool-result.js';
 import { PathPolicy, PathPolicyError } from './path-policy.js';
+import { applyPatch, PatchError, saveEditCheckpoint } from './structured-patch.js';
+import { runVerification, selectVerificationPlan } from './verification.js';
 
 const sourceExtensions = new Set([
   '.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.java', '.kt', '.cs', '.cpp', '.h',
@@ -61,6 +63,95 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     inputSchema: schema({ path: pathProperty }, []),
     execute: listFiles,
   });
+  registry.register({
+    name: 'apply_patch',
+    description: '预览并应用 UTF-8 文本文件的结构化 Patch；每次写入都需要显式审批。',
+    permission: 'workspace.write',
+    effect: 'write',
+    inputSchema: schema({
+      patch: {
+        type: 'object',
+        properties: {
+          version: { type: 'integer', const: 1 },
+          operations: {
+            type: 'array', minItems: 1, maxItems: 64,
+            items: {
+              type: 'object',
+              properties: {
+                op: { type: 'string', enum: ['replace', 'create', 'delete'] },
+                path: pathProperty,
+                oldString: { type: 'string', maxLength: 1_000_000 },
+                newString: { type: 'string', maxLength: 1_000_000 },
+                content: { type: 'string', maxLength: 1_000_000 },
+                expectedFileHash: { type: 'string', maxLength: 200 },
+                expectedContext: {
+                  type: 'object',
+                  properties: { before: { type: 'string', maxLength: 20_000 }, after: { type: 'string', maxLength: 20_000 } },
+                  additionalProperties: false,
+                },
+              },
+              required: ['op', 'path'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['version', 'operations'],
+        additionalProperties: false,
+      },
+    }, ['patch']),
+    execute: applyStructuredPatch,
+  });
+  registry.register({
+    name: 'verify_changes',
+    description: '根据改动文件运行受控类型检查和测试，并区分通过、失败、跳过与超时。',
+    permission: 'process.exec',
+    effect: 'process',
+    inputSchema: schema({
+      changedFiles: { type: 'array', maxItems: 128, items: pathProperty },
+    }, []),
+    execute: verifyChanges,
+  });
+}
+
+async function applyStructuredPatch(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+  try {
+    const result = await applyPatch(context.workspaceRoot, args.patch);
+    const checkpointId = await saveEditCheckpoint(context.workspaceRoot, result.checkpoint);
+    const diff = result.preview.files.map((file) => file.diff).join('\n\n');
+    return toolSuccess(
+      diff || '[info] Patch 没有产生可见差异',
+      `已应用 ${result.preview.changedFiles.length} 个文件的 Patch，checkpoint=${checkpointId}`,
+      result.preview.changedFiles.map((file) => `file:${file}`),
+      {
+        changedFiles: result.preview.changedFiles,
+        workspaceRevision: result.preview.workspaceRevision.value,
+        checkpointId,
+      },
+    );
+  } catch (error) {
+    if (error instanceof PatchError) {
+      const status = error.code.includes('context') || error.code.includes('hash') || error.code.includes('invalid')
+        ? 'invalid' : error.code.includes('rollback') ? 'failed' : 'denied';
+      return toolFailure(status, error.code, error.message, {
+        data: { patchCode: error.code, path: error.path },
+      });
+    }
+    return toolFailure('failed', 'tool_failed', 'Patch 执行失败');
+  }
+}
+
+async function verifyChanges(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+  const changedFiles = Array.isArray(args.changedFiles)
+    ? args.changedFiles.filter((value): value is string => typeof value === 'string')
+    : [];
+  const plan = await selectVerificationPlan(context.workspaceRoot, changedFiles);
+  if (plan.commands.length === 0) return toolSuccess(plan.reason, '没有可运行的验证项');
+  const results = await runVerification(plan, { signal: context.signal });
+  const content = results.map((result) => `${result.id}: ${result.status} - ${result.summary}`).join('\n');
+  const failed = results.some((result) => result.status === 'failed' || result.status === 'timeout');
+  return failed
+    ? toolFailure('failed', 'verification_failed', content, { data: { verification: results } })
+    : toolSuccess(content, '验证完成', [], { verification: results });
 }
 
 async function readFile(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {

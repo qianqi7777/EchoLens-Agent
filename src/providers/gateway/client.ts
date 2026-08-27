@@ -150,57 +150,13 @@ export class GatewayClient {
   }
 
   private async getJson(path: string, externalSignal?: AbortSignal): Promise<unknown> {
-    const attempt = createRequestSignal(
-      externalSignal,
-      this.requestTimeoutMs,
-      'Gateway request timed out',
-    );
-    try {
-      let response: Response;
-      try {
-        response = await this.fetchImplementation(`${this.gatewayUrl}${path}`, {
-          method: 'GET',
-          headers: { authorization: `Bearer ${this.options.accessToken}` },
-          signal: attempt.signal,
-        });
-      } catch (error) {
-        if (externalSignal?.aborted) {
-          throw new GatewayClientError({
-            code: 'request_cancelled',
-            message: 'Gateway 请求已取消',
-            retryable: false,
-            cause: error,
-          });
-        }
-        throw new GatewayClientError({
-          code: 'gateway_unreachable',
-          message: attempt.timedOut() ? 'Gateway 请求超时' : '无法连接 Gateway',
-          retryable: true,
-          cause: error,
-        });
-      }
-
-      const headerRequestId = response.headers.get('x-request-id') ?? undefined;
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch (error) {
-        throw new GatewayClientError({
-          code: 'invalid_gateway_response',
-          message: 'Gateway 返回了无法解析的响应',
-          retryable: false,
-          status: response.status,
-          requestId: headerRequestId,
-          cause: error,
-        });
-      }
-
-      const requestId = headerRequestId ?? stringField(payload, 'request_id');
-      if (!response.ok) throw gatewayHttpError(response, payload, requestId);
-      return payload;
-    } finally {
-      attempt.dispose();
-    }
+    const { response, payload } = await this.request(path, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.options.accessToken}` },
+    }, externalSignal);
+    if (!response.ok) throw gatewayHttpError(response, payload, requestId(response, payload));
+    if (payload === undefined) throw invalidGatewayResponse('Gateway 返回了空响应', response.status);
+    return payload;
   }
 
   private async postForm(
@@ -208,14 +164,24 @@ export class GatewayClient {
     values: Record<string, string>,
     externalSignal?: AbortSignal,
   ): Promise<{ response: Response; payload: unknown }> {
+    return this.request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(values).toString(),
+    }, externalSignal);
+  }
+
+  private async request(
+    path: string,
+    init: RequestInit,
+    externalSignal?: AbortSignal,
+  ): Promise<{ response: Response; payload: unknown }> {
     const attempt = createRequestSignal(externalSignal, this.requestTimeoutMs, 'Gateway request timed out');
     try {
       let response: Response;
       try {
         response = await this.fetchImplementation(`${this.gatewayUrl}${path}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams(values).toString(),
+          ...init,
           signal: attempt.signal,
         });
       } catch (error) {
@@ -236,7 +202,7 @@ export class GatewayClient {
       } catch (error) {
         throw new GatewayClientError({
           code: 'invalid_gateway_response',
-          message: 'Gateway 表单响应无法解析',
+          message: 'Gateway 返回了无法解析的响应',
           retryable: false,
           status: response.status,
           requestId: response.headers.get('x-request-id') ?? undefined,
@@ -329,12 +295,17 @@ function decodeCapabilities(payload: unknown, model: string): ProviderCapabiliti
   };
 }
 
-function invalidGatewayResponse(message: string): GatewayClientError {
+function invalidGatewayResponse(message: string, status?: number): GatewayClientError {
   return new GatewayClientError({
     code: 'invalid_gateway_response',
     message,
     retryable: false,
+    status,
   });
+}
+
+function requestId(response: Response, payload: unknown): string | undefined {
+  return response.headers.get('x-request-id') ?? stringField(payload, 'request_id');
 }
 
 function defaultGatewayCode(status: number): GatewayErrorCode {
@@ -409,20 +380,6 @@ function stringField(value: unknown, field: string): string | undefined {
 
 function booleanField(value: unknown, field: string): boolean | undefined {
   return isRecord(value) && typeof value[field] === 'boolean' ? value[field] as boolean : undefined;
-}
-
-async function parseJsonResponse(response: Response, label: string): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch (error) {
-    throw new GatewayClientError({
-      code: 'invalid_gateway_response',
-      message: `${label} 无法解析`,
-      retryable: false,
-      status: response.status,
-      cause: error,
-    });
-  }
 }
 
 function decodeTokenSet(payload: unknown): GatewayTokenSet {

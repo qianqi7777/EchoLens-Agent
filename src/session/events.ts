@@ -5,6 +5,7 @@ import type {
 } from '../core/messages.js';
 import type { Permission } from '../core/permissions.js';
 import type { ProviderStopReason, TokenUsage } from '../providers/types.js';
+import type { ApprovalDecision, ApprovalRequest } from '../runtime/approval.js';
 
 export const AGENT_EVENT_VERSION = 1 as const;
 
@@ -64,7 +65,9 @@ export type AgentEventPayload =
       callId: string;
       permission: Permission;
       reasonCode: string;
+      request?: ApprovalRequest;
     }
+  | { type: 'approval.decided'; approvalId: string; decision: ApprovalDecision['decision']; scope: ApprovalDecision['scope'] }
   | {
       type: 'workspace.file.observed';
       operation: 'read' | 'search' | 'list';

@@ -359,6 +359,9 @@ export class ReactAgent {
       this.model.capabilities.supportsParallelToolCalls,
     );
     for (const { value } of scheduled) {
+      machine.items = machine.items.filter((item) => !(item.type === 'tool_result'
+        && item.callId === value.call.callId
+        && item.error?.code === 'approval_required'));
       machine.items.push(value.item);
       machine.trace.push({ type: 'tool', message: `${value.call.name}: ${value.result.summary}` });
     }
@@ -395,6 +398,11 @@ export class ReactAgent {
         prepared.permissions.approvalRequests.map((request) => request.permission),
       ),
       signal: signal ?? new AbortController().signal,
+      approvalContext: {
+        sessionId: machine.sessionId,
+        runId: machine.runId,
+        callId: call.callId,
+      },
     };
     let started = performance.now();
     const outcome = await this.executor.invokeWithDecision(
@@ -411,14 +419,13 @@ export class ReactAgent {
             callId: call.callId,
           },
         });
-        if (decision.decision === 'require_approval') {
+        if (decision.reasonCode === 'approval_granted' || decision.reasonCode === 'approval_denied') {
           await emit(machine, eventSink, {
             payload: {
-              type: 'approval.requested',
+              type: 'approval.decided',
               approvalId: `${machine.runId}:${call.callId}`,
-              callId: call.callId,
-              permission: this.registry.get(call.name).permission,
-              reasonCode: decision.reasonCode,
+              decision: decision.reasonCode === 'approval_granted' ? 'allow' : 'deny',
+              scope: 'once',
             },
           });
         }
@@ -433,6 +440,18 @@ export class ReactAgent {
             },
           });
         }
+      },
+      async (request) => {
+        await emit(machine, eventSink, {
+          payload: {
+            type: 'approval.requested',
+            approvalId: request.id,
+            callId: call.callId,
+            permission: this.registry.get(call.name).permission,
+            reasonCode: request.reasonCode,
+            request,
+          },
+        });
       },
     );
     const result = outcome.result;
@@ -585,6 +604,7 @@ function toolResultItem(
 function pendingToolCalls(items: readonly ConversationItem[]): ToolCallItem[] {
   const completed = new Set(items
     .filter((item): item is ToolResultItem => item.type === 'tool_result')
+    .filter((item) => item.error?.code !== 'approval_required')
     .map((item) => item.callId));
   const lastMessage = items.findLastIndex((item) => item.type === 'message');
   return items.slice(lastMessage + 1)

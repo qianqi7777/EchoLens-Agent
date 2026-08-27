@@ -21,3 +21,7 @@ export * from './workspace-tools.js';
 export * from './model-router.js';
 export * from './react-loop.js';
 export * from './verifier.js';
+export * from './approval.js';
+export * from './workspace-snapshot.js';
+export * from './structured-patch.js';
+export * from './verification.js';

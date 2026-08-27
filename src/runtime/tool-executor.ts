@@ -3,6 +3,12 @@ import { ToolRegistry } from './tool-registry.js';
 import { toolFailure } from './tool-result.js';
 import { hardenToolResult } from './tool-output.js';
 import {
+  createApprovalRequest,
+  type ApprovalDecision,
+  type ApprovalRequest,
+  type ApprovalStore,
+} from './approval.js';
+import {
   DefaultProposedActionGuardrail,
   type ProposedActionDecision,
   type ProposedActionGuardrail,
@@ -13,6 +19,9 @@ export interface ToolExecutorOptions {
   timeoutMs?: number;
   maxOutputChars?: number;
   actionGuardrail?: ProposedActionGuardrail;
+  approvalStore?: ApprovalStore;
+  onApprovalRequest?: (request: ApprovalRequest) => Promise<void>;
+  approvalDecider?: (request: ApprovalRequest) => Promise<ApprovalDecision | undefined>;
 }
 
 export interface ToolInvocationOutcome {
@@ -31,6 +40,9 @@ export class ToolExecutor {
   private readonly timeoutMs: number;
   private readonly maxOutputChars: number;
   private readonly actionGuardrail: ProposedActionGuardrail;
+  private readonly approvalStore?: ApprovalStore;
+  private readonly onApprovalRequest?: ToolExecutorOptions['onApprovalRequest'];
+  private readonly approvalDecider?: ToolExecutorOptions['approvalDecider'];
   private callCount = 0;
 
   constructor(
@@ -41,6 +53,9 @@ export class ToolExecutor {
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.maxOutputChars = options.maxOutputChars ?? 12_000;
     this.actionGuardrail = options.actionGuardrail ?? new DefaultProposedActionGuardrail();
+    this.approvalStore = options.approvalStore;
+    this.onApprovalRequest = options.onApprovalRequest;
+    this.approvalDecider = options.approvalDecider;
   }
 
   async invoke(
@@ -56,6 +71,7 @@ export class ToolExecutor {
     args: Record<string, unknown>,
     context: ToolContext,
     onDecision?: (decision: ProposedActionDecision) => Promise<void>,
+    onApprovalRequest?: (request: ApprovalRequest) => Promise<void>,
   ): Promise<ToolInvocationOutcome> {
     let tool;
     try {
@@ -85,6 +101,32 @@ export class ToolExecutor {
     }
 
     let decision = await this.actionGuardrail.evaluate(tool, args, context);
+    if (decision.decision === 'require_approval') {
+      const request = createApprovalRequest({
+        id: context.approvalContext?.callId ?? `${tool.name}:${Date.now()}`,
+        sessionId: context.approvalContext?.sessionId,
+        runId: context.approvalContext?.runId,
+        callId: context.approvalContext?.callId,
+        toolName: tool.name,
+        permission: tool.permission,
+        arguments: decision.normalizedArguments,
+        workspaceRoot: context.workspaceRoot,
+        workspaceRevision: context.approvalContext?.workspaceRevision,
+        reasonCode: decision.reasonCode,
+        reason: decision.reason,
+        createdAt: new Date().toISOString(),
+      });
+      await this.onApprovalRequest?.(request);
+      await onApprovalRequest?.(request);
+      const remembered = await this.approvalStore?.find(request);
+      const selected = remembered ?? await this.approvalDecider?.(request);
+      if (selected) {
+        if (!remembered) await this.approvalStore?.save(request, selected);
+        decision = selected.decision === 'allow'
+          ? { ...decision, decision: 'allow', reasonCode: selected.ruleId ?? 'approval_granted', reason: selected.reason ?? '用户已批准动作' }
+          : { ...decision, decision: 'deny', reasonCode: selected.ruleId ?? 'approval_denied', reason: selected.reason ?? '用户拒绝动作' };
+      }
+    }
     let reservedCall = false;
     if (decision.decision === 'allow' && this.callCount >= this.maxCalls) {
       decision = deniedDecision('budget_exhausted', '已达到本回合工具调用预算', args);

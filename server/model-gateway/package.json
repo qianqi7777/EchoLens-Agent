@@ -2,7 +2,7 @@
   "name": "@echolens/model-gateway",
   "private": true,
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "EchoLens Agent remote model gateway MVP",
   "engines": { "node": ">=22.5" },
   "scripts": {

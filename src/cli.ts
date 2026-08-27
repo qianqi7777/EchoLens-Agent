@@ -11,6 +11,14 @@ import {
   ToolExecutor,
   ToolRegistry,
   registerWorkspaceTools,
+  JsonApprovalStore,
+  previewPatch,
+  loadEditCheckpoint,
+  rollbackCheckpoint,
+  runVerification,
+  selectVerificationPlan,
+  type ApprovalDecision,
+  type ApprovalRequest,
   type AgentRunResult,
 } from './runtime/index.js';
 
@@ -36,9 +44,15 @@ if (!model) {
   process.exitCode = 1;
   terminal.close();
 } else {
-  const agent = new ReactAgent(model, registry, new ToolExecutor(registry), {
+  const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
+  const executor = new ToolExecutor(registry, {
+    approvalStore,
+    approvalDecider: interactiveApproval,
+    timeoutMs: 120_000,
+  });
+  const agent = new ReactAgent(model, registry, executor, {
     workspaceRoot,
-    permissions: new Set(['workspace.read']),
+    permissions: new Set(['workspace.read', 'workspace.write', 'process.exec']),
     privacy: status.privacy,
   });
   const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
@@ -89,7 +103,7 @@ if (!model) {
     `Agent 已启动 | model=${status.model} | route=${status.route} | session=${session.sessionId}`,
   );
   console.log(`workspace=${workspaceRoot}`);
-  console.log('输入问题开始分析；/sessions 查看会话，/resume 恢复，/exit 退出。');
+  console.log('输入问题开始分析；/sessions 查看会话，/resume 恢复，/verify 验证，/rollback <id> 回滚，/exit 退出。');
   try {
     while (true) {
       const prompt = (await terminal.question('\n> ')).trim();
@@ -101,6 +115,20 @@ if (!model) {
           console.log(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`);
         }
         if (sessions.length === 0) console.log('暂无 Session。');
+        continue;
+      }
+      if (prompt === '/verify') {
+        const plan = await selectVerificationPlan(workspaceRoot, []);
+        const results = await runVerification(plan);
+        for (const result of results) console.log(`${result.id}: ${result.status} - ${result.summary}`);
+        continue;
+      }
+      if (prompt.startsWith('/rollback')) {
+        const requested = prompt.split(/\s+/u)[1];
+        if (!requested) { console.log('用法：/rollback <checkpoint-id>'); continue; }
+        const rollback = await rollbackCheckpoint(await loadEditCheckpoint(workspaceRoot, requested));
+        console.log(`已回滚 checkpoint=${requested}，恢复 ${rollback.restoredPaths.length} 个文件`);
+        if (rollback.skippedPaths.length) console.log(`检测到后续用户修改，跳过：${rollback.skippedPaths.join(', ')}`);
         continue;
       }
       if (prompt.startsWith('/steer ')) {
@@ -118,6 +146,32 @@ if (!model) {
     await session.close();
     terminal.close();
   }
+}
+
+async function interactiveApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
+  console.log(`\n需要审批：${request.toolName} (${request.permission})`);
+  console.log(`原因：${request.reason}`);
+  if (request.toolName === 'apply_patch') {
+    try {
+      const patch = (request.arguments as { patch?: unknown }).patch;
+      const preview = await previewPatch(request.workspaceRoot, patch);
+      console.log(`修改文件：${preview.changedFiles.join(', ')}`);
+      for (const file of preview.files) console.log(`\n${file.diff}`);
+    } catch (error) {
+      console.log(`Patch 预览失败：${error instanceof Error ? error.message : String(error)}`);
+      return { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: 'Patch 预览失败' };
+    }
+  }
+  const answer = (await terminal.question('允许执行 [y/N]：')).trim().toLowerCase();
+  if (answer !== 'y') return { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '用户拒绝' };
+  const scope = (await terminal.question('记住范围 [1=once/2=session/3=project/4=persistent]（默认 once）：')).trim();
+  const scopes = { '2': 'session', '3': 'project', '4': 'persistent' } as const;
+  return {
+    decision: 'allow',
+    scope: scopes[scope as keyof typeof scopes] ?? 'once',
+    decidedAt: new Date().toISOString(),
+    reason: '用户已批准',
+  };
 }
 
 async function resolveRequestedSession(

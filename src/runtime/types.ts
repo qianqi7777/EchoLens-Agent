@@ -61,6 +61,12 @@ export interface ToolContext {
   workspaceRoot: string;
   allowedPermissions: ReadonlySet<Permission>;
   approvalRequiredPermissions?: ReadonlySet<Permission>;
+  approvalContext?: {
+    sessionId?: string;
+    runId?: string;
+    callId?: string;
+    workspaceRevision?: string;
+  };
   signal: AbortSignal;
 }
 

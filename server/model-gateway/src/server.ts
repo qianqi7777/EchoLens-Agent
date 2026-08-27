@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type {
   GatewayAuditEvent,
   GatewayModel,
@@ -10,7 +11,6 @@ import type {
 } from './types.js';
 import {
   GatewayStateStore,
-  type DeviceAuthorizationRecord,
   type IssuedTokenRecord,
   type TokenRecord,
 } from './state-store.js';
@@ -65,7 +65,7 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     const method = (request.method ?? 'GET').toUpperCase();
     const url = new URL(request.url ?? '/', 'http://gateway.local');
     if (method === 'GET' && url.pathname === '/health') {
-      writeJson(response, 200, { status: 'ok', service_version: '0.1.0' });
+      writeJson(response, 200, { status: 'ok', service_version: '0.4.0' });
       return;
     }
     if (method === 'POST' && url.pathname === '/oauth/device/authorization') {
@@ -378,11 +378,7 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
       if (contentType.includes('text/event-stream')) {
         response.setHeader('content-type', contentType);
         const inspector = createUsageInspector(protocol, responseLimit, (usage) => { resultUsage = usage; });
-        await new Promise<void>((resolve, reject) => {
-          response.once('finish', resolve);
-          response.once('error', reject);
-          Readable.fromWeb(upstreamResponse.body as never).pipe(inspector).pipe(response);
-        });
+        await pipeline(Readable.fromWeb(upstreamResponse.body as never), inspector, response);
       } else {
         const payload = await readLimitedResponse(upstreamResponse, responseLimit);
         try { resultUsage = usageFromJson(JSON.parse(payload.toString('utf8'))); } catch { resultUsage = emptyTokenUsage(); }
@@ -458,12 +454,15 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     async close() {
       if (closed) return;
       closed = true;
-      if (server.listening) {
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => error ? reject(error) : resolve());
-        });
+      try {
+        if (server.listening) {
+          await new Promise<void>((resolve, reject) => {
+            server.close((error) => error ? reject(error) : resolve());
+          });
+        }
+      } finally {
+        state.close();
       }
-      state.close();
     },
   };
 }
@@ -472,12 +471,17 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
   const handle = createGatewayServer(options);
   try {
     await new Promise<void>((resolve, reject) => {
-      handle.server.once('error', reject);
-      handle.server.listen(options.port ?? 0, options.host ?? '127.0.0.1', resolve);
+      const onError = (error: Error) => reject(error);
+      handle.server.once('error', onError);
+      handle.server.listen(options.port ?? 0, options.host ?? '127.0.0.1', () => {
+        handle.server.off('error', onError);
+        resolve();
+      });
     });
     const address = handle.server.address();
     if (!address || typeof address === 'string') throw new Error('Gateway 地址解析失败');
-    (handle as { baseUrl: string }).baseUrl = `http://${address.address}:${address.port}`;
+    const host = address.family === 'IPv6' ? `[${address.address}]` : address.address;
+    (handle as { baseUrl: string }).baseUrl = `http://${host}:${address.port}`;
     return handle;
   } catch (error) {
     await handle.close();

@@ -10,7 +10,18 @@ export type ToolErrorCode =
   | 'budget_exhausted'
   | 'timeout'
   | 'cancelled'
-  | 'tool_failed';
+  | 'tool_failed'
+  | 'patch_invalid'
+  | 'patch_context_mismatch'
+  | 'patch_ambiguous'
+  | 'patch_hash_mismatch'
+  | 'patch_target_exists'
+  | 'patch_binary_unsupported'
+  | 'patch_limits_exceeded'
+  | 'patch_workspace_changed'
+  | 'patch_apply_failed'
+  | 'patch_rollback_failed'
+  | 'verification_failed';
 
 export interface ToolError {
   code: ToolErrorCode;

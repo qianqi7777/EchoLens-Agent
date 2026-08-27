@@ -128,7 +128,7 @@ test('OpenAPI Mock 覆盖 Device、Refresh 与 Revoke 客户端契约', async ()
   }
 });
 
-test('过期 Gateway Token 刷新失败后不再返回无效 Access Token', async () => {
+test('过期 Gateway Token 网络刷新失败时保留 Gateway 不可达分类', async () => {
   let stored: StoredGatewayTokens | undefined = {
     accessToken: 'expired-access',
     refreshToken: 'expired-refresh',
@@ -144,6 +144,36 @@ test('过期 Gateway Token 刷新失败后不再返回无效 Access Token', asyn
     store,
     async () => { throw new Error('offline'); },
     () => Date.parse('2026-08-26T00:00:00Z'),
+  );
+
+  await assert.rejects(
+    resolver.resolve('gateway-token:default', {
+      purpose: 'gateway_access',
+      audience: 'https://gateway.example.com',
+    }),
+    (error: unknown) => error instanceof GatewayClientError && error.code === 'gateway_unreachable',
+  );
+});
+
+test('过期 Gateway Refresh Token 被服务端拒绝后要求重新登录', async () => {
+  const store: GatewayTokenStore = {
+    async load() {
+      return {
+        accessToken: 'expired-access',
+        refreshToken: 'expired-refresh',
+        expiresAt: new Date(0).toISOString(),
+        scope: ['models:read'],
+      };
+    },
+    async save() { throw new Error('不应保存'); },
+    async clear() {},
+  };
+  const resolver = new GatewayTokenCredentialResolver(
+    store,
+    async () => new Response(JSON.stringify({ error: 'invalid_grant' }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }),
   );
 
   const result = await resolver.resolve('gateway-token:default', {

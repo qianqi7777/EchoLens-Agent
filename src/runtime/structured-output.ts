@@ -35,7 +35,7 @@ export interface VerifierOutput {
 
 export interface FinalVerification {
   command: string;
-  status: 'passed' | 'failed' | 'not_run';
+  status: 'passed' | 'failed' | 'skipped' | 'timeout' | 'not_run';
   summary: string;
   evidenceIds: string[];
 }
@@ -137,7 +137,7 @@ export const FINAL_SUMMARY_SCHEMA: JsonSchema = {
         type: 'object',
         properties: {
           command: { type: 'string', maxLength: 4000 },
-          status: { type: 'string', enum: ['passed', 'failed', 'not_run'] },
+          status: { type: 'string', enum: ['passed', 'failed', 'skipped', 'timeout', 'not_run'] },
           summary: { type: 'string', minLength: 1, maxLength: 4000 },
           evidenceIds: {
             type: 'array',
@@ -158,7 +158,7 @@ export const FINAL_SUMMARY_SCHEMA: JsonSchema = {
 
 export const FINAL_SUMMARY_FORMAT = {
   name: 'echolens_final_summary',
-  description: 'Verified structure for the final read-only agent result.',
+  description: 'Verified structure for the final safe-edit agent result.',
   schema: FINAL_SUMMARY_SCHEMA,
   strict: true as const,
 };

@@ -1,7 +1,7 @@
 import { createDefaultGatewayTokenStore } from './windows-protected-token-store.js';
 import type { GatewayTokenStore } from './gateway-token-store.js';
 import type { CredentialContext, CredentialResolution, CredentialResolver } from './types.js';
-import { GatewayClient } from '../providers/gateway/client.js';
+import { GatewayClient, GatewayClientError } from '../providers/gateway/client.js';
 
 export class GatewayTokenCredentialResolver implements CredentialResolver {
   constructor(
@@ -38,11 +38,14 @@ export class GatewayTokenCredentialResolver implements CredentialResolver {
         scope: refreshed.scope,
       });
       return { status: 'resolved', value: refreshed.accessToken, expiresAt: nextExpiresAt };
-    } catch {
+    } catch (error) {
       if (expiresAt > this.now()) {
         return { status: 'resolved', value: tokens.accessToken, expiresAt: tokens.expiresAt };
       }
-      return { status: 'missing' };
+      if (error instanceof GatewayClientError && (error.status === 400 || error.status === 401)) {
+        return { status: 'missing' };
+      }
+      throw error;
     }
   }
 }
