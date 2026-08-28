@@ -4,7 +4,6 @@ import { ToolRegistry } from './tool-registry.js';
 import { toolFailure, toolSuccess } from './tool-result.js';
 import { PathPolicy, PathPolicyError } from './path-policy.js';
 import { applyPatch, PatchError, saveEditCheckpoint } from './structured-patch.js';
-import { runVerification, selectVerificationPlan } from './verification.js';
 
 const sourceExtensions = new Set([
   '.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.java', '.kt', '.cs', '.cpp', '.h',
@@ -101,16 +100,6 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     }, ['patch']),
     execute: applyStructuredPatch,
   });
-  registry.register({
-    name: 'verify_changes',
-    description: '根据改动文件运行受控类型检查和测试，并区分通过、失败、跳过与超时。',
-    permission: 'process.exec',
-    effect: 'process',
-    inputSchema: schema({
-      changedFiles: { type: 'array', maxItems: 128, items: pathProperty },
-    }, []),
-    execute: verifyChanges,
-  });
 }
 
 async function applyStructuredPatch(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
@@ -138,20 +127,6 @@ async function applyStructuredPatch(args: Record<string, unknown>, context: Tool
     }
     return toolFailure('failed', 'tool_failed', 'Patch 执行失败');
   }
-}
-
-async function verifyChanges(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-  const changedFiles = Array.isArray(args.changedFiles)
-    ? args.changedFiles.filter((value): value is string => typeof value === 'string')
-    : [];
-  const plan = await selectVerificationPlan(context.workspaceRoot, changedFiles);
-  if (plan.commands.length === 0) return toolSuccess(plan.reason, '没有可运行的验证项');
-  const results = await runVerification(plan, { signal: context.signal });
-  const content = results.map((result) => `${result.id}: ${result.status} - ${result.summary}`).join('\n');
-  const failed = results.some((result) => result.status === 'failed' || result.status === 'timeout');
-  return failed
-    ? toolFailure('failed', 'verification_failed', content, { data: { verification: results } })
-    : toolSuccess(content, '验证完成', [], { verification: results });
 }
 
 async function readFile(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {

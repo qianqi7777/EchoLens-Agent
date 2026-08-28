@@ -3,6 +3,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { createEventRenderer } from './cli-event-renderer.js';
 import { ensureStartupConfiguration } from './config/startup-config.js';
+import { TerminalUi } from './tui.js';
 import {
   JsonlEventStore,
   ModelRouter,
@@ -11,6 +12,8 @@ import {
   ToolExecutor,
   ToolRegistry,
   registerWorkspaceTools,
+  registerSandboxTools,
+  DockerSandboxAdapter,
   JsonApprovalStore,
   previewPatch,
   loadEditCheckpoint,
@@ -31,10 +34,21 @@ try {
   terminal.close();
   process.exit(1);
 }
+terminal.close();
 
 const workspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
 const registry = new ToolRegistry();
 registerWorkspaceTools(registry);
+try {
+  registerSandboxTools(registry, new DockerSandboxAdapter({
+    image: process.env.AGENT_SANDBOX_IMAGE,
+    executable: process.env.AGENT_DOCKER_EXECUTABLE,
+    user: process.env.AGENT_SANDBOX_USER,
+  }));
+} catch (error) {
+  console.error(`Sandbox 配置无效：${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
 
 const router = ModelRouter.fromEnv();
 const { status, provider: model } = await router.connect();
@@ -45,9 +59,12 @@ if (!model) {
   terminal.close();
 } else {
   const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
+  let tui: TerminalUi | undefined;
   const executor = new ToolExecutor(registry, {
     approvalStore,
-    approvalDecider: interactiveApproval,
+    approvalDecider: async (request) => tui
+      ? tui.requestApproval(request)
+      : interactiveApproval(request),
     timeoutMs: 120_000,
   });
   const agent = new ReactAgent(model, registry, executor, {
@@ -63,6 +80,29 @@ if (!model) {
     sessionId: requestedSession,
     storeOptions: { flushEachEvent: false },
   });
+  const useTui = Boolean(input.isTTY && output.isTTY && input.setRawMode);
+  if (useTui) {
+    tui = new TerminalUi({
+      model: status.model ?? 'unknown',
+      route: status.route ?? 'unknown',
+      privacy: status.privacy,
+      sessionId: session.sessionId,
+      workspaceRoot,
+      run: (prompt, signal, onEvent) => session.run(prompt, signal, onEvent),
+      resume: (signal, onEvent) => session.resume(signal, onEvent),
+      steer: (message) => session.steer(message),
+      listSessions: () => JsonlEventStore.list(sessionRoot),
+      verify: async () => runVerification(await selectVerificationPlan(workspaceRoot, [])),
+      rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
+      loadCheckpoint: (id) => loadEditCheckpoint(workspaceRoot, id),
+    });
+    try {
+      await tui.start();
+    } finally {
+      await session.close();
+    }
+    process.exitCode = 0;
+  } else {
   let activeTurn: AbortController | undefined;
   const executeTurn = async (
     operation: (
@@ -144,7 +184,7 @@ if (!model) {
     }
   } finally {
     await session.close();
-    terminal.close();
+  }
   }
 }
 

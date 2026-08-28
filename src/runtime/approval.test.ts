@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { MemoryApprovalStore, PolicyEngine, createApprovalRequest } from './approval.js';
+import { JsonApprovalStore, MemoryApprovalStore, PolicyEngine, createApprovalRequest } from './approval.js';
 
 const request = createApprovalRequest({
   id: 'approval-1', sessionId: 'session-1', toolName: 'apply_patch', permission: 'workspace.write',
@@ -26,4 +29,24 @@ test('Policy Engine deny 优先于 allow，并对副作用默认要求审批', (
   assert.equal(engine.evaluate({ toolName: 'apply_patch', permission: 'workspace.write', path: 'secrets/a.txt' }).decision, 'deny');
   assert.equal(engine.evaluate({ toolName: 'apply_patch', permission: 'workspace.write', path: 'src/a.ts' }).decision, 'allow');
   assert.equal(new PolicyEngine().evaluate({ toolName: 'run', permission: 'process.exec' }).decision, 'require_approval');
+});
+
+test('持久化审批只保存参数哈希，不保存完整 Patch 或 Shell argv', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-approval-redaction-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'approvals.json');
+  const store = new JsonApprovalStore(path);
+  const shellRequest = createApprovalRequest({
+    ...request,
+    id: 'shell-approval',
+    toolName: 'shell_exec',
+    permission: 'process.exec',
+    arguments: { executable: 'tool', args: ['opaque-private-value'] },
+  });
+  await store.save(shellRequest, { decision: 'allow', scope: 'project', decidedAt: new Date().toISOString() });
+
+  const persisted = await readFile(path, 'utf8');
+  assert.doesNotMatch(persisted, /opaque-private-value/u);
+  assert.match(persisted, /argumentsHash/u);
+  assert.equal((await store.find(shellRequest))?.decision, 'allow');
 });

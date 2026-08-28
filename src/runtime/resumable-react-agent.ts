@@ -449,7 +449,6 @@ export class ReactAgent {
             callId: call.callId,
             permission: this.registry.get(call.name).permission,
             reasonCode: request.reasonCode,
-            request,
           },
         });
       },

@@ -8,6 +8,8 @@ export interface VerificationCommand {
   id: string;
   label: string;
   command: string;
+  executable: string;
+  args: readonly string[];
   cwd?: string;
   timeoutMs?: number;
   required?: boolean;
@@ -42,11 +44,11 @@ export async function selectVerificationPlan(
   const commands: VerificationCommand[] = [];
   const hasTypeScript = changedFiles.some((file) => /\.(?:ts|tsx)$/iu.test(file));
   const hasTests = changedFiles.some((file) => /(?:^|\/)(?:test|tests|__tests__)(?:\/|\.)|\.test\.[cm]?[jt]sx?$/iu.test(file));
-  if (hasTypeScript && scripts.typecheck) commands.push({ id: 'typecheck', label: 'TypeScript 类型检查', command: 'npm run typecheck', cwd: workspaceRoot, required: true });
+  if (hasTypeScript && scripts.typecheck) commands.push(npmScript('typecheck', 'TypeScript 类型检查', workspaceRoot, true));
   if ((hasTests || changedFiles.some((file) => /(?:package\.json|tsconfig\.json)$/iu.test(file))) && scripts.test) {
-    commands.push({ id: 'test', label: '项目测试', command: 'npm test', cwd: workspaceRoot, timeoutMs: 120_000, required: true });
+    commands.push(npmScript('test', '项目测试', workspaceRoot, true, 120_000));
   }
-  if (commands.length === 0 && scripts.test) commands.push({ id: 'test', label: '项目测试', command: 'npm test', cwd: workspaceRoot, timeoutMs: 120_000 });
+  if (commands.length === 0 && scripts.test) commands.push(npmScript('test', '项目测试', workspaceRoot, false, 120_000));
   return { commands, reason: commands.length ? '根据改动文件选择验证项' : '未找到可安全自动运行的验证脚本' };
 }
 
@@ -75,7 +77,12 @@ export async function runVerification(
 async function runCommand(command: VerificationCommand, signal?: AbortSignal): Promise<EditVerificationResult> {
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(command.command, { cwd: command.cwd, shell: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command.executable, [...command.args], {
+      cwd: command.cwd,
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     const chunks: Buffer[] = [];
     let timedOut = false;
     let settled = false;
@@ -107,6 +114,25 @@ async function runCommand(command: VerificationCommand, signal?: AbortSignal): P
       else finish({ id: command.id, label: command.label, command: command.command, status: 'failed', exitCode: code ?? undefined, summary: `验证失败（退出码 ${code ?? 'unknown'}）`, output });
     });
   });
+}
+
+function npmScript(
+  script: string,
+  label: string,
+  cwd: string,
+  required: boolean,
+  timeoutMs?: number,
+): VerificationCommand {
+  return {
+    id: script,
+    label,
+    command: `npm run ${script}`,
+    executable: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    args: ['run', script],
+    cwd,
+    required,
+    timeoutMs,
+  };
 }
 
 async function packageScripts(root: string): Promise<Record<string, unknown>> {

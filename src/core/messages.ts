@@ -21,7 +21,13 @@ export type ToolErrorCode =
   | 'patch_workspace_changed'
   | 'patch_apply_failed'
   | 'patch_rollback_failed'
-  | 'verification_failed';
+  | 'verification_failed'
+  | 'sandbox_unavailable'
+  | 'sandbox_invalid_request'
+  | 'sandbox_network_denied'
+  | 'sandbox_stage_failed'
+  | 'sandbox_launch_failed'
+  | 'command_failed';
 
 export interface ToolError {
   code: ToolErrorCode;

@@ -87,7 +87,7 @@ export class JsonApprovalStore implements ApprovalStore {
   async save(request: ApprovalRequest, decision: ApprovalDecision): Promise<void> {
     await this.serial(async () => {
       const records = await this.read();
-      records.push({ request: structuredClone(request), decision: structuredClone(decision) });
+      records.push({ request: persistedRequest(request), decision: structuredClone(decision) });
       await this.write(records);
     });
   }
@@ -115,9 +115,17 @@ export class JsonApprovalStore implements ApprovalStore {
   private async write(records: StoredApprovalRecord[]): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(records)}\n`, { encoding: 'utf8', mode: 0o600 });
+    const sanitized = records.map((record) => ({
+      request: persistedRequest(record.request),
+      decision: record.decision,
+    }));
+    await writeFile(temporary, `${JSON.stringify(sanitized)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, this.filePath);
   }
+}
+
+function persistedRequest(request: ApprovalRequest): ApprovalRequest {
+  return { ...structuredClone(request), arguments: {} };
 }
 
 export interface PolicyRule {

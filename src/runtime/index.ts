@@ -25,3 +25,5 @@ export * from './approval.js';
 export * from './workspace-snapshot.js';
 export * from './structured-patch.js';
 export * from './verification.js';
+export * from './sandbox-tools.js';
+export * from '../sandbox/index.js';
