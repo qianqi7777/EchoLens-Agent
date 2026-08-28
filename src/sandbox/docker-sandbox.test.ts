@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { DockerSandboxAdapter } from './docker-sandbox.js';
+import { isPublicEgressAddress } from './egress-proxy.js';
 import type { ProcessRunRequest, ProcessRunResult, ProcessRunner } from './process-runner.js';
 import { SandboxError, type SandboxExecuteRequest } from './types.js';
 import { FileSystemWorkspaceStager } from './workspace-stager.js';
@@ -116,6 +117,16 @@ test('Docker Sandbox 超时后按随机容器名执行强制清理', async (t) =
   assert.equal(runner.requests.length, 2);
   const name = runner.requests[0]!.args[runner.requests[0]!.args.indexOf('--name') + 1];
   assert.deepEqual(runner.requests[1]!.args, ['rm', '--force', name]);
+});
+
+test('域名代理只允许全球可路由地址并拒绝私网、文档网段和特殊 IPv6', () => {
+  assert.equal(isPublicEgressAddress('8.8.8.8'), true);
+  assert.equal(isPublicEgressAddress('2606:4700:4700::1111'), true);
+  for (const address of [
+    '127.0.0.1', '10.0.0.1', '100.64.0.1', '169.254.1.1', '172.16.0.1', '192.168.0.1',
+    '192.0.2.1', '198.51.100.1', '203.0.113.1', '224.0.0.1',
+    '::1', '::ffff:127.0.0.1', '2001:db8::1', 'fc00::1', 'fe80::1', 'ff02::1',
+  ]) assert.equal(isPublicEgressAddress(address), false, address);
 });
 
 function request(root: string, overrides: Partial<SandboxExecuteRequest> = {}): SandboxExecuteRequest {

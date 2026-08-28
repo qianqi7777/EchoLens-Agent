@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { previewApprovalRequest } from '../approval-preview.js';
 import { applyPatch } from '../runtime/structured-patch.js';
 import { collectSandboxArtifacts, loadSandboxArtifactBundle } from './artifact-store.js';
 import { SandboxError } from './types.js';
@@ -30,6 +31,19 @@ test('Artifact Bundle 收集文本变化并生成可安全应用的结构化 Pat
     'create', 'delete', 'overwrite',
   ]);
   const loaded = await loadSandboxArtifactBundle(root, bundle.id);
+  const approvalPreview = await previewApprovalRequest({
+    id: 'approval-1',
+    toolName: 'apply_sandbox_patch',
+    permission: 'workspace.write',
+    arguments: { bundleId: bundle.id },
+    argumentsHash: 'sha256:test',
+    workspaceRoot: root,
+    reasonCode: 'approval_required',
+    reason: 'test',
+    createdAt: new Date().toISOString(),
+  });
+  assert.deepEqual(approvalPreview?.changedFiles, ['created.txt', 'delete.txt', 'empty.txt']);
+  assert.match(approvalPreview?.diff ?? '', /generated/u);
   await applyPatch(root, loaded.patch);
   assert.equal(await readFile(join(root, 'empty.txt'), 'utf8'), 'generated\n');
   assert.equal(await readFile(join(root, 'created.txt'), 'utf8'), 'created\n');
@@ -47,4 +61,24 @@ test('Artifact 请求拒绝私有路径', async (context) => {
     id: 'echolens-00000000-0000-4000-8000-000000000002',
     requestedPaths: ['.env.local'],
   }), (error: unknown) => error instanceof SandboxError && error.code === 'sandbox_artifact_failed');
+});
+
+test('Artifact 变化超过上限时失败关闭且不留下部分 Bundle', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-artifacts-limit-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'one.txt'), 'before one\n');
+  await writeFile(join(root, 'two.txt'), 'before two\n');
+  const id = 'echolens-00000000-0000-4000-8000-000000000003';
+  const staged = await new FileSystemWorkspaceStager().prepare(root, id);
+  context.after(() => staged.cleanup());
+  await writeFile(join(staged.root, 'one.txt'), 'after one\n');
+  await writeFile(join(staged.root, 'two.txt'), 'after two\n');
+
+  await assert.rejects(collectSandboxArtifacts({
+    workspaceRoot: root,
+    staged,
+    id,
+    maxChangedFiles: 1,
+  }), (error: unknown) => error instanceof SandboxError && error.code === 'sandbox_artifact_failed');
+  await assert.rejects(loadSandboxArtifactBundle(root, id));
 });

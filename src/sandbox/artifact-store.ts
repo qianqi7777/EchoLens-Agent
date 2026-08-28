@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { PathPolicy, validateRelativePath } from '../runtime/path-policy.js';
 import type { StructuredPatch } from '../runtime/structured-patch.js';
@@ -36,10 +36,12 @@ const GENERATED_NAMES = new Set(['coverage', 'dist', 'build']);
 export async function collectSandboxArtifacts(
   options: SandboxArtifactCollectionOptions,
 ): Promise<SandboxArtifactBundle> {
+  let pendingBundleRoot: string | undefined;
   try {
     const policy = await PathPolicy.create(options.workspaceRoot);
     const id = normalizeBundleId(options.id);
     const bundleRoot = bundleDirectory(policy.workspaceRoot, id);
+    pendingBundleRoot = bundleRoot;
     const maxChangedFiles = options.maxChangedFiles ?? 64;
     const maxPatchBytes = options.maxPatchBytes ?? 2 * 1024 * 1024;
     const maxArtifactBytes = options.maxArtifactBytes ?? 16 * 1024 * 1024;
@@ -64,12 +66,15 @@ export async function collectSandboxArtifacts(
     let artifactBytes = 0;
     const sortedChanges = [...changed].sort();
     if (sortedChanges.length > maxChangedFiles) {
-      warnings.push(`工作区变化 ${sortedChanges.length} 个文件，超过 Patch 上限 ${maxChangedFiles}`);
+      throw new SandboxError(
+        'sandbox_artifact_failed',
+        `工作区变化 ${sortedChanges.length} 个文件，超过 Artifact 上限 ${maxChangedFiles}`,
+      );
     }
-    for (const relative of sortedChanges.slice(0, maxChangedFiles)) {
+    for (const relative of sortedChanges) {
       const before = baseline.get(relative)?.bytes;
       const after = current.has(relative)
-        ? await readStagedFile(options.staged.root, relative, maxPatchBytes)
+        ? await readStagedFile(options.staged.root, relative, maxArtifactBytes)
         : undefined;
       const change = before === undefined ? 'added' : after === undefined ? 'deleted' : 'modified';
       const bytes = after ?? before!;
@@ -137,8 +142,10 @@ export async function collectSandboxArtifacts(
     };
     await mkdir(bundleRoot, { recursive: true });
     await writeFile(path.join(bundleRoot, 'manifest.json'), `${JSON.stringify(bundle)}\n`, { encoding: 'utf8', mode: 0o600 });
+    pendingBundleRoot = undefined;
     return bundle;
   } catch (error) {
+    if (pendingBundleRoot) await rm(pendingBundleRoot, { recursive: true, force: true }).catch(() => undefined);
     if (error instanceof SandboxError) throw error;
     throw new SandboxError('sandbox_artifact_failed', `Sandbox Artifact 收集失败：${error instanceof Error ? error.message : String(error)}`);
   }

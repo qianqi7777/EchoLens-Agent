@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "local_tools",
+      "enabled": false,
+      "trust": "untrusted",
+      "protocolMode": "auto",
+      "permissions": {
+        "resources": true,
+        "prompts": true,
+        "autoApproveReadOnly": false
+      },
+      "transport": {
+        "type": "stdio",
+        "command": "mcp-server",
+        "args": []
+      }
+    },
+    {
+      "id": "remote_tools",
+      "enabled": false,
+      "trust": "untrusted",
+      "protocolMode": "2026-07-28",
+      "transport": {
+        "type": "streamable_http",
+        "url": "https://mcp.example.invalid/mcp",
+        "headersFrom": {
+          "Authorization": "ECHOLENS_MCP_AUTHORIZATION"
+        }
+      }
+    }
+  ]
+}

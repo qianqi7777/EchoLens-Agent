@@ -26,4 +26,7 @@ export * from './workspace-snapshot.js';
 export * from './structured-patch.js';
 export * from './verification.js';
 export * from './sandbox-tools.js';
+export * from './runtime-extensions.js';
 export * from '../sandbox/index.js';
+export * from '../mcp/index.js';
+export * from '../code-intelligence/index.js';

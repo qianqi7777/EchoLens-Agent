@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { InMemoryTransport } from '@modelcontextprotocol/client';
-import { Server } from '@modelcontextprotocol/server';
+import {
+  createMcpHandler,
+  Server,
+} from '@modelcontextprotocol/server';
 import { ToolExecutor } from '../runtime/tool-executor.js';
 import { ToolRegistry } from '../runtime/tool-registry.js';
 import type { ApprovalDecision } from '../runtime/approval.js';
+import { initializeRuntimeExtensions } from '../runtime/runtime-extensions.js';
 import { McpClientManager } from './client-manager.js';
 import { registerMcpTools } from './tool-bridge.js';
 import type { McpServerConfig } from './types.js';
@@ -81,6 +86,83 @@ test('MCP 请求取消会中止远端调用并返回稳定错误', async (contex
   ));
 });
 
+test('Runtime 扩展启动时注册代码智能并连接已启用的 MCP Server', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-extensions-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = testServer();
+  await server.connect(serverTransport);
+  context.after(() => server.close());
+  const manager = new McpClientManager(root, { transportFactory: () => clientTransport });
+  const registry = new ToolRegistry();
+  const extensions = await initializeRuntimeExtensions(registry, root, {
+    mcpManager: manager,
+    mcpConfig: { version: 1, servers: [config()] },
+  });
+  context.after(() => extensions.close());
+
+  assert.deepEqual(extensions.connectedMcpServers, ['local']);
+  assert.equal(extensions.notices.length, 0);
+  const names = registry.list().map((tool) => tool.name);
+  assert.ok(names.includes('outline_file'));
+  assert.ok(names.includes('go_to_definition'));
+  assert.ok(names.some((name) => name.includes('mcp__local__tool_echo')));
+});
+
+test('真实 stdio Transport 连接只声明 Tools 的 MCP Server', async (context) => {
+  const manager = new McpClientManager(process.cwd());
+  context.after(() => manager.close());
+  const catalog = await manager.connect({
+    id: 'stdio_fixture',
+    enabled: true,
+    trust: 'untrusted',
+    protocolMode: '2026-07-28',
+    timeoutMs: 10_000,
+    transport: {
+      type: 'stdio',
+      command: 'node',
+      args: ['--import', 'tsx', 'src/testing/mcp-stdio-server.ts'],
+      cwd: '.',
+    },
+  });
+
+  assert.equal(catalog.tools.length, 1);
+  assert.equal(catalog.resources.length, 0);
+  assert.equal(catalog.prompts.length, 0);
+  const result = await manager.callTool('stdio_fixture', 'stdio_echo', { value: 'ok' });
+  assert.match(JSON.stringify(result.content), /stdio:ok/u);
+});
+
+test('真实 localhost Streamable HTTP Transport 完成能力发现和工具调用', async (context) => {
+  const handler = createMcpHandler(() => toolsOnlyServer('http_echo', 'http'), {
+    legacy: 'reject',
+  });
+  const http = createServer((request, response) => {
+    void handleWebRequest(handler.fetch, request, response);
+  });
+  await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
+  context.after(async () => {
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+    await handler.close();
+  });
+  const address = http.address();
+  assert.ok(address && typeof address !== 'string');
+  const manager = new McpClientManager(process.cwd());
+  context.after(() => manager.close());
+  const catalog = await manager.connect({
+    id: 'http_fixture',
+    enabled: true,
+    trust: 'untrusted',
+    protocolMode: '2026-07-28',
+    timeoutMs: 10_000,
+    transport: { type: 'streamable_http', url: `http://127.0.0.1:${address.port}/mcp` },
+  });
+  const result = await manager.callTool('http_fixture', 'http_echo', { value: 'ok' });
+
+  assert.equal(catalog.tools.length, 1);
+  assert.match(JSON.stringify(result.content), /http:ok/u);
+});
+
 function testServer(): Server {
   const server = new Server({ name: 'test-mcp', version: '1.0.0' }, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
@@ -126,6 +208,51 @@ function testServer(): Server {
     messages: [{ role: 'user', content: { type: 'text', text: `review ${request.params.arguments?.language}` } }],
   }));
   return server;
+}
+
+function toolsOnlyServer(toolName: string, prefix: string): Server {
+  const server = new Server({ name: `${prefix}-fixture`, version: '1.0.0' }, {
+    capabilities: { tools: {} },
+  });
+  server.setRequestHandler('tools/list', async () => ({
+    tools: [{
+      name: toolName,
+      inputSchema: {
+        type: 'object',
+        properties: { value: { type: 'string' } },
+        required: ['value'],
+        additionalProperties: false,
+      },
+    }],
+  }));
+  server.setRequestHandler('tools/call', async (request) => ({
+    content: [{ type: 'text', text: `${prefix}:${String(request.params.arguments?.value)}` }],
+  }));
+  return server;
+}
+
+async function handleWebRequest(
+  fetchHandler: (request: Request) => Promise<Response>,
+  incoming: IncomingMessage,
+  outgoing: ServerResponse,
+): Promise<void> {
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+    const address = incoming.socket.localPort;
+    const request = new Request(`http://127.0.0.1:${address}${incoming.url ?? '/mcp'}`, {
+      method: incoming.method,
+      headers: incoming.headers as Record<string, string>,
+      body: ['GET', 'HEAD'].includes(incoming.method ?? '') ? undefined : Buffer.concat(chunks),
+    });
+    const response = await fetchHandler(request);
+    outgoing.statusCode = response.status;
+    response.headers.forEach((value, name) => outgoing.setHeader(name, value));
+    outgoing.end(Buffer.from(await response.arrayBuffer()));
+  } catch {
+    outgoing.statusCode = 500;
+    outgoing.end();
+  }
 }
 
 function config(): McpServerConfig {

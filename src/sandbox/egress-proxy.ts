@@ -1,3 +1,34 @@
+import { BlockList, isIP } from 'node:net';
+
+const RESERVED_IPV4_SUBNETS = [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+  ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24],
+  ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+] as const;
+
+const RESERVED_IPV6_SUBNETS = [
+  ['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b::', 96], ['100::', 64],
+  ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
+] as const;
+
+export function isPublicEgressAddress(value: string): boolean {
+  const family = isIP(value);
+  if (!family) return false;
+  const blocked = egressBlockLists();
+  return family === 4
+    ? !blocked.ipv4.check(value, 'ipv4')
+    : !blocked.ipv6.check(value, 'ipv6');
+}
+
+function egressBlockLists(): { ipv4: BlockList; ipv6: BlockList } {
+  const ipv4 = new BlockList();
+  const ipv6 = new BlockList();
+  for (const [address, prefix] of RESERVED_IPV4_SUBNETS) ipv4.addSubnet(address, prefix, 'ipv4');
+  for (const [address, prefix] of RESERVED_IPV6_SUBNETS) ipv6.addSubnet(address, prefix, 'ipv6');
+  return { ipv4, ipv6 };
+}
+
 export const EGRESS_PROXY_SOURCE = String.raw`
 import http from 'node:http';
 import net from 'node:net';
@@ -8,6 +39,10 @@ import { domainToASCII } from 'node:url';
 const policy = JSON.parse(await readFile(process.argv[2], 'utf8'));
 const domains = new Set(policy.allowedDomains.map(normalizeDomain));
 const ports = new Set(policy.allowedPorts.map(Number));
+const blockedIpv4 = new net.BlockList();
+const blockedIpv6 = new net.BlockList();
+for (const [address, prefix] of ${JSON.stringify(RESERVED_IPV4_SUBNETS)}) blockedIpv4.addSubnet(address, prefix, 'ipv4');
+for (const [address, prefix] of ${JSON.stringify(RESERVED_IPV6_SUBNETS)}) blockedIpv6.addSubnet(address, prefix, 'ipv6');
 
 const server = http.createServer(async (request, response) => {
   try {
@@ -81,24 +116,10 @@ function normalizeDomain(value) {
 }
 
 function isPrivateAddress(value) {
-  if (net.isIPv4(value)) {
-    const octets = value.split('.').map(Number);
-    const first = octets[0];
-    const second = octets[1];
-    return first === 0 || first === 10 || first === 127 || first >= 224
-      || (first === 100 && second >= 64 && second <= 127)
-      || (first === 169 && second === 254)
-      || (first === 172 && second >= 16 && second <= 31)
-      || (first === 192 && (second === 0 || second === 168))
-      || (first === 198 && (second === 18 || second === 19));
-  }
-  if (net.isIPv6(value)) {
-    const lower = value.toLowerCase();
-    if (lower === '::' || lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd')) return true;
-    if (/^fe[89ab]/u.test(lower)) return true;
-    const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/u)?.[1];
-    return mapped ? isPrivateAddress(mapped) : false;
-  }
-  return true;
+  const family = net.isIP(value);
+  if (!family) return true;
+  return family === 4
+    ? blockedIpv4.check(value, 'ipv4')
+    : blockedIpv6.check(value, 'ipv6');
 }
 `;

@@ -58,6 +58,22 @@ export class TreeSitterIndex {
       .sort((left, right) => span(left) - span(right))[0];
   }
 
+  async nameAt(workspaceRoot: string, relativePath: string, line: number, column: number): Promise<string | undefined> {
+    if (!Number.isInteger(line) || line < 1 || !Number.isInteger(column) || column < 1) {
+      throw new CodeIntelligenceError('code_intelligence_failed', '行列必须从 1 开始');
+    }
+    const parsed = await this.parse(workspaceRoot, relativePath);
+    const point = { row: line - 1, column: column - 1 };
+    let node: Parser.SyntaxNode | null = parsed.tree.rootNode.descendantForPosition(point, point);
+    while (node) {
+      if (['identifier', 'type_identifier', 'property_identifier', 'private_property_identifier'].includes(node.type)) {
+        return node.text;
+      }
+      node = node.parent;
+    }
+    return this.symbolAt(workspaceRoot, relativePath, line, column).then((symbol) => symbol?.name);
+  }
+
   async referencesByName(workspaceRoot: string, name: string, relative = '.'): Promise<CodeLocation[]> {
     const policy = await PathPolicy.create(workspaceRoot);
     const files = await sourceFiles(policy, relative, 5_000);

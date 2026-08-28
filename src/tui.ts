@@ -1,8 +1,8 @@
 import { stdin, stdout } from 'node:process';
 import type { AgentEvent } from './session/events.js';
 import type { AgentRunResult } from './runtime/resumable-react-agent.js';
+import { previewApprovalRequest } from './approval-preview.js';
 import {
-  previewPatch,
   type ApprovalDecision,
   type ApprovalRequest,
   type EditCheckpoint,
@@ -32,6 +32,7 @@ export interface TuiOptions {
   verify: () => Promise<readonly EditVerificationResult[]>;
   rollback: (checkpoint: EditCheckpoint) => Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   loadCheckpoint: (id: string) => Promise<EditCheckpoint>;
+  startupMessages?: readonly string[];
 }
 
 interface ApprovalPrompt {
@@ -79,6 +80,7 @@ export class TerminalUi {
     }, 140);
     this.log(`workspace ${this.options.workspaceRoot}`);
     this.log(`session ${this.options.sessionId}`);
+    for (const message of this.options.startupMessages ?? []) this.log(message);
     this.render();
     await new Promise<void>((resolve) => {
       this.exitResolver = resolve;
@@ -87,11 +89,9 @@ export class TerminalUi {
 
   async requestApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
     let preview = '';
-    if (request.toolName === 'apply_patch') {
+    if (request.toolName === 'apply_patch' || request.toolName === 'apply_sandbox_patch') {
       try {
-        const patch = (request.arguments as { patch?: unknown }).patch;
-        const result = await previewPatch(request.workspaceRoot, patch);
-        preview = result.files.map((file) => file.diff).join('\n\n');
+        preview = (await previewApprovalRequest(request))?.diff ?? '';
       } catch (error) {
         this.log(`Patch 预览失败：${error instanceof Error ? error.message : String(error)}`);
         return { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: 'Patch 预览失败' };

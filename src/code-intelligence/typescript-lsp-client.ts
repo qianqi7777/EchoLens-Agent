@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -45,28 +46,50 @@ export class TypeScriptLspClient {
 
   async definition(relativePath: string, line: number, column: number, signal?: AbortSignal): Promise<CodeLocation[]> {
     const document = await this.openDocument(relativePath);
-    const result = await this.request('textDocument/definition', {
+    const sourceDefinition = this.normalizeLocations(await this.request('workspace/executeCommand', {
+      command: '_typescript.goToSourceDefinition',
+      arguments: [document.uri, position(line, column)],
+    }, signal).catch(() => []));
+    const first = this.normalizeLocations(await this.request('textDocument/definition', {
       textDocument: { uri: document.uri },
       position: position(line, column),
-    }, signal);
-    return this.normalizeLocations(result);
+    }, signal));
+    if (sourceDefinition.length) return dedupeLocations([...sourceDefinition, ...first]);
+    if (first.length !== 1 || first[0]!.path !== relativePath.replaceAll('\\', '/')) return first;
+    const alias = first[0]!;
+    if (alias.startLine === line && alias.startColumn === column) return first;
+    const aliasDocument = await this.openDocument(alias.path);
+    const target = this.normalizeLocations(await this.request('textDocument/definition', {
+      textDocument: { uri: aliasDocument.uri },
+      position: position(alias.startLine, alias.startColumn),
+    }, signal));
+    return dedupeLocations(target.length ? [...target, ...first] : first);
   }
 
   async references(relativePath: string, line: number, column: number, signal?: AbortSignal): Promise<CodeLocation[]> {
     const document = await this.openDocument(relativePath);
-    const result = await this.request('textDocument/references', {
+    const direct = this.normalizeLocations(await this.request('textDocument/references', {
       textDocument: { uri: document.uri },
       position: position(line, column),
       context: { includeDeclaration: true },
-    }, signal);
-    return this.normalizeLocations(result);
+    }, signal));
+    const definitions = await this.definition(relativePath, line, column, signal);
+    const source = definitions.find((item) => item.path !== relativePath.replaceAll('\\', '/'));
+    if (!source) return direct;
+    const sourceDocument = await this.openDocument(source.path);
+    const semantic = this.normalizeLocations(await this.request('textDocument/references', {
+      textDocument: { uri: sourceDocument.uri },
+      position: position(source.startLine, source.startColumn),
+      context: { includeDeclaration: true },
+    }, signal));
+    return dedupeLocations([...semantic, ...direct]);
   }
 
   async diagnostics(relativePath: string, signal?: AbortSignal): Promise<CodeDiagnostic[]> {
     const document = await this.openDocument(relativePath);
     const existing = this.diagnosticsByUri.get(document.uri);
     if (existing) return structuredClone(existing);
-    await waitForDiagnostics(this.diagnosticWaiters, document.uri, signal, 1_500);
+    await waitForDiagnostics(this.diagnosticWaiters, document.uri, signal, 5_000);
     return structuredClone(this.diagnosticsByUri.get(document.uri) ?? []);
   }
 
@@ -83,9 +106,10 @@ export class TypeScriptLspClient {
         new Promise((resolve) => setTimeout(resolve, 1_000)),
       ]);
       await connection.sendNotification('exit').catch(() => undefined);
+      connection.end();
       connection.dispose();
     }
-    if (child && !child.killed) child.kill();
+    if (child) await stopChild(child);
   }
 
   private async openDocument(relativePath: string): Promise<OpenDocument> {
@@ -155,7 +179,9 @@ export class TypeScriptLspClient {
     connection.onRequest('client/registerCapability', () => null);
     connection.onRequest('window/workDoneProgress/create', () => null);
     connection.onNotification('textDocument/publishDiagnostics', (params: PublishDiagnosticsParams) => {
-      const diagnostics = params.diagnostics.slice(0, 500).map((value) => normalizeDiagnostic(params.uri, value)).filter(Boolean) as CodeDiagnostic[];
+      const diagnostics = params.diagnostics.slice(0, 500)
+        .map((value) => this.normalizeDiagnostic(params.uri, value))
+        .filter(Boolean) as CodeDiagnostic[];
       this.diagnosticsByUri.set(params.uri, diagnostics);
       for (const resolve of this.diagnosticWaiters.get(params.uri) ?? []) resolve();
       this.diagnosticWaiters.delete(params.uri);
@@ -179,6 +205,7 @@ export class TypeScriptLspClient {
             synchronization: { dynamicRegistration: false, didSave: false },
             definition: { linkSupport: true },
             references: {},
+            diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
             publishDiagnostics: { relatedInformation: true },
           },
         },
@@ -240,6 +267,23 @@ export class TypeScriptLspClient {
       };
     } catch { return undefined; }
   }
+
+  private normalizeDiagnostic(uri: string, value: unknown): CodeDiagnostic | undefined {
+    if (!isRecord(value) || !isRange(value.range) || typeof value.message !== 'string') return undefined;
+    const target = this.locationFromUri(uri, value.range);
+    if (!target) return undefined;
+    const severity = value.severity === 1 ? 'error'
+      : value.severity === 2 ? 'warning'
+        : value.severity === 4 ? 'hint' : 'information';
+    return {
+      ...target,
+      severity,
+      message: value.message.slice(0, 2_000),
+      source: 'lsp',
+      code: typeof value.code === 'string' || typeof value.code === 'number' ? String(value.code) : undefined,
+      evidenceId: `code:${createEvidenceId(`${target.path}:${target.startLine}:${target.startColumn}:${value.message}`)}`,
+    };
+  }
 }
 
 function resolveLanguageServerCli(): string {
@@ -252,29 +296,6 @@ function safeProcessEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NO_COLOR: '1' };
   for (const name of names) if (process.env[name] !== undefined) env[name] = process.env[name];
   return env;
-}
-
-function normalizeDiagnostic(uri: string, value: unknown): CodeDiagnostic | undefined {
-  if (!isRecord(value) || !isRange(value.range) || typeof value.message !== 'string') return undefined;
-  let relative: string;
-  try { relative = fileURLToPath(uri); } catch { return undefined; }
-  const severity = value.severity === 1 ? 'error' : value.severity === 2 ? 'warning' : value.severity === 4 ? 'hint' : 'information';
-  const target = {
-    path: relative,
-    startLine: value.range.start.line + 1,
-    startColumn: value.range.start.character + 1,
-    endLine: value.range.end.line + 1,
-    endColumn: value.range.end.character + 1,
-  };
-  const evidence = createEvidenceId(`${uri}:${target.startLine}:${target.startColumn}:${value.message}`);
-  return {
-    ...target,
-    severity,
-    message: value.message.slice(0, 2_000),
-    source: 'lsp',
-    code: typeof value.code === 'string' || typeof value.code === 'number' ? String(value.code) : undefined,
-    evidenceId: `code:${evidence}`,
-  };
 }
 
 function position(line: number, column: number): LspPosition {
@@ -291,8 +312,69 @@ function isPosition(value: unknown): value is LspPosition {
   return isRecord(value) && Number.isInteger(value.line) && Number.isInteger(value.character);
 }
 function isRecord(value: unknown): value is Record<string, any> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function languageId(relative: string): string { return /\.tsx$/iu.test(relative) ? 'typescriptreact' : 'typescript'; }
-function createEvidenceId(value: string): string { return Buffer.from(value).toString('base64url').slice(0, 32); }
+function languageId(relative: string): string {
+  if (/\.tsx$/iu.test(relative)) return 'typescriptreact';
+  if (/\.jsx$/iu.test(relative)) return 'javascriptreact';
+  if (/\.(?:js|mjs|cjs)$/iu.test(relative)) return 'javascript';
+  return 'typescript';
+}
+function createEvidenceId(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 24);
+}
+
+function dedupeLocations(items: CodeLocation[]): CodeLocation[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${item.path}:${item.startLine}:${item.startColumn}:${item.endLine}:${item.endColumn}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (process.platform === 'win32' && child.pid) await terminateWindowsProcessTree(child.pid);
+  if (child.exitCode === null && child.signalCode === null) child.kill();
+  await waitForExit(child, 1_000);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGKILL');
+    await waitForExit(child, 1_000);
+  }
+  child.stdin.destroy();
+  child.stdout.destroy();
+  child.stderr.destroy();
+}
+
+async function terminateWindowsProcessTree(pid: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let killer: ChildProcessWithoutNullStreams;
+    try {
+      killer = spawn('taskkill.exe', ['/pid', String(pid), '/t', '/f'], {
+        shell: false,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch {
+      resolve();
+      return;
+    }
+    const done = () => resolve();
+    killer.once('error', done);
+    killer.once('exit', done);
+    setTimeout(() => {
+      if (killer.exitCode === null && killer.signalCode === null) killer.kill();
+      resolve();
+    }, 2_000).unref();
+  });
+}
+
+async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await Promise.race([
+    new Promise<void>((resolve) => child.once('exit', () => resolve())),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

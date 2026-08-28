@@ -2,6 +2,7 @@ import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { createEventRenderer } from './cli-event-renderer.js';
+import { previewApprovalRequest } from './approval-preview.js';
 import { ensureStartupConfiguration } from './config/startup-config.js';
 import { TerminalUi } from './tui.js';
 import {
@@ -15,7 +16,6 @@ import {
   registerSandboxTools,
   DockerSandboxAdapter,
   JsonApprovalStore,
-  previewPatch,
   loadEditCheckpoint,
   rollbackCheckpoint,
   runVerification,
@@ -23,6 +23,7 @@ import {
   type ApprovalDecision,
   type ApprovalRequest,
   type AgentRunResult,
+  initializeRuntimeExtensions,
 } from './runtime/index.js';
 
 const terminal = readline.createInterface({ input, output });
@@ -58,6 +59,13 @@ if (!model) {
   process.exitCode = 1;
   terminal.close();
 } else {
+  const extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
+  const startupMessages = [
+    `代码智能已启用：tree-sitter + TypeScript LSP（按需启动）`,
+    `MCP 已连接 ${extensions.connectedMcpServers.length} 个 Server`,
+    ...extensions.notices,
+  ];
+  try {
   const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
   let tui: TerminalUi | undefined;
   const executor = new ToolExecutor(registry, {
@@ -69,7 +77,7 @@ if (!model) {
   });
   const agent = new ReactAgent(model, registry, executor, {
     workspaceRoot,
-    permissions: new Set(['workspace.read', 'workspace.write', 'process.exec']),
+    permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
     privacy: status.privacy,
   });
   const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
@@ -95,6 +103,7 @@ if (!model) {
       verify: async () => runVerification(await selectVerificationPlan(workspaceRoot, [])),
       rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
       loadCheckpoint: (id) => loadEditCheckpoint(workspaceRoot, id),
+      startupMessages,
     });
     try {
       await tui.start();
@@ -143,6 +152,7 @@ if (!model) {
     `Agent 已启动 | model=${status.model} | route=${status.route} | session=${session.sessionId}`,
   );
   console.log(`workspace=${workspaceRoot}`);
+  for (const message of startupMessages) console.log(message);
   console.log('输入问题开始分析；/sessions 查看会话，/resume 恢复，/verify 验证，/rollback <id> 回滚，/exit 退出。');
   try {
     while (true) {
@@ -186,17 +196,20 @@ if (!model) {
     await session.close();
   }
   }
+  } finally {
+    await extensions.close();
+  }
 }
 
 async function interactiveApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
   console.log(`\n需要审批：${request.toolName} (${request.permission})`);
   console.log(`原因：${request.reason}`);
-  if (request.toolName === 'apply_patch') {
+  if (request.toolName === 'apply_patch' || request.toolName === 'apply_sandbox_patch') {
     try {
-      const patch = (request.arguments as { patch?: unknown }).patch;
-      const preview = await previewPatch(request.workspaceRoot, patch);
+      const preview = await previewApprovalRequest(request);
+      if (!preview) throw new Error('没有可预览的 Patch');
       console.log(`修改文件：${preview.changedFiles.join(', ')}`);
-      for (const file of preview.files) console.log(`\n${file.diff}`);
+      console.log(`\n${preview.diff}`);
     } catch (error) {
       console.log(`Patch 预览失败：${error instanceof Error ? error.message : String(error)}`);
       return { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: 'Patch 预览失败' };

@@ -24,6 +24,11 @@
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
 - Docker Sandbox 默认禁网、只读容器根、清空 Capability、禁止提权并限制 CPU、内存和 PID
 - Sandbox 只挂载过滤后的临时工作区快照，排除 `.env*`、`.git`、`.echolens` 和 Git 忽略文件
+- Sandbox 写入以 Artifact Bundle 返回，并通过独立审批的结构化 Patch 回放到宿主工作区
+- `package_install` 使用内部 Docker 网络和域名 allowlist 代理，不向工作容器提供直连公网
+- 支持 MCP stdio、Streamable HTTP、Tools、Resources、Prompts、进度与取消
+- 提供 `outline_file`、`find_symbols`、`go_to_definition`、`find_references`、`get_diagnostics`
+- TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
 
 ## 快速开始
 
@@ -67,14 +72,32 @@ Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` �
 Docker，同时预先准备 `AGENT_SANDBOX_IMAGE` 指定的镜像；运行时使用 `--pull never`，
 不会隐式下载镜像，也不会在 Docker 不可用时回退到宿主 Shell。
 
-当前网络策略仅实现 `none`。`package_install` 已有独立权限和 Schema，但域名代理尚未
-配置时会失败关闭。Sandbox 中的写入发生在临时快照，不能绕过 `apply_patch` 修改宿主源码。
+网络策略支持 `none` 和 `allowlist`。只有 `package_install` 可以申请域名 allowlist；工作容器
+只连接 Docker 内部网络，通过受限代理访问经 DNS 和公网地址检查后的域名。Sandbox 写入先保存
+到 `.echolens/artifacts/`，再由 `apply_sandbox_patch` 展示 diff、审批、创建 Checkpoint 并应用。
+
+运行真实 Docker 验收前需预先准备镜像，然后执行：
+
+```powershell
+npm run verify:docker
+```
+
+## MCP 与代码智能
+
+MCP 配置默认读取 `.echolens/mcp.json`。可从 `examples/mcp.example.json` 开始配置；示例中的
+Server 全部禁用且不包含真实地址。敏感 Header 和环境变量只能通过 `headersFrom`、`envFrom`
+引用当前进程环境，不能把 Token 明文写入配置。第三方 MCP 描述和输出均作为不可信数据，
+外部调用默认需要审批。
+
+tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、引用和诊断结果只保留工作区内
+的相对路径；LSP 不可用时定义、引用和语法诊断自动降级到 tree-sitter。
 
 ## 验证
 
 ```bash
 npm run check
 npm run test:performance
+npm run verify:docker
 npm run audit
 ```
 
@@ -88,7 +111,9 @@ src/
   cli.ts                 交互式命令行入口
   core/                  模型中立的消息、权限与 System Policy
   context/               项目指令来源和权限收紧契约
+  code-intelligence/     tree-sitter 索引、TypeScript LSP 和代码工具
   credentials/           凭据引用与异步解析接口
+  mcp/                   MCP 配置、Client 生命周期与工具桥接
   providers/
     openai-compatible/   Chat Completions 与 Responses Codec
     gateway/             Gateway 状态和模型目录客户端
@@ -105,6 +130,8 @@ src/
   sandbox/
     docker-sandbox.ts    Docker 高隔离执行适配器
     workspace-stager.ts  排除秘密和忽略文件的临时工作区快照
+    artifact-store.ts    Artifact Bundle 与结构化 Patch 提案
+    egress-proxy.ts      域名 allowlist 出站代理
     process-runner.ts    shell=false、超时、取消和输出限制
   session/               Event Store、检查点和 Session Runtime
   testing/               契约测试支持工具
@@ -114,10 +141,11 @@ contracts/
 
 ## 当前边界
 
-v0.5 当前完成了 Sandbox Adapter 和 Shell/Test/Build 的第一阶段。域名级网络代理、MCP、
-Skills/Hooks、tree-sitter 和 LSP 仍未实现；Docker 缺失时 Sandbox 工具会明确失败，不会
-提供低隔离的 Windows 宿主执行。远程 Gateway 只代理模型请求，不具备读取工作区或执行
-本地工具的权限。
+v0.5 已实现 Docker Sandbox、Artifact/Patch 回传、域名级网络代理、MCP Client 和
+TypeScript/JavaScript 的 tree-sitter/LSP 代码智能。Docker 缺失时 Sandbox 工具会明确失败，
+不会提供低隔离的 Windows 宿主执行。当前 LSP 语言覆盖仍限于 TypeScript/JavaScript，MCP
+OAuth 与 Skills/Hooks 尚未实现。远程 Gateway 只代理模型请求，不具备读取工作区或执行本地
+工具的权限。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

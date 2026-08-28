@@ -3,6 +3,7 @@ import { ToolRegistry } from './tool-registry.js';
 import { toolFailure, toolSuccess } from './tool-result.js';
 import { runVerification, selectVerificationPlan, type EditVerificationResult } from './verification.js';
 import { applyStructuredPatch } from './workspace-tools.js';
+import { previewPatch, type PatchPreview } from './structured-patch.js';
 import {
   loadSandboxArtifactBundle,
   SandboxError,
@@ -207,6 +208,14 @@ async function applySandboxPatch(
     }
     return toolFailure('failed', 'tool_failed', '无法加载 Sandbox Patch');
   }
+}
+
+export async function previewSandboxPatch(workspaceRoot: string, bundleId: string): Promise<PatchPreview> {
+  const bundle = await loadSandboxArtifactBundle(workspaceRoot, bundleId);
+  if (!bundle.patch?.operations.length) {
+    throw new SandboxError('sandbox_artifact_failed', 'Artifact Bundle 不包含可应用的文本 Patch');
+  }
+  return previewPatch(workspaceRoot, bundle.patch);
 }
 
 async function executeSandbox(

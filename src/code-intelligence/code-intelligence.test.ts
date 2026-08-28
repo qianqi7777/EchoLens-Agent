@@ -1,0 +1,103 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { ToolRegistry } from '../runtime/tool-registry.js';
+import { CodeIntelligenceService, type LanguageServiceBackend } from './code-intelligence-service.js';
+import { CodeIntelligenceError, type CodeDiagnostic, type CodeLocation } from './types.js';
+import { registerCodeIntelligenceTools } from './tools.js';
+import { TreeSitterIndex } from './tree-sitter-index.js';
+import { TypeScriptLspClient } from './typescript-lsp-client.js';
+
+test('tree-sitter 提取符号并在 LSP 不可用时完成定义、引用和诊断降级', async (t) => {
+  const root = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tree = new TreeSitterIndex();
+  const symbols = await tree.outline(root, 'src/source.ts');
+
+  assert.ok(symbols.some((symbol) => symbol.name === 'Greeter' && symbol.kind === 'class'));
+  assert.ok(symbols.some((symbol) => symbol.name === 'greet' && symbol.kind === 'function'));
+  assert.ok(symbols.some((symbol) => symbol.name === 'label' && symbol.kind === 'field'));
+  assert.ok(symbols.every((symbol) => symbol.path === 'src/source.ts' && symbol.evidenceId.startsWith('code:')));
+
+  const service = new CodeIntelligenceService(root, { treeSitter: tree, languageService: unavailableLsp() });
+  const usage = "export const message = greet('Echo');";
+  const column = usage.indexOf('greet') + 1;
+  const definition = await service.goToDefinition('src/usage.ts', 2, column);
+  const references = await service.findReferences('src/usage.ts', 2, column);
+  const diagnostics = await service.getDiagnostics('src/broken.ts');
+
+  assert.equal(definition.engine, 'tree-sitter');
+  assert.equal(definition.fallbackReason, 'lsp_unavailable');
+  assert.ok(definition.items.some((item) => item.path === 'src/source.ts'));
+  assert.equal(references.engine, 'tree-sitter');
+  assert.ok(references.items.some((item) => item.path === 'src/usage.ts'));
+  assert.equal(diagnostics.engine, 'tree-sitter');
+  assert.ok(diagnostics.items.some((item) => item.source === 'tree-sitter-fallback'));
+
+  const registry = new ToolRegistry();
+  registerCodeIntelligenceTools(registry, service);
+  assert.deepEqual(
+    registry.list().map((tool) => tool.name),
+    ['find_references', 'find_symbols', 'get_diagnostics', 'go_to_definition', 'outline_file'],
+  );
+});
+
+test('真实 TypeScript Language Server 返回工作区相对定义、引用和诊断', async (t) => {
+  const root = await fixture();
+  const client = new TypeScriptLspClient(root, { requestTimeoutMs: 15_000 });
+  t.after(async () => {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const usage = "export const message = greet('Echo');";
+  const column = usage.indexOf('greet') + 1;
+
+  const definitions = await client.definition('src/usage.ts', 2, column);
+  const references = await client.references('src/usage.ts', 2, column);
+  const diagnostics = await client.diagnostics('src/type-error.ts');
+
+  assert.ok(definitions.some((item) => item.path === 'src/source.ts'));
+  assert.ok(references.some((item) => item.path === 'src/usage.ts'));
+  assert.ok(diagnostics.every((item) => item.path === 'src/type-error.ts' && item.source === 'lsp'));
+  assert.ok([...definitions, ...references, ...diagnostics].every((item) => !item.path.includes(root)));
+});
+
+async function fixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-code-intelligence-'));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { strict: true, target: 'ES2022', module: 'CommonJS' },
+    include: ['src/**/*.ts'],
+  }));
+  await writeFile(join(root, 'src', 'source.ts'), [
+    'export class Greeter {',
+    "  public label = 'hello';",
+    '}',
+    'export function greet(name: string) {',
+    '  return `Hello ${name}`;',
+    '}',
+    '',
+  ].join('\n'));
+  await writeFile(join(root, 'src', 'usage.ts'), [
+    "import { greet } from './source';",
+    "export const message = greet('Echo');",
+    '',
+  ].join('\n'));
+  await writeFile(join(root, 'src', 'broken.ts'), 'export const broken = ;\n');
+  await writeFile(join(root, 'src', 'type-error.ts'), 'export const value: string = 42;\n');
+  return root;
+}
+
+function unavailableLsp(): LanguageServiceBackend {
+  const unavailable = async (): Promise<never> => {
+    throw new CodeIntelligenceError('lsp_unavailable', 'test unavailable');
+  };
+  return {
+    definition: unavailable,
+    references: unavailable,
+    diagnostics: unavailable,
+    close: async () => undefined,
+  } as LanguageServiceBackend;
+}

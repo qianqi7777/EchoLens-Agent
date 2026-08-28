@@ -1,5 +1,6 @@
 import {
   Client,
+  SUPPORTED_PROTOCOL_VERSIONS,
   StreamableHTTPClientTransport,
   type CallToolResult,
   type GetPromptResult,
@@ -52,6 +53,7 @@ export class McpClientManager {
 
   async connect(config: McpServerConfig, signal?: AbortSignal): Promise<McpServerCatalog> {
     if (this.connections.has(config.id)) throw new McpClientError('mcp_config_invalid', `MCP Server 已连接：${config.id}`);
+    const mode = protocolMode(config.protocolMode);
     const client = new Client(
       { name: 'echolens-agent', version: '0.5.0' },
       {
@@ -59,16 +61,24 @@ export class McpClientManager {
         enforceStrictCapabilities: true,
         listMaxPages: 16,
         inputRequired: { autoFulfill: false },
-        versionNegotiation: { mode: protocolMode(config.protocolMode) },
+        versionNegotiation: { mode },
+        supportedProtocolVersions: supportedProtocolVersions(mode),
       },
     );
     const transport = await this.createTransport(config);
     try {
       await client.connect(transport, { signal, timeout: config.timeoutMs ?? 30_000 });
+      const capabilities = client.getServerCapabilities() ?? {};
       const [toolsResult, resourcesResult, promptsResult] = await Promise.all([
-        client.listTools(undefined, requestOptions(config, signal)),
-        client.listResources(undefined, requestOptions(config, signal)),
-        client.listPrompts(undefined, requestOptions(config, signal)),
+        capabilities.tools
+          ? client.listTools(undefined, requestOptions(config, signal))
+          : Promise.resolve({ tools: [] }),
+        capabilities.resources && config.permissions?.resources !== false
+          ? client.listResources(undefined, requestOptions(config, signal))
+          : Promise.resolve({ resources: [] }),
+        capabilities.prompts && config.permissions?.prompts !== false
+          ? client.listPrompts(undefined, requestOptions(config, signal))
+          : Promise.resolve({ prompts: [] }),
       ]);
       enforceCatalogLimits(config.id, toolsResult.tools.length, resourcesResult.resources.length, promptsResult.prompts.length);
       const allowedTools = config.permissions?.tools ? new Set(config.permissions.tools) : undefined;
@@ -81,15 +91,18 @@ export class McpClientManager {
         protocolEra: client.getProtocolEra(),
         serverName: serverVersion ? `${serverVersion.name}@${serverVersion.version}` : undefined,
         tools: structuredClone(toolsResult.tools.filter((tool) => !allowedTools || allowedTools.has(tool.name))),
-        resources: config.permissions?.resources === false ? [] : structuredClone(resourcesResult.resources),
-        prompts: config.permissions?.prompts === false ? [] : structuredClone(promptsResult.prompts),
+        resources: structuredClone(resourcesResult.resources),
+        prompts: structuredClone(promptsResult.prompts),
       };
       this.connections.set(config.id, { config: structuredClone(config), client, catalog });
       return structuredClone(catalog);
     } catch (error) {
       await client.close().catch(() => undefined);
       if (error instanceof McpClientError) throw error;
-      throw new McpClientError('mcp_connection_failed', `MCP Server 连接或能力发现失败：${config.id}`);
+      throw new McpClientError(
+        'mcp_connection_failed',
+        `MCP Server 连接或能力发现失败：${config.id}（${safeErrorCategory(error)}）`,
+      );
     }
   }
 
@@ -167,7 +180,8 @@ export class McpClientManager {
   private async createTransport(config: McpServerConfig): Promise<Transport> {
     if (this.options.transportFactory) return this.options.transportFactory(config);
     if (config.transport.type === 'streamable_http') {
-      return new StreamableHTTPClientTransport(new URL(config.transport.url), {
+      const url = validatedHttpUrl(config.id, config.transport.url);
+      return new StreamableHTTPClientTransport(url, {
         requestInit: { headers: resolveEnvironmentMap(config.transport.headersFrom) },
         onInsufficientScope: 'throw',
       });
@@ -193,6 +207,20 @@ export class McpClientManager {
   }
 }
 
+function validatedHttpUrl(serverId: string, value: string): URL {
+  let url: URL;
+  try { url = new URL(value); }
+  catch { throw new McpClientError('mcp_config_invalid', `MCP URL 无效：${serverId}`); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new McpClientError('mcp_config_invalid', `MCP HTTP Server 必须使用 HTTPS：${serverId}`);
+  }
+  if (url.username || url.password) {
+    throw new McpClientError('mcp_config_invalid', `MCP URL 不得内嵌凭据：${serverId}`);
+  }
+  return url;
+}
+
 function requestOptions(config: McpServerConfig, signal?: AbortSignal) {
   const timeout = config.timeoutMs ?? 60_000;
   return { signal, timeout, maxTotalTimeout: timeout };
@@ -201,6 +229,12 @@ function requestOptions(config: McpServerConfig, signal?: AbortSignal) {
 function protocolMode(mode: McpServerConfig['protocolMode']): VersionNegotiationMode {
   if (mode === '2026-07-28') return { pin: mode };
   return mode ?? 'auto';
+}
+
+function supportedProtocolVersions(mode: VersionNegotiationMode): string[] | undefined {
+  if (mode === 'legacy') return undefined;
+  const modern = typeof mode === 'object' ? mode.pin : '2026-07-28';
+  return [...new Set([modern, ...SUPPORTED_PROTOCOL_VERSIONS])];
 }
 
 function resolveEnvironmentMap(mapping: Record<string, string> | undefined): Record<string, string> {
@@ -217,4 +251,13 @@ function enforceCatalogLimits(serverId: string, tools: number, resources: number
   if (tools > 128 || resources > 256 || prompts > 128) {
     throw new McpClientError('mcp_connection_failed', `MCP 能力目录超过上限：${serverId}`);
   }
+}
+
+function safeErrorCategory(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = String(error.code).replace(/[^A-Za-z0-9_.-]/gu, '').slice(0, 64);
+    if (code) return `sdk:${code}`;
+  }
+  if (error instanceof Error) return error.name.replace(/[^A-Za-z0-9_.-]/gu, '').slice(0, 64) || 'Error';
+  return 'unknown';
 }
