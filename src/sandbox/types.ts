@@ -45,13 +45,22 @@ export interface SandboxExecuteRequest {
   workspaceAccess: SandboxWorkspaceAccess;
   network: SandboxNetworkPolicy;
   resources: SandboxResources;
+  artifactPaths?: readonly string[];
 }
 
 export interface SandboxArtifact {
   path: string;
+  kind: 'workspace-change' | 'requested';
+  change?: 'added' | 'modified' | 'deleted';
   mediaType?: string;
   size?: number;
   sha256?: string;
+  storedPath?: string;
+}
+
+export interface SandboxPatchProposal {
+  version: 1;
+  operations: unknown[];
 }
 
 export interface SandboxExecuteResult {
@@ -62,7 +71,10 @@ export interface SandboxExecuteResult {
   durationMs: number;
   outputTruncated: boolean;
   containerId?: string;
+  artifactBundleId?: string;
   artifacts: SandboxArtifact[];
+  patch?: SandboxPatchProposal;
+  warnings?: string[];
 }
 
 export interface SandboxAdapter {
@@ -75,6 +87,7 @@ export type SandboxErrorCode =
   | 'sandbox_invalid_request'
   | 'sandbox_network_denied'
   | 'sandbox_stage_failed'
+  | 'sandbox_artifact_failed'
   | 'sandbox_launch_failed';
 
 export class SandboxError extends Error {

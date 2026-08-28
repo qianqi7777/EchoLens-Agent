@@ -63,7 +63,7 @@ test('Sandbox 暂存区排除 .env、私有目录和 Git 忽略文件', async (t
   await assert.rejects(readFile(join(staged.root, 'studydocs', 'private.md'), 'utf8'));
 });
 
-test('Docker Sandbox 对网络、越界 cwd 和缺失 Docker 失败关闭', async (t) => {
+test('Docker Sandbox 对未授权网络、越界 cwd 和缺失 Docker 失败关闭', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-deny-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const runner = new RecordingRunner([result({ spawnError: 'ENOENT' })]);
@@ -76,6 +76,32 @@ test('Docker Sandbox 对网络、越界 cwd 和缺失 Docker 失败关闭', asyn
   await assert.rejects(sandbox.execute(request(root)), (error: unknown) => (
     error instanceof SandboxError && error.code === 'sandbox_unavailable'
   ));
+});
+
+test('package_install 使用内部网络和域名代理 sidecar，不提供直连网络', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-network-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'package.json'), '{"private":true}\n');
+  const runner = new RecordingRunner([]);
+  const sandbox = new DockerSandboxAdapter({ runner, image: 'echolens-test:local' });
+
+  const executed = await sandbox.execute(request(root, {
+    kind: 'package_install',
+    command: { executable: 'npm', args: ['install', 'example-package'] },
+    workspaceAccess: 'read-write',
+    network: { mode: 'allowlist', allowedDomains: ['registry.npmjs.org'], allowedPorts: [443] },
+  }));
+
+  assert.equal(executed.status, 'passed');
+  const internalCreate = runner.requests.find((item) => item.args[0] === 'network' && item.args.includes('--internal'));
+  assert.ok(internalCreate);
+  const proxyRun = runner.requests.find((item) => item.args[0] === 'run' && item.args.includes('/opt/echolens/proxy.mjs'));
+  assert.ok(proxyRun);
+  const workload = runner.requests.find((item) => item.args[0] === 'run' && item.args.includes('example-package'));
+  assert.ok(workload);
+  assert.equal(hasPair(workload.args, '--network', 'none'), false);
+  assert.ok(workload.args.includes('HTTPS_PROXY=http://egress-proxy:3128'));
+  assert.ok(runner.requests.some((item) => item.args[0] === 'network' && item.args[1] === 'rm'));
 });
 
 test('Docker Sandbox 超时后按随机容器名执行强制清理', async (t) => {

@@ -77,7 +77,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
             items: {
               type: 'object',
               properties: {
-                op: { type: 'string', enum: ['replace', 'create', 'delete'] },
+                op: { type: 'string', enum: ['replace', 'overwrite', 'create', 'delete'] },
                 path: pathProperty,
                 oldString: { type: 'string', maxLength: 1_000_000 },
                 newString: { type: 'string', maxLength: 1_000_000 },
@@ -102,7 +102,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
   });
 }
 
-async function applyStructuredPatch(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+export async function applyStructuredPatch(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
   try {
     const result = await applyPatch(context.workspaceRoot, args.patch);
     const checkpointId = await saveEditCheckpoint(context.workspaceRoot, result.checkpoint);

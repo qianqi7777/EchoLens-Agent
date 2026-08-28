@@ -26,7 +26,12 @@ export type ToolErrorCode =
   | 'sandbox_invalid_request'
   | 'sandbox_network_denied'
   | 'sandbox_stage_failed'
+  | 'sandbox_artifact_failed'
   | 'sandbox_launch_failed'
+  | 'mcp_config_invalid'
+  | 'mcp_connection_failed'
+  | 'mcp_request_failed'
+  | 'mcp_tool_error'
   | 'command_failed';
 
 export interface ToolError {

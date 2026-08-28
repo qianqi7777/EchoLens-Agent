@@ -403,6 +403,17 @@ export class ReactAgent {
         runId: machine.runId,
         callId: call.callId,
       },
+      reportProgress: (progress) => {
+        void emit(machine, eventSink, {
+          payload: {
+            type: 'tool.progress',
+            callId: call.callId,
+            toolName: call.name,
+            progress: progress.value,
+            total: progress.total,
+          },
+        });
+      },
     };
     let started = performance.now();
     const outcome = await this.executor.invokeWithDecision(

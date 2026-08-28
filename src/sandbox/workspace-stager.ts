@@ -9,7 +9,14 @@ export interface StagedWorkspace {
   root: string;
   fileCount: number;
   totalBytes: number;
+  baseline: readonly StagedFileSnapshot[];
   cleanup(): Promise<void>;
+}
+
+export interface StagedFileSnapshot {
+  path: string;
+  bytes: Buffer;
+  mode: number;
 }
 
 export interface WorkspaceStager {
@@ -49,6 +56,7 @@ export class FileSystemWorkspaceStager implements WorkspaceStager {
       if (files.length > this.maxFiles) throw new SandboxError('sandbox_stage_failed', `Sandbox 快照文件数超过 ${this.maxFiles}`);
       let totalBytes = 0;
       let fileCount = 0;
+      const baseline: StagedFileSnapshot[] = [];
       for (const relative of files) {
         const source = await policy.readFileBytes(relative, this.maxFileBytes).catch((error) => {
           if (error instanceof PathPolicyError && error.code === 'path_not_found') return undefined;
@@ -66,12 +74,14 @@ export class FileSystemWorkspaceStager implements WorkspaceStager {
         await writeFile(target, source.bytes, { mode: 0o644 });
         const sourceStat = await policy.resolveExisting(relative, 'file');
         if ((Number(sourceStat.stat.mode) & 0o111) !== 0) await chmod(target, 0o755);
+        baseline.push({ path: relative, bytes: Buffer.from(source.bytes), mode: Number(sourceStat.stat.mode) });
         fileCount += 1;
       }
       return {
         root: targetRoot,
         fileCount,
         totalBytes,
+        baseline,
         cleanup: async () => {
           assertInside(sandboxBase, targetBase);
           await rm(targetBase, { recursive: true, force: true });

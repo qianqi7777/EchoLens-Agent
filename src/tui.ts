@@ -278,6 +278,7 @@ export class TerminalUi {
     if (payload.type === 'model.started') this.status = `模型步骤 ${payload.step + 1}`;
     else if (payload.type === 'model.output.delta') this.stream += cleanDisplayText(payload.delta);
     else if (payload.type === 'tool.started') this.log(`工具 ${payload.toolName} 开始`);
+    else if (payload.type === 'tool.progress') this.status = `工具 ${payload.toolName}：${payload.total ? `${payload.progress}/${payload.total}` : payload.progress}`;
     else if (payload.type === 'tool.completed') this.log(`工具 ${payload.toolName} ${payload.status} ${payload.elapsedMs}ms`);
     else if (payload.type === 'model.retry') this.log(`模型重试 ${payload.attempt}：${payload.code}`);
     else if (payload.type === 'approval.requested') this.status = `等待审批：${payload.permission}`;

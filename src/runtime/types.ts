@@ -41,7 +41,7 @@ export interface JsonSchemaNode {
 export interface JsonSchema extends JsonSchemaNode {
   type: 'object';
   properties?: Record<string, JsonSchemaNode>;
-  additionalProperties: false;
+  additionalProperties: boolean | JsonSchemaNode;
 }
 
 export interface ToolSpec {
@@ -67,6 +67,7 @@ export interface ToolContext {
     callId?: string;
     workspaceRevision?: string;
   };
+  reportProgress?: (progress: { value: number; total?: number }) => void;
   signal: AbortSignal;
 }
 

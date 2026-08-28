@@ -52,6 +52,18 @@ test('Patch 支持 create/delete，并能回滚删除文件', async (context) =>
   assert.equal(await readFile(join(root, 'old.txt')).catch(() => undefined), undefined);
 });
 
+test('overwrite 使用原文件哈希安全地整体替换空文件', async (context) => {
+  const root = await workspace(context);
+  await writeFile(join(root, 'empty.txt'), '');
+  const emptyHash = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  const applied = await applyPatch(root, {
+    version: 1,
+    operations: [{ op: 'overwrite', path: 'empty.txt', content: 'generated\n', expectedFileHash: emptyHash }],
+  });
+  assert.equal(await readFile(join(root, 'empty.txt'), 'utf8'), 'generated\n');
+  assert.equal(applied.preview.files[0]?.operation, 'overwrite');
+});
+
 test('回滚不会覆盖 Patch 完成后产生的用户修改', async (context) => {
   const root = await workspace(context);
   await writeFile(join(root, 'file.txt'), 'before\n');

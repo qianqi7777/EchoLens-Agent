@@ -34,6 +34,12 @@ export function createEventRenderer(
       } else if (event.payload.type === 'tool.started') {
         closeLine();
         sink.log(`[tool] ${event.payload.toolName} started`);
+      } else if (event.payload.type === 'tool.progress') {
+        closeLine();
+        const progress = event.payload.total
+          ? `${event.payload.progress}/${event.payload.total}`
+          : String(event.payload.progress);
+        sink.log(`[tool] ${event.payload.toolName} progress ${progress}`);
       } else if (event.payload.type === 'tool.completed') {
         closeLine();
         sink.log(`[tool] ${event.payload.toolName} ${event.payload.status} ${event.payload.elapsedMs}ms`);

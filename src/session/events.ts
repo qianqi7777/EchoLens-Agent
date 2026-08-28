@@ -42,6 +42,7 @@ export type AgentEventPayload =
     }
   | { type: 'model.failed'; step: number; code: string; retryable: boolean }
   | { type: 'tool.started'; callId: string; toolName: string; callIndex: number }
+  | { type: 'tool.progress'; callId: string; toolName: string; progress: number; total?: number }
   | {
       type: 'tool.completed';
       callId: string;

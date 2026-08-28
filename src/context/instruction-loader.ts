@@ -14,8 +14,9 @@ const PERMISSIONS = new Set<Permission>([
   'workspace.write',
   'process.exec',
   'network.request',
+  'external.invoke',
 ]);
-const DIRECTIVE_PATTERN = /<!--\s*echolens:\s*(deny|request_approval)\s+(workspace\.read|workspace\.write|process\.exec|network\.request)(?:\s+reason="([^"]{1,240})")?\s*-->/gu;
+const DIRECTIVE_PATTERN = /<!--\s*echolens:\s*(deny|request_approval)\s+(workspace\.read|workspace\.write|process\.exec|network\.request|external\.invoke)(?:\s+reason="([^"]{1,240})")?\s*-->/gu;
 
 export interface InstructionLoaderOptions {
   workspaceRoot: string;

@@ -10,6 +10,7 @@ import { PathPolicy, PathPolicyError, validateRelativePath } from './path-policy
 
 export type PatchOperation =
   | ReplacePatchOperation
+  | OverwritePatchOperation
   | CreatePatchOperation
   | DeletePatchOperation;
 
@@ -20,6 +21,13 @@ export interface ReplacePatchOperation {
   newString: string;
   expectedFileHash?: string;
   expectedContext?: { before?: string; after?: string };
+}
+
+export interface OverwritePatchOperation {
+  op: 'overwrite';
+  path: string;
+  content: string;
+  expectedFileHash: string;
 }
 
 export interface CreatePatchOperation {
@@ -160,6 +168,18 @@ export function normalizePatch(value: unknown, options: StructuredPatchOptions =
         expectedContext: normalizeContext(candidate.expectedContext),
       } satisfies ReplacePatchOperation;
     }
+    if (candidate.op === 'overwrite') {
+      const expectedFileHash = optionalString(candidate.expectedFileHash);
+      if (typeof candidate.content !== 'string' || !expectedFileHash) {
+        throw new PatchError('patch_invalid', `overwrite 必须提供 content 和 expectedFileHash：${normalizedPath}`, normalizedPath);
+      }
+      return {
+        op: 'overwrite',
+        path: normalizedPath,
+        content: candidate.content,
+        expectedFileHash,
+      } satisfies OverwritePatchOperation;
+    }
     if (candidate.op === 'create') {
       if (typeof candidate.content !== 'string') {
         throw new PatchError('patch_invalid', `create 缺少 content：${normalizedPath}`, normalizedPath);
@@ -205,6 +225,12 @@ export async function previewPatch(
       if (expected !== hashBytes(current!)) throw new PatchError('patch_hash_mismatch', `删除文件哈希不匹配：${operation.path}`, operation.path);
       previews.push(filePreview(operation, current!, undefined));
       states.set(operation.path, Buffer.alloc(0));
+      continue;
+    }
+    if (operation.op === 'overwrite') {
+      const next = encodeText(operation.content, decoded.bom, decoded.newline);
+      previews.push(filePreview(operation, current!, next));
+      states.set(operation.path, next);
       continue;
     }
     const oldLogical = logicalNewlines(operation.oldString);
@@ -440,6 +466,7 @@ async function materializeOperation(policy: PathPolicy, operation: PatchOperatio
   if (operation.expectedFileHash && operation.expectedFileHash !== hashBytes(current)) {
     throw new PatchError('patch_workspace_changed', `文件在应用前发生变化：${operation.path}`, operation.path);
   }
+  if (operation.op === 'overwrite') return encodeText(operation.content, decoded.bom, decoded.newline);
   const oldLogical = logicalNewlines(operation.oldString);
   const contentLogical = logicalNewlines(decoded.text);
   const matches = countMatches(contentLogical, oldLogical);

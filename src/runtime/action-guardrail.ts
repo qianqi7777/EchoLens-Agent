@@ -52,6 +52,9 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
       );
     }
 
+    if (tool.permission !== 'workspace.read') {
+      return outcome('allow', 'read_action_allowed', '受信只读工具通过动作检查', args);
+    }
     const hasPathParameter = Boolean(tool.inputSchema.properties?.path);
     const requestedPath = args.path ?? (hasPathParameter ? '.' : undefined);
     if (typeof requestedPath !== 'string') {
@@ -97,7 +100,8 @@ function effectForPermission(permission: ToolSpec['permission']): ToolEffect {
   if (permission === 'workspace.read') return 'read';
   if (permission === 'workspace.write') return 'write';
   if (permission === 'process.exec') return 'process';
-  return 'network';
+  if (permission === 'network.request') return 'network';
+  return 'external';
 }
 
 function hasDangerousObjectKey(value: unknown): boolean {
