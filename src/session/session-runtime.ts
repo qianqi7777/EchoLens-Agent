@@ -3,12 +3,14 @@ import type { ConversationItem } from '../core/messages.js';
 import type { AgentRunResult, ReactAgent } from '../runtime/react-loop.js';
 import type { AgentCheckpoint, AgentEvent } from './events.js';
 import { JsonlEventStore, type JsonlEventStoreOptions } from './jsonl-event-store.js';
+import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 
 export interface SessionRuntimeOptions {
   rootDirectory: string;
   workspaceRoot: string;
   sessionId?: string;
   storeOptions?: JsonlEventStoreOptions;
+  hooks?: LifecycleHookRunner;
 }
 
 export class SessionRuntime {
@@ -35,7 +37,8 @@ export class SessionRuntime {
     const runtime = new SessionRuntime(agent, store);
     const events = await store.read();
     if (events.length === 0) {
-      await store.append({ payload: { type: 'session.created', workspaceRoot: options.workspaceRoot } });
+      const event = await store.append({ payload: { type: 'session.created', workspaceRoot: options.workspaceRoot } });
+      await options.hooks?.observe(event);
     } else {
       const created = events.find((event) => event.payload.type === 'session.created');
       if (!created || created.payload.type !== 'session.created') {

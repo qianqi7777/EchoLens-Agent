@@ -1,5 +1,5 @@
 const REDACTED = '[REDACTED]';
-const sensitiveKey = /(?:authorization|proxy-authorization|cookie|set-cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|secret|credential)/i;
+const sensitiveKey = /(?:authorization|proxy-authorization|cookie|set-cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|^token$|password|passwd|secret|credential)/i;
 const sensitiveQueryKey = /(?:key|token|secret|password|signature|credential|authorization)/i;
 
 export interface RedactionResult<T> {

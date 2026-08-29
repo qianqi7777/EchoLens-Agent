@@ -8,6 +8,11 @@ import {
   type EditCheckpoint,
   type EditVerificationResult,
 } from './runtime/index.js';
+import {
+  executeBackgroundTaskCommand,
+  isBackgroundTaskCommand,
+  type BackgroundTaskCommands,
+} from './orchestration/task-command.js';
 
 const ESC = '\u001b[';
 const RESET = `${ESC}0m`;
@@ -32,6 +37,7 @@ export interface TuiOptions {
   verify: () => Promise<readonly EditVerificationResult[]>;
   rollback: (checkpoint: EditCheckpoint) => Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   loadCheckpoint: (id: string) => Promise<EditCheckpoint>;
+  backgroundTasks?: BackgroundTaskCommands;
   startupMessages?: readonly string[];
 }
 
@@ -108,6 +114,11 @@ export class TerminalUi {
     return new Promise<ApprovalDecision>((resolve) => {
       if (this.approval) this.approval.resolve = resolve;
     });
+  }
+
+  notify(message: string): void {
+    this.log(message);
+    this.render();
   }
 
   private exitResolver?: () => void;
@@ -196,8 +207,20 @@ export class TerminalUi {
     this.log(`you ${prompt}`);
     if (prompt === '/exit' || prompt === '/quit') { this.stop(); return; }
     if (prompt === '/help') {
-      this.log('/resume 继续 | /sessions 会话 | /verify 验证 | /rollback <id> 回滚 | /steer <要求> | /clear 清屏 | /exit 退出');
+      this.log('/resume 继续 | /sessions 会话 | /tasks 后台任务 | /task help 委托 | /verify 验证 | /rollback <id> 回滚 | /steer <要求> | /clear 清屏 | /exit 退出');
       this.render();
+      return;
+    }
+    if (isBackgroundTaskCommand(prompt)) {
+      if (!this.options.backgroundTasks) {
+        this.log('后台任务服务不可用。');
+        this.render();
+        return;
+      }
+      await this.runTask('正在处理后台任务...', async () => {
+        const result = await executeBackgroundTaskCommand(prompt, this.options.backgroundTasks!);
+        for (const line of result.lines) this.log(line);
+      });
       return;
     }
     if (prompt === '/clear') {
@@ -297,7 +320,7 @@ export class TerminalUi {
     const height = Math.max(12, stdout.rows || 24);
     const rule = '─'.repeat(Math.min(width, 120));
     const lines: string[] = [];
-    lines.push(`${CYAN}◆ EchoLens Agent${RESET}  ${DIM}v0.5${RESET}  ${MAGENTA}${this.options.route}${RESET}  ${DIM}${this.options.privacy ?? 'full-context'}${RESET}`);
+    lines.push(`${CYAN}◆ EchoLens Agent${RESET}  ${DIM}v0.6${RESET}  ${MAGENTA}${this.options.route}${RESET}  ${DIM}${this.options.privacy ?? 'full-context'}${RESET}`);
     lines.push(`${DIM}${truncate(this.options.model, width - 4)}${RESET}`);
     lines.push(`${DIM}${truncate(this.options.workspaceRoot, width - 4)}${RESET}`);
     lines.push(`${this.busy ? YELLOW : GREEN}${this.busy ? `${spinner(this.spinnerIndex)} ` : '● '}${truncate(this.status, width - 4)}${RESET}`);

@@ -39,4 +39,12 @@ export class ToolRegistry {
   list(): ToolSpec[] {
     return [...this.items.values()].map((item) => item.spec).sort((a, b) => a.name.localeCompare(b.name));
   }
+
+  subset(names: ReadonlySet<string>): ToolRegistry {
+    const registry = new ToolRegistry();
+    for (const tool of this.list()) {
+      if (names.has(tool.name)) registry.register(tool);
+    }
+    return registry;
+  }
 }

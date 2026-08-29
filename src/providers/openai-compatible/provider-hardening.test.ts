@@ -270,12 +270,14 @@ test('redaction handles headers, query strings, nested values, and errors', () =
   const url = redactUrl(`https://user:${secret}@example.test/v1?api_key=${secret}&model=test`);
   const value = redactValue({
     apiKey: secret,
+    token: 'short-secret',
     nested: { message: `Bearer ${secret}` },
     error: new Error(`access_token=${secret}`),
   });
 
   const serialized = JSON.stringify({ headers, url, value });
   assert.equal(serialized.includes(secret), false);
+  assert.equal(serialized.includes('short-secret'), false);
   assert.equal(serialized.includes('[REDACTED]') || serialized.includes('%5BREDACTED%5D'), true);
 });
 

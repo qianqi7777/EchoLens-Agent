@@ -6,6 +6,14 @@ import { CodeIntelligenceError } from './types.js';
 import { CodeIntelligenceService, type CodeIntelligenceResult } from './code-intelligence-service.js';
 
 const pathProperty: JsonSchemaNode = { type: 'string', minLength: 1, maxLength: 4096 };
+export const CODE_INTELLIGENCE_TOOL_NAMES = [
+  'outline_file',
+  'find_symbols',
+  'go_to_definition',
+  'find_references',
+  'get_diagnostics',
+] as const;
+
 const positionProperties: Record<string, JsonSchemaNode> = {
   path: pathProperty,
   line: { type: 'integer', minimum: 1, maximum: 1_000_000 },

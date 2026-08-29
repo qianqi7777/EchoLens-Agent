@@ -24,20 +24,29 @@ import {
   type ApprovalRequest,
   type AgentRunResult,
   initializeRuntimeExtensions,
+  PersistentTaskQueue,
+  SubagentBackgroundService,
+  SubagentOrchestrator,
+  executeBackgroundTaskCommand,
+  formatBackgroundTask,
+  isBackgroundTaskCommand,
+  registerSubagentTool,
 } from './runtime/index.js';
 
-const terminal = readline.createInterface({ input, output });
+const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
 try {
-  await ensureStartupConfiguration({ terminal, force: forceSetup });
+  await ensureStartupConfiguration({ terminal: setupTerminal, force: forceSetup });
 } catch (error) {
   console.error(`初始化失败：${error instanceof Error ? error.message : String(error)}`);
-  terminal.close();
+  setupTerminal.close();
   process.exit(1);
 }
-terminal.close();
+setupTerminal.close();
 
 const workspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
+const useTui = Boolean(input.isTTY && output.isTTY && input.setRawMode);
+const lineTerminal = useTui ? undefined : readline.createInterface({ input, output });
 const registry = new ToolRegistry();
 registerWorkspaceTools(registry);
 try {
@@ -57,7 +66,7 @@ if (!model) {
   console.error(`模型路由不可用 [${status.reasonCode}]：${status.reason}`);
   console.error('运行 npm run setup 可以重新配置。');
   process.exitCode = 1;
-  terminal.close();
+  lineTerminal?.close();
 } else {
   const extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
   const startupMessages = [
@@ -65,14 +74,33 @@ if (!model) {
     `MCP 已连接 ${extensions.connectedMcpServers.length} 个 Server`,
     ...extensions.notices,
   ];
+  let backgroundTasks: SubagentBackgroundService | undefined;
   try {
   const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
   let tui: TerminalUi | undefined;
+  const subagents = new SubagentOrchestrator(model, registry, workspaceRoot);
+  registerSubagentTool(registry, subagents);
+  backgroundTasks = new SubagentBackgroundService(
+    new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
+    subagents,
+    (task) => {
+      const message = `后台任务：${formatBackgroundTask(task)}`;
+      if (tui) tui.notify(message);
+      else output.write(`\n${message}\n`);
+    },
+    (error) => {
+      const message = `后台任务通知异常：${error instanceof Error ? error.message : String(error)}`;
+      if (tui) tui.notify(message);
+      else console.error(message);
+    },
+  );
   const executor = new ToolExecutor(registry, {
     approvalStore,
     approvalDecider: async (request) => tui
       ? tui.requestApproval(request)
-      : interactiveApproval(request),
+      : lineTerminal
+        ? interactiveApproval(request, lineTerminal)
+        : { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '没有可用审批终端' },
     timeoutMs: 120_000,
   });
   const agent = new ReactAgent(model, registry, executor, {
@@ -88,7 +116,6 @@ if (!model) {
     sessionId: requestedSession,
     storeOptions: { flushEachEvent: false },
   });
-  const useTui = Boolean(input.isTTY && output.isTTY && input.setRawMode);
   if (useTui) {
     tui = new TerminalUi({
       model: status.model ?? 'unknown',
@@ -103,6 +130,7 @@ if (!model) {
       verify: async () => runVerification(await selectVerificationPlan(workspaceRoot, [])),
       rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
       loadCheckpoint: (id) => loadEditCheckpoint(workspaceRoot, id),
+      backgroundTasks,
       startupMessages,
     });
     try {
@@ -139,7 +167,7 @@ if (!model) {
       activeTurn = undefined;
     }
   };
-  terminal.on('SIGINT', () => {
+  lineTerminal!.on('SIGINT', () => {
     if (activeTurn && !activeTurn.signal.aborted) {
       output.write('\n正在取消当前 Turn...\n');
       activeTurn.abort('user_cancelled');
@@ -153,10 +181,10 @@ if (!model) {
   );
   console.log(`workspace=${workspaceRoot}`);
   for (const message of startupMessages) console.log(message);
-  console.log('输入问题开始分析；/sessions 查看会话，/resume 恢复，/verify 验证，/rollback <id> 回滚，/exit 退出。');
+  console.log('输入问题开始分析；/sessions 查看会话，/tasks 查看后台任务，/task help 查看委托命令，/exit 退出。');
   try {
     while (true) {
-      const prompt = (await terminal.question('\n> ')).trim();
+      const prompt = (await lineTerminal!.question('\n> ')).trim();
       if (!prompt) continue;
       if (prompt === '/exit' || prompt === '/quit') break;
       if (prompt === '/sessions') {
@@ -165,6 +193,15 @@ if (!model) {
           console.log(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`);
         }
         if (sessions.length === 0) console.log('暂无 Session。');
+        continue;
+      }
+      if (isBackgroundTaskCommand(prompt)) {
+        try {
+          const result = await executeBackgroundTaskCommand(prompt, backgroundTasks);
+          for (const line of result.lines) console.log(line);
+        } catch (error) {
+          console.error(`后台任务命令失败：${error instanceof Error ? error.message : String(error)}`);
+        }
         continue;
       }
       if (prompt === '/verify') {
@@ -194,14 +231,19 @@ if (!model) {
     }
   } finally {
     await session.close();
+    lineTerminal?.close();
   }
   }
   } finally {
+    await backgroundTasks?.close();
     await extensions.close();
   }
 }
 
-async function interactiveApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
+async function interactiveApproval(
+  request: ApprovalRequest,
+  terminal: readline.Interface,
+): Promise<ApprovalDecision> {
   console.log(`\n需要审批：${request.toolName} (${request.permission})`);
   console.log(`原因：${request.reason}`);
   if (request.toolName === 'apply_patch' || request.toolName === 'apply_sandbox_patch') {

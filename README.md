@@ -1,7 +1,7 @@
 # EchoLens Agent
 
-一个从零开始、模型中立的本地代码 Agent。v0.5 开始提供 Docker Sandbox、
-安全编辑闭环、可恢复会话和全屏 TUI，远程 Gateway 始终没有本地工具执行权。
+一个从零开始、模型中立的本地代码 Agent。v0.6 提供动态评测、持久后台任务和
+受限子 Agent，并延续 Docker Sandbox、安全编辑闭环与可恢复会话。
 
 ## 已有能力
 
@@ -29,6 +29,11 @@
 - 支持 MCP stdio、Streamable HTTP、Tools、Resources、Prompts、进度与取消
 - 提供 `outline_file`、`find_symbols`、`go_to_definition`、`find_references`、`get_diagnostics`
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
+- 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
+- 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
+- 提供持久后台任务队列、租约恢复、显式取消/恢复和状态通知
+- 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
+- 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
 
 ## 快速开始
 
@@ -59,12 +64,30 @@ npm run dev -- --resume latest
 - `/sessions`：列出最近 Session
 - `/resume`：恢复当前 Session 的未完成 Turn
 - `/steer 新要求`：持久化新要求并从当前检查点继续
+- `/tasks`：列出最近后台任务
+- `/task <explore|test|review> [sandbox|worktree] <目标>`：创建并启动受限后台任务
+- `/task cancel <id>`：取消后台任务
+- `/task resume <id>`：显式恢复待处理、失败或已取消任务
 - `Ctrl+C`：只取消当前 Turn，不删除 Session
 - `/exit`：退出 CLI
 
 TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚和 steering 命令。
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
+
+## Evals 与编排
+
+Eval CLI 只读取本地任务和 Candidate JSON。默认结果写入 Git 忽略的
+`.echolens/evals/results.jsonl`；只有显式使用 `--docker` 才会执行隐藏命令检查。
+
+```powershell
+npm run eval:smoke
+npm run eval -- --task <task.json> --candidate <candidate.json>
+npm run eval -- --template <template.json> --seed <seed> --candidate <candidate.json>
+```
+
+后台 Worker 不会在应用启动时自动运行待处理任务。创建或执行 `/task resume <id>` 才会启动；
+正常退出会释放运行中租约并回到 `pending`，不会把任务误标成用户取消。
 
 ## Sandbox
 
@@ -112,6 +135,8 @@ src/
   core/                  模型中立的消息、权限与 System Policy
   context/               项目指令来源和权限收紧契约
   code-intelligence/     tree-sitter 索引、TypeScript LSP 和代码工具
+  evals/                 Eval Harness、动态任务、结果存储和指标
+  orchestration/         后台队列、独立工作区、受限子 Agent 和只读 Hook
   credentials/           凭据引用与异步解析接口
   mcp/                   MCP 配置、Client 生命周期与工具桥接
   providers/
@@ -141,11 +166,10 @@ contracts/
 
 ## 当前边界
 
-v0.5 已实现 Docker Sandbox、Artifact/Patch 回传、域名级网络代理、MCP Client 和
-TypeScript/JavaScript 的 tree-sitter/LSP 代码智能。Docker 缺失时 Sandbox 工具会明确失败，
-不会提供低隔离的 Windows 宿主执行。当前 LSP 语言覆盖仍限于 TypeScript/JavaScript，MCP
-OAuth 与 Skills/Hooks 尚未实现。远程 Gateway 只代理模型请求，不具备读取工作区或执行本地
-工具的权限。
+v0.6 已实现 Eval、持久后台任务和同进程受限子 Agent。A2A 暂不接入：当前编排没有跨服务、
+跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
+回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和
+可执行生命周期 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

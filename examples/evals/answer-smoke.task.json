@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "answer-smoke",
+  "version": "1.0.0",
+  "kind": "answer",
+  "title": "Local answer smoke",
+  "prompt": "Return echolens-eval-ok",
+  "introducedAt": "2026-08-29T00:00:00.000Z",
+  "leakageRisk": "low",
+  "tags": ["smoke", "local"],
+  "fixture": { "files": [] },
+  "grader": {
+    "type": "answer",
+    "mode": "exact",
+    "expected": "echolens-eval-ok"
+  }
+}

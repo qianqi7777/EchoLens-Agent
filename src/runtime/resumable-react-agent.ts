@@ -46,6 +46,7 @@ import type {
   ToolResult,
   ToolSpec,
 } from './types.js';
+import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 
 export interface AgentRunResult {
   answer: string;
@@ -77,6 +78,7 @@ export interface ReactAgentOptions {
   instructionTarget?: string;
   contextManager?: ContextManager;
   toolScheduler?: ToolScheduler;
+  hooks?: LifecycleHookRunner;
 }
 
 interface RunMachine {
@@ -90,6 +92,7 @@ interface RunMachine {
   parentEventId?: string;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
   takeSteering?: () => Promise<string[]>;
+  hooks?: LifecycleHookRunner;
 }
 
 /** 显式、可检查点恢复的 model -> tools -> model 状态机。 */
@@ -135,6 +138,7 @@ export class ReactAgent {
       trace: [],
       onEvent: runtime.onEvent,
       takeSteering: runtime.takeSteering,
+      hooks: this.options.hooks,
     };
     this.executor.resetBudget();
     await emit(machine, runtime.eventSink, { payload: { type: 'turn.started', userMessage } });
@@ -163,6 +167,7 @@ export class ReactAgent {
       trace: [],
       onEvent: runtime.onEvent,
       takeSteering: runtime.takeSteering,
+      hooks: this.options.hooks,
     };
     this.executor.restoreBudget(checkpoint.toolCallsUsed);
     await emit(machine, runtime.eventSink, {
@@ -692,6 +697,7 @@ async function emit(
       };
   machine.parentEventId = event.eventId;
   await machine.onEvent?.(event);
+  await machine.hooks?.observe(event);
   return event;
 }
 

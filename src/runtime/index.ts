@@ -30,3 +30,5 @@ export * from './runtime-extensions.js';
 export * from '../sandbox/index.js';
 export * from '../mcp/index.js';
 export * from '../code-intelligence/index.js';
+export * from '../evals/index.js';
+export * from '../orchestration/index.js';
