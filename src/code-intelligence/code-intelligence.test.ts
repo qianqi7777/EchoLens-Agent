@@ -21,6 +21,7 @@ test('tree-sitter 提取符号并在 LSP 不可用时完成定义、引用和诊
   assert.ok(symbols.some((symbol) => symbol.name === 'label' && symbol.kind === 'field'));
   assert.ok(symbols.every((symbol) => symbol.path === 'src/source.ts' && symbol.evidenceId.startsWith('code:')));
 
+  // 用必然抛 lsp_unavailable 的桩后端确定性覆盖 LSP→tree-sitter 降级路径，避免依赖真实子进程。
   const service = new CodeIntelligenceService(root, { treeSitter: tree, languageService: unavailableLsp() });
   const usage = "export const message = greet('Echo');";
   const column = usage.indexOf('greet') + 1;
@@ -54,6 +55,8 @@ test('真实 TypeScript Language Server 返回工作区相对定义、引用和�
   const usage = "export const message = greet('Echo');";
   const column = usage.indexOf('greet') + 1;
 
+  // LSP 诊断由服务器异步推送，首次 didOpen 后存在推送窗口；client.diagnostics 已内置
+  // 5s 等待，此处断言结果来源是 lsp 而非 tree-sitter-fallback。
   const definitions = await client.definition('src/usage.ts', 2, column);
   const references = await client.references('src/usage.ts', 2, column);
   const diagnostics = await client.diagnostics('src/type-error.ts');
@@ -61,6 +64,7 @@ test('真实 TypeScript Language Server 返回工作区相对定义、引用和�
   assert.ok(definitions.some((item) => item.path === 'src/source.ts'));
   assert.ok(references.some((item) => item.path === 'src/usage.ts'));
   assert.ok(diagnostics.every((item) => item.path === 'src/type-error.ts' && item.source === 'lsp'));
+  // 校验所有返回位置均为工作区相对路径，不泄露临时根目录的绝对路径。
   assert.ok([...definitions, ...references, ...diagnostics].every((item) => !item.path.includes(root)));
 });
 
@@ -85,6 +89,8 @@ async function fixture(): Promise<string> {
     "export const message = greet('Echo');",
     '',
   ].join('\n'));
+  // broken.ts 故意写成语法错误（tree-sitter 的 ERROR 结点），type-error.ts 故意含类型错误，
+  // 分别验证降级诊断与真实 LSP 诊断两条路径。
   await writeFile(join(root, 'src', 'broken.ts'), 'export const broken = ;\n');
   await writeFile(join(root, 'src', 'type-error.ts'), 'export const value: string = 42;\n');
   return root;

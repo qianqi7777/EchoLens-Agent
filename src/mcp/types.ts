@@ -1,6 +1,7 @@
 import type { Progress, Tool } from '@modelcontextprotocol/client';
 
 export type McpTrustLevel = 'untrusted' | 'trusted';
+/** 协议协商模式：'2026-07-28' 是固定到该 MCP 协议版本的 pin 值，legacy / auto 交给 SDK 协商。 */
 export type McpProtocolMode = 'legacy' | 'auto' | '2026-07-28';
 
 export interface McpStdioTransportConfig {
@@ -21,6 +22,7 @@ export interface McpHttpTransportConfig {
 export interface McpServerConfig {
   id: string;
   enabled: boolean;
+  /** trusted 只放宽「标记为只读的工具」的自动审批（需同时开启 autoApproveReadOnly），不改变其他权限门槛。 */
   trust: McpTrustLevel;
   protocolMode?: McpProtocolMode;
   timeoutMs?: number;

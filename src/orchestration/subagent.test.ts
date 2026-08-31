@@ -36,6 +36,8 @@ test('Explore 子 Agent 只看到白名单工具，父级只收到结构化摘�
   const result = await new SubagentOrchestrator(model, registry, root, allocator).run({
     profile: 'explore', objective: 'inspect symbols', workspaceMode: 'worktree',
   });
+  // 验证信任边界：源注册表含 shell_exec(process.exec)，但 explore 子 Agent 模型可见的工具列表不得包含它，
+  // 且父级只收到结构化 summary/evidence，不外泄 items 原始轨迹。
   const names = model.requests[0]?.tools?.map((tool) => tool.name).sort() ?? [];
   assert.equal(names.includes('shell_exec'), false);
   assert.deepEqual(names, [
@@ -53,6 +55,7 @@ test('Explore 子 Agent 只看到白名单工具，父级只收到结构化摘�
 test('仓库级 Hook 未显式信任时跳过，受信 Hook 只能观察克隆事件', async () => {
   let observed = '';
   const runner = new LifecycleHookRunner({ trustedRepositoryHooks: new Set(['trusted']) });
+  // untrusted 仓库 Hook 若被执行会抛错，验证未显式信任的仓库 Hook 被跳过；受信 Hook 只接收只读克隆事件。
   runner.register({
     id: 'untrusted', trust: 'repository', stages: new Set(['tool']),
     handle: async () => { throw new Error('must not run'); },
@@ -77,6 +80,7 @@ test('代码智能工具绑定子 Agent 租约目录而不是主工作区', asyn
     rm(sourceRoot, { recursive: true, force: true }),
     rm(leaseRoot, { recursive: true, force: true }),
   ]));
+  // 两个 Fixture 分别含 RootOnly/LeaseOnly 符号：证明 find_symbols 的索引绑定租约目录而非主工作区。
   await writeFile(join(sourceRoot, 'sample.ts'), 'export function RootOnly() {}\n');
   await writeFile(join(leaseRoot, 'sample.ts'), 'export function LeaseOnly() {}\n');
   const sourceRegistry = registryWithTools([

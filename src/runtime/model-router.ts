@@ -137,6 +137,8 @@ export class ModelRouter {
         audience: config.route === 'direct' ? config.providerUrl : config.gatewayUrl,
       });
     } catch (error) {
+      // 仅将 Gateway 认证/权限错误归一化为 RouteState；其余异常（配置、fetch 等）原样抛出，
+      // 避免被误判为上游不可用而掩盖真实问题。
       if (config.route === 'gateway' && error instanceof GatewayClientError) {
         return unavailable(config, gatewayState(error), error.code, error.message);
       }
@@ -253,6 +255,8 @@ export function parseModelRouteConfig(env: NodeJS.ProcessEnv): ParsedConfig {
   if (!requestedRoute) {
     return issue('not_configured', 'route_not_configured', '必须显式配置 AGENT_MODEL_ROUTE');
   }
+  // local/cloud 旧路由已删除：返回 issue 让错误配置在启动时显式失败，
+  // 而不是静默降级到某个兜底路由。
   if (requestedRoute === 'local') {
     return issue(
       'legacy_route_removed',
@@ -386,6 +390,8 @@ function privacyValue(value: string | undefined): PrivacyLevel | undefined {
     : undefined;
 }
 
+// 仅允许 codec 已实现的两类协议；新增值前必须先扩展 OpenAICompatibleProvider 的字段映射，
+// 否则会静默走错协议路径并导致字段错配。
 function protocolValue(value: string | undefined): OpenAICompatibleProtocol | undefined {
   return value === 'chat_completions' || value === 'responses' ? value : undefined;
 }
@@ -397,6 +403,8 @@ function booleanValue(value: string | undefined, defaultValue: boolean): boolean
   return undefined;
 }
 
+// 仅接受 http/https，且非 loopback 必须 https；拒绝内嵌凭据（username/password）
+// 与 query/hash，避免 Access Token 随 URL 明文或日志路径外泄。
 function serviceUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {

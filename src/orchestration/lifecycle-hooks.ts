@@ -36,6 +36,7 @@ export class LifecycleHookRunner {
   }
 
   register(hook: LifecycleHook): void {
+    // Hook ID 限定为字母数字开头 + 安全标识符字符集（最长 128），作为稳定标识符并排除特殊字符。
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(hook.id)) throw new Error('Hook ID 无效');
     if (this.hooks.has(hook.id)) throw new Error(`Hook 已注册：${hook.id}`);
     if (!['builtin', 'user', 'repository'].includes(hook.trust)) throw new Error('Hook trust 无效');
@@ -51,10 +52,13 @@ export class LifecycleHookRunner {
     const results: LifecycleHookResult[] = [];
     for (const hook of this.hooks.values()) {
       if (!hook.stages.has(stage)) continue;
+      // 仓库级 Hook 属于不可信输入：只有显式登记在 trustedRepositoryHooks 中的才会执行，其余跳过，避免仓库注入执行逻辑。
       if (hook.trust === 'repository' && !this.trustedRepositoryHooks.has(hook.id)) {
         results.push({ hookId: hook.id, status: 'skipped', reason: 'repository_hook_not_trusted' });
         continue;
       }
+      // 传给 Hook 的是 structuredClone 拷贝，Hook 无法改动原事件；且受 timeoutMs 上限约束。
+      // 无论 Hook 抛错还是超时都只记录 status，绝不向上抛，避免观察者破坏主流程。
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort('hook_timeout'), this.timeoutMs);
       try {

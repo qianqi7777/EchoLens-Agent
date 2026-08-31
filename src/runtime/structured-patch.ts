@@ -113,6 +113,8 @@ export interface StructuredPatchOptions {
 }
 
 export async function saveEditCheckpoint(workspaceRoot: string, checkpoint: EditCheckpoint): Promise<string> {
+  // 检查点包含工作区文件原文（base64），属用户敏感数据，落盘用 0o600 限制其它进程读取。
+  // ID 取内容哈希前 24 位，读入时按相同格式校验，避免外部指定任意文件名。
   const id = createHash('sha256').update(JSON.stringify(checkpoint)).digest('hex').slice(0, 24);
   const directory = path.join(workspaceRoot, '.echolens', 'checkpoints');
   await mkdir(directory, { recursive: true });
@@ -121,6 +123,8 @@ export async function saveEditCheckpoint(workspaceRoot: string, checkpoint: Edit
 }
 
 export async function loadEditCheckpoint(workspaceRoot: string, id: string): Promise<EditCheckpoint> {
+  // 先校验 ID 为 24 位十六进制，避免把构造出的路径直接当作文件名读取（路径穿越）。
+  // 再校验 version 与 workspaceRoot，确保检查点属于当前工作区，防止恢复其它工作区的状态。
   if (!/^[a-f0-9]{24}$/u.test(id)) throw new PatchError('patch_invalid', 'Checkpoint ID 无效');
   const value = JSON.parse(await readFile(path.join(workspaceRoot, '.echolens', 'checkpoints', `${id}.json`), 'utf8')) as EditCheckpoint;
   if (value.version !== 1 || value.workspaceRoot !== (await PathPolicy.create(workspaceRoot)).workspaceRoot) {
@@ -129,6 +133,8 @@ export async function loadEditCheckpoint(workspaceRoot: string, id: string): Pro
   return value;
 }
 
+// 安全上限：约束单个补丁的操作数、文件数、改动字节与改动行，防止异常或恶意的
+// 超大补丁消耗过多内存、刷屏审批 UI，也便于审批者理解改动规模。
 const DEFAULT_LIMITS = {
   maxOperations: 64,
   maxFiles: 64,
@@ -149,6 +155,7 @@ export function normalizePatch(value: unknown, options: StructuredPatchOptions =
     if (!isRecord(candidate) || typeof candidate.op !== 'string' || typeof candidate.path !== 'string') {
       throw new PatchError('patch_invalid', 'Patch 操作缺少 op 或 path');
     }
+    // 统一为 POSIX 相对路径后再判重：`.`（即根目录）与重复路径都会让补丁产生歧义，直接拒绝。
     validateRelativePath(candidate.path);
     const normalizedPath = candidate.path.replaceAll('\\', '/').replace(/^\.\//u, '') || '.';
     if (normalizedPath === '.' || paths.has(normalizedPath)) {
@@ -197,6 +204,12 @@ export function normalizePatch(value: unknown, options: StructuredPatchOptions =
   return { version: 1, operations };
 }
 
+/**
+ * 计算补丁预览，不修改工作区。
+ *
+ * 预览可安全反复调用：只读，同一路径按顺序在内存中叠加操作，绝不落盘。
+ * @throws 补丁非法、操作数/文件数/改动规模超上限、oldString 不唯一、文件哈希或上下文不匹配时抛 PatchError。
+ */
 export async function previewPatch(
   workspaceRoot: string,
   patchInput: unknown,
@@ -205,6 +218,8 @@ export async function previewPatch(
   const patch = normalizePatch(patchInput, options);
   const policy = await PathPolicy.create(workspaceRoot);
   const snapshot = await captureWorkspaceSnapshot(workspaceRoot);
+  // 预览阶段只读：操作按顺序应用到内存缓冲（states），同一路径在补丁内的后续操作
+  // 能看到此前操作的中间结果，但绝不落盘，避免在审批前改动工作区。
   const states = new Map<string, Buffer>();
   const previews: PatchFilePreview[] = [];
   for (const operation of patch.operations) {
@@ -228,6 +243,7 @@ export async function previewPatch(
       continue;
     }
     if (operation.op === 'overwrite') {
+      // 按原文件的 BOM 与换行风格重写，避免一次文本改写悄悄抹掉 CRLF 或 BOM。
       const next = encodeText(operation.content, decoded.bom, decoded.newline);
       previews.push(filePreview(operation, current!, next));
       states.set(operation.path, next);
@@ -235,6 +251,7 @@ export async function previewPatch(
     }
     const oldLogical = logicalNewlines(operation.oldString);
     const contentLogical = logicalNewlines(decoded.text);
+    // oldString 必须唯一匹配：0 次说明上下文已漂移，多次说明无法判断替换位置，两者都拒绝。
     const matches = countMatches(contentLogical, oldLogical);
     if (matches === 0) throw new PatchError('patch_context_mismatch', `未找到唯一 oldString：${operation.path}`, operation.path);
     if (matches > 1) throw new PatchError('patch_ambiguous', `oldString 匹配 ${matches} 次：${operation.path}`, operation.path);
@@ -263,6 +280,12 @@ export async function previewPatch(
   };
 }
 
+/**
+ * 应用结构化补丁到工作区，任一文件写入失败时整体回滚。
+ *
+ * 应用前再次校验工作区 revision，确保预览/审批后工作区未被外部改动。
+ * @throws PatchError；回滚本身失败时抛 `patch_rollback_failed`，需人工介入确认工作区状态。
+ */
 export async function applyPatch(
   workspaceRoot: string,
   patchInput: unknown,
@@ -271,6 +294,7 @@ export async function applyPatch(
   const preview = await previewPatch(workspaceRoot, patchInput, options);
   const policy = await PathPolicy.create(workspaceRoot);
   const currentSnapshot = await captureWorkspaceSnapshot(workspaceRoot);
+  // 预览/审批与应用之间可能隔了用户操作，revision 不一致则拒绝应用，避免覆盖用户刚做的改动。
   if (currentSnapshot.revision.value !== preview.workspaceRevision.value) {
     throw new PatchError('patch_workspace_changed', '工作区在审批或预览后发生变化');
   }
@@ -304,6 +328,7 @@ export async function applyPatch(
       }
     }
   } catch (error) {
+    // 任一文件写入失败立即整体回滚；回滚本身失败才抛 patch_rollback_failed，交由调用方人工处理。
     try { await rollbackCheckpoint(checkpoint); }
     catch (rollbackError) { throw new PatchError('patch_rollback_failed', `Patch 失败且回滚失败：${String(rollbackError)}`); }
     if (error instanceof PatchError) throw error;
@@ -318,6 +343,8 @@ export async function rollbackCheckpoint(checkpoint: EditCheckpoint): Promise<{ 
   const restoredPaths: string[] = [];
   const skippedPaths: string[] = [];
   try {
+    // 回滚只恢复到「本补丁应用前」的状态：仅当文件当前哈希等于应用后哈希时才改动它。
+    // 若用户在应用后又改了该文件，说明现状不是本补丁造成的，跳过以免覆盖用户新改动。
     for (const file of checkpoint.files) {
       if (!file.existed) {
         const current = await policy.readFileBytes(file.path).catch((error) => {
@@ -388,6 +415,8 @@ async function readCurrent(policy: PathPolicy, relativePath: string, operation: 
   }
 }
 
+// 探测 BOM 与换行风格；UTF-8 用 fatal 解码，非 UTF-8 或二进制直接拒绝
+// （patch_binary_unsupported），避免把二进制/乱码当作文本改写破坏文件。
 function decodeText(bytes: Buffer, relativePath: string): { text: string; bom: boolean; newline: 'CRLF' | 'LF' } {
   const bom = bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]));
   const body = bom ? bytes.subarray(3) : bytes;
@@ -404,6 +433,8 @@ function encodeText(text: string, bom: boolean, newline: 'CRLF' | 'LF'): Buffer 
   return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
 }
 
+// 把 CRLF（及单独 CR）统一为 LF：oldString 可能用 LF 而文件是 CRLF，直接替换会漏匹配；
+// 因此匹配与替换都在 LF 化后的文本上完成，落盘时再按原换行风格还原。
 function logicalNewlines(value: string): string { return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n'); }
 
 function countMatches(value: string, needle: string): number {
@@ -452,6 +483,8 @@ function diffLineCount(oldLines: string[], newLines: string[], removed: boolean)
     : Math.max(0, newLines.length - prefix - suffix);
 }
 
+// 应用阶段基于当前实际文件重算目标内容并再次校验哈希，与预览一致才落盘；
+// 若期间文件被外部改动，则抛 patch_workspace_changed 阻止覆盖。
 async function materializeOperation(policy: PathPolicy, operation: PatchOperation, expectedBeforeHash?: string): Promise<Buffer | undefined> {
   if (operation.op === 'create') return encodeText(operation.content, false, 'LF');
   const current = (await policy.readFileBytes(operation.path)).bytes;

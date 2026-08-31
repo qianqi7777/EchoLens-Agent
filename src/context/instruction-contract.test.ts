@@ -56,6 +56,8 @@ test('request_approval gates a permission even when Runtime granted it', () => {
   }]);
 });
 
+// 先 deny 后 request_approval：deny 优先且不可被后续申请撤销，
+// 因此 approvalRequests 为空，process.exec 仍被拒绝。
 test('a later approval request cannot restore an earlier denied permission', () => {
   const result = evaluateInstructionPermissions(granted, [
     directive('deny-process', 'deny', 'process.exec'),
@@ -67,6 +69,8 @@ test('a later approval request cannot restore an earlier denied permission', () 
   assert.deepEqual(result.approvalRequests, []);
 });
 
+// 只有 workspace.read 被运行时授权，规则却申请 process.exec：
+// 指令不能新增权限，超出运行时权限上限的申请被拒绝并记录到 rejectedDirectiveIds。
 test('approval requests outside the Runtime permission ceiling are rejected', () => {
   const result = evaluateInstructionPermissions(new Set<Permission>(['workspace.read']), [
     directive('request-process', 'request_approval', 'process.exec'),
@@ -77,6 +81,8 @@ test('approval requests outside the Runtime permission ceiling are rejected', ()
   assert.deepEqual(result.rejectedDirectiveIds, ['request-process']);
 });
 
+// Fixture：把 effect 强转为 'allow'，模拟不可信规则文件中的未知或非法效果。
+// 必须 fail-closed：该指令被拒绝、不授予任何权限，并写入 rejectedDirectiveIds。
 test('unknown permission effects fail closed and are reported', () => {
   const invalid = {
     ...directive('attempt-allow', 'request_approval', 'workspace.write'),

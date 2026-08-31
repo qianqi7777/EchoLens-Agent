@@ -121,6 +121,7 @@ async function executeVerification(
         const executed = await sandbox.execute({
           kind: 'test',
           command: {
+            // 去掉 .cmd 后缀，避免在 Windows 上经 cmd.exe 间接启动外部命令，确保 Sandbox 直接执行可执行文件。
             executable: command.executable.replace(/\.cmd$/iu, ''),
             args: command.args,
           },
@@ -183,6 +184,7 @@ async function executePackageInstall(
     workspaceRoot: context.workspaceRoot,
     cwd: typeof args.cwd === 'string' ? args.cwd : '.',
     workspaceAccess: 'read-write',
+    // 联网仅允许 allowlist 中的域名且只用 443；域名与端口都由 Schema 校验，未配置时失败关闭。
     network: { mode: 'allowlist', allowedDomains, allowedPorts: [443] },
     resources: resources(args.timeoutMs, options),
     artifactPaths: Array.isArray(args.artifactPaths) ? args.artifactPaths as string[] : undefined,
@@ -194,6 +196,8 @@ async function applySandboxPatch(
   context: ToolContext,
 ): Promise<ToolResult> {
   try {
+    // bundle.patch 来自 Sandbox 产物，属不可信输入；复用 workspace-tools 的
+    // applyStructuredPatch，仍走 workspace.write 权限与写审批，不在此处放行。
     const bundle = await loadSandboxArtifactBundle(context.workspaceRoot, String(args.bundleId));
     if (!bundle.patch?.operations.length) {
       return toolFailure('invalid', 'patch_invalid', 'Artifact Bundle 不包含可应用的文本 Patch');
@@ -210,6 +214,10 @@ async function applySandboxPatch(
   }
 }
 
+/**
+ * 预览 Sandbox Artifact 的文本 Patch（不写入工作区）。
+ * @throws bundle 不存在或不含可应用 Patch 时抛出 SandboxError。
+ */
 export async function previewSandboxPatch(workspaceRoot: string, bundleId: string): Promise<PatchPreview> {
   const bundle = await loadSandboxArtifactBundle(workspaceRoot, bundleId);
   if (!bundle.patch?.operations.length) {
@@ -233,7 +241,9 @@ async function executeSandbox(
     },
     workspaceRoot: context.workspaceRoot,
     cwd: typeof args.cwd === 'string' ? args.cwd : '.',
+    // 默认 read-only：只有显式传 read-write 才允许写入，避免模型未声明写操作时越权写 workspace。
     workspaceAccess: (args.workspaceAccess === 'read-write' ? 'read-write' : 'read-only') as SandboxWorkspaceAccess,
+    // shell/test/build 一律禁网；联网能力仅 package_install 走 allowlist，此处在沙箱层强制。
     network: { mode: 'none' },
     resources: resources(args.timeoutMs, options),
     artifactPaths: Array.isArray(args.artifactPaths) ? args.artifactPaths as string[] : undefined,
@@ -267,10 +277,14 @@ async function executeSandboxRequest(
     if (result.status === 'passed') {
       return toolSuccess(content || '[info] 命令成功且没有输出', `${request.kind} 通过`, [`sandbox:${request.kind}`], data);
     }
+    // 沙箱结果三态映射：timeout/cancelled 与普通 failed 分开保留错误码，
+    // 上层（ToolExecutor）据此区分是可重试超时还是真正取消。
     const status = result.status === 'timeout' ? 'timeout' : result.status === 'cancelled' ? 'cancelled' : 'failed';
     const code = result.status === 'timeout' ? 'timeout' : result.status === 'cancelled' ? 'cancelled' : 'command_failed';
     return toolFailure(status, code, `${request.kind} ${result.status}`, { data, evidenceIds: [`sandbox:${request.kind}`] });
   } catch (error) {
+    // SandboxError 分类：请求非法→invalid、网络被禁→denied、其余视为基础设施失败→failed；
+    // 非 SandboxError 统一 sandbox_launch_failed，避免把底层异常细节上抛。
     if (error instanceof SandboxError) {
       const status = error.code === 'sandbox_invalid_request' ? 'invalid'
         : error.code === 'sandbox_network_denied' ? 'denied' : 'failed';
@@ -283,6 +297,8 @@ async function executeSandboxRequest(
 }
 
 function resources(timeout: unknown, options: SandboxToolOptions): SandboxExecuteRequest['resources'] {
+  // 资源预算在此硬性封顶：timeoutMs 缺失时回退 120s，内存/CPU/进程数/输出字节上限
+  // 均为默认值，防止单次工具调用过度占用宿主资源；Schema 已把 timeoutMs 限制在 [100, 600000]。
   return {
     timeoutMs: typeof timeout === 'number' ? timeout : options.defaultTimeoutMs ?? 120_000,
     memoryMiB: options.defaultMemoryMiB ?? 1_024,

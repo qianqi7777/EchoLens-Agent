@@ -1,3 +1,7 @@
+/**
+ * 工作区内的位置：path 为相对工作区根、以 / 分隔的路径；行与列均为 1 基
+ * （LSP 原始结果为 0 基，转换由各引擎完成）。
+ */
 export interface CodeLocation {
   path: string;
   startLine: number;
@@ -6,6 +10,9 @@ export interface CodeLocation {
   endColumn: number;
 }
 
+/**
+ * 符号定义：id 用于符号去重，evidenceId 用于关联事件追踪。
+ */
 export interface CodeSymbol extends CodeLocation {
   id: string;
   evidenceId: string;

@@ -34,6 +34,8 @@ export class EvalHarness {
   }
 
   async run(taskValue: unknown, signal = new AbortController().signal, suiteId?: string): Promise<EvalRunRecord> {
+    // 每次运行复制任务并创建独立临时工作区：同一任务可并行评测，候选实现也不会
+    // 改写原始配置或相互影响。这是任务→结果一一对应的隔离不变量。
     assertEvalTask(taskValue);
     const task = structuredClone(taskValue);
     const runId = randomUUID();
@@ -44,6 +46,8 @@ export class EvalHarness {
       await materializeFixture(task, workspaceRoot);
       let candidate: EvalCandidateResult = {};
       const assertions: EvalAssertionResult[] = [];
+      // 失败策略：候选执行、Patch 应用或 Grader 执行任一异常都会写入必为 false 的断言
+      // 并跳过后续评分，避免“评分器崩溃”被当作未评分结果而误判通过。
       try {
         candidate = await this.runner.run(publicTask(task), workspaceRoot, signal);
       } catch (error) {
@@ -92,6 +96,8 @@ export class EvalHarness {
 }
 
 async function materializeFixture(task: EvalTaskDefinition, root: string): Promise<void> {
+  // 任务文件来自不可信输入。路径先经 normalizeRelative 归一化，再断言落在 root 内，
+  // 防止 fixture 借助 ../ 或绝对路径写出工作区（如覆盖 .env 等敏感文件）。
   for (const file of task.fixture.files) {
     const relative = normalizeRelative(file.path);
     const target = path.join(root, ...relative.split('/'));
@@ -138,6 +144,7 @@ function gradeAnswer(
   let passed = false;
   if (grader.mode === 'exact') passed = actual === expected;
   else if (grader.mode === 'includes') passed = actual.includes(expected);
+  // regex 表达式由评测作者提供、仅用于匹配候选答案，需控制输入长度以免长答案引发灾难性回溯。
   else passed = new RegExp(grader.expected, grader.caseSensitive === false ? 'iu' : 'u').test(answer);
   return { id: 'answer', passed, summary: passed ? '回答匹配 Grader' : '回答未匹配 Grader' };
 }
@@ -148,6 +155,8 @@ async function runCheck(
   sandbox: SandboxAdapter | undefined,
   signal: AbortSignal,
 ): Promise<EvalAssertionResult> {
+  // 隐藏检查命令来自不可信任务定义，必须在 Sandbox 中执行；无网络、限制资源避免读取宿主
+  // 数据或外联。缺少 Sandbox 时按失败关闭，不因环境缺失而放行。
   if (!sandbox) return { id: check.id, passed: false, summary: '缺少 Sandbox，隐藏检查失败关闭' };
   let result: SandboxExecuteResult;
   try {
@@ -205,6 +214,7 @@ function gradeSecurity(
 }
 
 function publicTask(task: EvalTaskDefinition) {
+  // 只向候选暴露公共字段；grader/fixture/generator 是评分标准，一旦泄露候选即可命中。
   return {
     id: task.id,
     version: task.version,
@@ -226,6 +236,7 @@ function sanitizedCandidate(candidate: EvalCandidateResult): EvalCandidateResult
 }
 
 function assertInside(root: string, candidate: string): void {
+  // normalizeRelative 之后仍须二次包含校验：防御根目录别名或 Windows 盘符/大小写差异绕过。
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Eval Fixture 路径越界');
 }

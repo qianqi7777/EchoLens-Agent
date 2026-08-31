@@ -6,6 +6,12 @@ import { toolFailure, toolSuccess } from '../runtime/tool-result.js';
 import { McpClientError, McpClientManager } from './client-manager.js';
 import type { McpServerCatalog } from './types.js';
 
+/**
+ * 把已连接 MCP Server 的能力注册为 Agent 工具。
+ *
+ * 副作用：注册的每个工具都走 ToolRegistry 的统一权限与审批流程；
+ * MCP Server 的描述、Schema 与返回值始终视为不可信数据，不进入 System Policy。
+ */
 export function registerMcpTools(registry: ToolRegistry, manager: McpClientManager): void {
   for (const catalog of manager.catalogs()) {
     registerCatalogTools(registry, manager, catalog);
@@ -19,6 +25,8 @@ function registerRemoteTool(
   catalog: McpServerCatalog,
   tool: Tool,
 ): void {
+  // 信任边界：仅 trust=trusted 且显式开启 autoApproveReadOnly 的服务器，
+  // 其标记为只读的工具才能免于人工审批；不可信服务器始终走完整权限与审批。
   const readOnly = catalog.autoApproveReadOnly && tool.annotations?.readOnlyHint === true;
   registry.register({
     name: bridgedName(catalog.serverId, `tool_${tool.name}`),
@@ -141,6 +149,7 @@ function remoteResourceResult(serverId: string, uri: string, result: ReadResourc
   );
 }
 
+// Prompt 返回的消息按角色回填为文本证据，不会作为 system 指令注入执行上下文。
 function remotePromptResult(serverId: string, name: string, result: GetPromptResult): ToolResult {
   const content = result.messages.map((message) => `[${message.role}]\n${formatBlocks([message.content])}`).join('\n\n');
   return toolSuccess(
@@ -152,6 +161,8 @@ function remotePromptResult(serverId: string, name: string, result: GetPromptRes
 }
 
 function formatBlocks(blocks: readonly unknown[]): string {
+  // MCP 输出块数（128）与拼接文本长度（64 KiB）均有上限；image/audio 等二进制不
+  // 解析进上下文，只回填类型与长度摘要，防止不可信二进制内容污染模型上下文。
   const output: string[] = [];
   for (const block of blocks.slice(0, 128)) {
     if (!isRecord(block)) continue;
@@ -179,6 +190,8 @@ function formatResource(resource: Record<string, unknown>): string {
 
 function sanitizeInputSchema(value: unknown): JsonSchema {
   if (!isRecord(value)) return permissiveSchema();
+  // MCP Server 提供的 inputSchema 不可信：重建时只拷贝白名单关键字并钳制数值
+  // 边界、限制递归深度，避免恶意或过大的 Schema 消耗模型上下文或被当成可信约束。
   const root = sanitizeNode(value, 0);
   if (root.type !== 'object') return permissiveSchema();
   return {
@@ -189,6 +202,7 @@ function sanitizeInputSchema(value: unknown): JsonSchema {
 }
 
 function sanitizeNode(value: Record<string, unknown>, depth: number): JsonSchemaNode {
+  // 递归深度上限，防止深层嵌套 Schema 造成无限递归或超长节点。
   if (depth > 8) return {};
   const node: JsonSchemaNode = {};
   const types = Array.isArray(value.type) ? value.type : [value.type];
@@ -232,21 +246,28 @@ function copyBound(source: Record<string, unknown>, target: JsonSchemaNode, key:
 
 function boundedData(value: unknown): unknown {
   if (value === undefined) return undefined;
+  // 结构化结果超过 32 KiB 不进入上下文，仅保留长度与哈希标记，
+  // 防止任意大小的 structuredContent 撑爆模型上下文。
   const encoded = JSON.stringify(value);
   if (encoded.length <= 32 * 1024) return value;
   return { omitted: true, chars: encoded.length, sha256: hashLabel(encoded) };
 }
 
 function mcpFailure(error: unknown, fallback: string): ToolResult {
+  // 只透传类型化的 McpClientError；未知异常一律替换为稳定描述，避免向调用方
+  // 泄露 SDK 或服务器内部错误细节。
   const message = error instanceof McpClientError ? error.message : fallback;
   return toolFailure('failed', 'mcp_request_failed', message);
 }
 
 function bridgedName(serverId: string, name: string): string {
+  // 桥接工具名使用 mcp__serverId__name 命名空间，避免不同服务器同名工具冲突；
+  // 超长名称截断并附哈希后缀，保持工具名长度有界。
   const base = `mcp__${serverId}__${name.replace(/[^A-Za-z0-9_-]+/gu, '_')}`;
   return base.length <= 64 ? base : `${base.slice(0, 55)}_${hashLabel(base).slice(0, 8)}`;
 }
 
+// 剥离控制字符、折叠空白并截断，防止不可信文本向 UI / 日志注入终端控制序列。
 function safeLabel(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 512);
 }

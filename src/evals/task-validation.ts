@@ -13,6 +13,7 @@ const RISKS = new Set<LeakageRisk>(['low', 'medium', 'high', 'known_leaked']);
 const MAX_FIXTURE_BYTES = 32 * 1024 * 1024;
 
 export function assertEvalTask(value: unknown): asserts value is EvalTaskDefinition {
+  // 任务定义来自不可信文件，须在写入工作区或交给候选前完成结构、路径与尺寸校验。
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('任务必须是对象');
   const task = value as Partial<EvalTaskDefinition>;
   if (task.schemaVersion !== 1) fail('schemaVersion 必须为 1');
@@ -45,12 +46,16 @@ export function assertEvalTask(value: unknown): asserts value is EvalTaskDefinit
 }
 
 export function normalizeRelative(value: string): string {
+  // 将 Windows 反斜杠与 ./ 归一为干净相对路径，并拒绝绝对路径、盘符、空段与“..”，
+  // 确保 fixture 只能落在工作区相对位置，杜绝路径穿越。
   const normalized = value.replaceAll('\\', '/').replace(/^\.\//u, '');
   if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/u.test(normalized)) fail('路径必须相对工作区');
   const segments = normalized.split('/');
   if (segments.some((segment) => !segment || segment === '.' || segment === '..' || segment.includes('\0'))) {
     fail('路径包含越界或空段');
   }
+  // 禁止 fixture 触及版本控制、平台私有目录或密钥文件（.env*），防止敏感数据被写入
+  // 或读入工作区；命中即整体拒绝，而不是静默改写。
   if (segments.some((segment) => ['.git', '.echolens', 'studydocs'].includes(segment.toLowerCase())
     || segment.toLowerCase() === '.env' || segment.toLowerCase().startsWith('.env.'))) {
     fail('评测 Fixture 不得包含私有路径');
@@ -87,6 +92,8 @@ function assertGrader(kind: EvalTaskKind, grader: unknown): asserts grader is Ev
 }
 
 function assertCheck(check: EvalCommandCheck): void {
+  // check 命令来自不可信定义：executable 限定为不含分隔符/元字符的单个令牌，args 拒绝
+  // 空字节与换行，避免任务文件注入额外命令或参数。
   if (!check || typeof check.id !== 'string' || !ID.test(check.id)) fail('check id 无效');
   if (!check.command || typeof check.command.executable !== 'string'
     || !/^[A-Za-z0-9._+-]{1,128}$/u.test(check.command.executable)) fail('check executable 无效');

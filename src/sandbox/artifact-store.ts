@@ -30,9 +30,13 @@ export interface SandboxArtifactCollectionOptions {
   maxArtifactBytes?: number;
 }
 
+// 私有目录（.git/.echolens/node_modules/studydocs）与构建产物不应作为工作区变化回传：前者可能含
+// 密钥或权威数据，后者体积大且无业务价值；.env/.env.* 在 isPublicPath 中按任意路径段拒绝。
 const PRIVATE_NAMES = new Set(['.git', '.echolens', 'node_modules', 'studydocs']);
 const GENERATED_NAMES = new Set(['coverage', 'dist', 'build']);
 
+// 收集容器运行后对暂存工作区的修改：以 stager.prepare 时记录的 baseline 快照为基准，与当前暂存目录
+// 比对得到 added/modified/deleted；输出既用于把产物连同 sha256 回传，也生成可审批的安全结构化 Patch。
 export async function collectSandboxArtifacts(
   options: SandboxArtifactCollectionOptions,
 ): Promise<SandboxArtifactBundle> {
@@ -145,6 +149,7 @@ export async function collectSandboxArtifacts(
     pendingBundleRoot = undefined;
     return bundle;
   } catch (error) {
+    // fail-closed：任何一步失败都删除尚未写完成的 bundle 根目录，绝不留下可被加载的部分 bundle。
     if (pendingBundleRoot) await rm(pendingBundleRoot, { recursive: true, force: true }).catch(() => undefined);
     if (error instanceof SandboxError) throw error;
     throw new SandboxError('sandbox_artifact_failed', `Sandbox Artifact 收集失败：${error instanceof Error ? error.message : String(error)}`);
@@ -158,6 +163,7 @@ export async function loadSandboxArtifactBundle(
   const policy = await PathPolicy.create(workspaceRoot);
   const normalized = normalizeBundleId(id);
   const manifest = await readFile(path.join(bundleDirectory(policy.workspaceRoot, normalized), 'manifest.json'), 'utf8');
+  // 校验版本、ID、workspaceRoot 与当前工作区一致，防止把别的工作区或伪造的 bundle 应用到本工作区。
   const parsed = JSON.parse(manifest) as SandboxArtifactBundle;
   if (parsed.version !== 1 || parsed.id !== normalized || parsed.workspaceRoot !== policy.workspaceRoot) {
     throw new SandboxError('sandbox_artifact_failed', 'Artifact Bundle 不属于当前工作区');
@@ -172,6 +178,7 @@ async function walkFiles(root: string, relative: string, includeGenerated: boole
   for (const entry of entries) {
     const child = relative === '.' ? entry.name : `${relative}/${entry.name}`;
     if (!isPublicPath(child) || (!includeGenerated && GENERATED_NAMES.has(entry.name.toLowerCase()))) continue;
+    // 符号链接可能指向暂存根之外，stat/readFile 会越过 assertInside 的检查，因此直接拒绝、不跟随。
     if (entry.isSymbolicLink()) throw new SandboxError('sandbox_artifact_failed', `Artifact 拒绝符号链接：${child}`);
     if (entry.isDirectory()) files.push(...await walkFiles(root, child, includeGenerated));
     else if (entry.isFile()) files.push(child);
@@ -180,6 +187,8 @@ async function walkFiles(root: string, relative: string, includeGenerated: boole
 }
 
 async function readStagedFile(root: string, relative: string, limit: number): Promise<Buffer> {
+  // relative 来自 baseline 或请求方，不可信。validateRelativePath 拒绝 ../ 与绝对路径，
+  // assertInside 再做规范化后的 within-root 校验，防止符号链接拼接或前缀碰撞绕过越界。
   validateRelativePath(relative);
   const target = path.join(root, ...relative.split('/'));
   assertInside(root, target);
@@ -190,6 +199,8 @@ async function readStagedFile(root: string, relative: string, limit: number): Pr
   return readFile(target);
 }
 
+// Bundle 内是真实的文件内容（可能含敏感数据），写入用 0o600 限制为本用户可读；
+  // 同时用 assertInside 校验目标落在 bundleRoot 内，避免相对路径把内容写到 bundle 目录之外。
 async function persistArtifact(bundleRoot: string, relative: string, bytes: Buffer): Promise<string> {
   const target = path.join(bundleRoot, ...relative.split('/'));
   assertInside(bundleRoot, target);
@@ -198,6 +209,8 @@ async function persistArtifact(bundleRoot: string, relative: string, bytes: Buff
   return relative;
 }
 
+// requestedPaths 同样来自请求方：去重、(反斜杠→正斜杠、去 ./) 规范化后逐段校验，
+  // 任一命中私有目录即拒绝；数量上限防止请求方枚举海量路径。
 function normalizeRequestedPaths(values: readonly string[]): string[] {
   if (values.length > 32) throw new SandboxError('sandbox_invalid_request', 'Artifact 路径不能超过 32 个');
   return [...new Set(values.map((value) => {
@@ -233,6 +246,8 @@ function bundleDirectory(workspaceRoot: string, id: string): string {
 }
 
 function decodeText(bytes: Buffer): string | undefined {
+  // 用 strict/fatal 解码 UTF-8 判定文本（去掉可选 BOM）；解码失败视为二进制，仅作为 Artifact 回传，
+  // 不进入结构化 Patch，避免把损坏的多字节序列写回工作区。
   const bom = bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]));
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bom ? bytes.subarray(3) : bytes); }
   catch { return undefined; }

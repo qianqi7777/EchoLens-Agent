@@ -34,6 +34,8 @@ test('Chat Completions codec preserves multiple tool calls and correlates tool r
           finish_reason: 'tool_calls',
           message: {
             content: null,
+            // 畸形 fixture：call-2 的 function.arguments 不是合法 JSON，故意违反 Chat Completions 契约。
+            // codec 必须保留该 tool_call 并标记 argumentParseError，不能丢弃调用或中断整次请求。
             tool_calls: [
               { id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } },
               { id: 'call-2', type: 'function', function: { name: 'read_file', arguments: '{invalid' } },
@@ -184,6 +186,8 @@ test('an explicit protocol never falls back to the other endpoint', async () => 
 });
 
 test('malformed successful payloads fail as protocol errors for both protocols', async () => {
+  // HTTP 200 但响应体为空对象，故意不满足两种协议的响应契约（缺少 choices/output 等必填字段），
+  // 验证 codec 统一归类为 provider_protocol_mismatch，而不是当作成功响应继续解析。
   const server = await startTestServer(async (_request, response) => {
     response.setHeader('content-type', 'application/json');
     response.end('{}');

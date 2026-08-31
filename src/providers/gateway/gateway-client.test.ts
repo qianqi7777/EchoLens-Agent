@@ -1,3 +1,6 @@
+// Gateway 客户端契约测试：部分用例起真实 Gateway 服务（port 0 随机端口），
+// 部分用 OpenAPI Mock 校验协议字段。所有上游都指向 127.0.0.1:9（无监听端口），
+// 确保测试不会真的发出网络请求。
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { startGatewayOpenApiMock } from '../../testing/openapi-mock.js';
@@ -7,6 +10,7 @@ import { GatewayTokenCredentialResolver } from '../../credentials/gateway-token-
 import type { GatewayTokenStore, StoredGatewayTokens } from '../../credentials/gateway-token-store.js';
 
 test('GatewayClient 完成 Device Flow 轮询、账户查询和 Refresh Token 轮换', async (context) => {
+  // randomToken 用闭包自增，保证每次颁发的令牌不同，Refresh 后才能断言“换了个新令牌”。
   const gateway = await startGatewayServer({
     port: 0,
     devicePollingIntervalSeconds: 0,
@@ -30,6 +34,7 @@ test('GatewayClient 完成 Device Flow 轮询、账户查询和 Refresh Token �
   context.after(() => gateway.close());
   const client = new GatewayClient({ gatewayUrl: gateway.baseUrl, accessToken: '' });
   const device = await client.createDeviceAuthorization();
+  // 先批准再轮询：pending 分支只有未批准时才会走到，断言在其后兜底。
   assert.equal(gateway.approveDeviceCode(device.deviceCode, 'acct-client', 'Client Test'), true);
   const token = await client.pollDeviceToken(device.deviceCode);
   assert.equal('pending' in token, false);
@@ -37,6 +42,7 @@ test('GatewayClient 完成 Device Flow 轮询、账户查询和 Refresh Token �
   const accountClient = new GatewayClient({ gatewayUrl: gateway.baseUrl, accessToken: token.accessToken });
   const account = await accountClient.account();
   assert.equal(account.id, 'acct-client');
+  // Refresh 必须轮换出不同的 access token，否则令牌轮换逻辑等于没生效。
   const refreshed = await accountClient.refreshToken(token.refreshToken!);
   assert.notEqual(refreshed.accessToken, token.accessToken);
   await accountClient.revokeToken(refreshed.accessToken);
@@ -63,6 +69,7 @@ test('Gateway Token Resolver 在 Access Token 到期前自动轮换', async (con
   let stored: StoredGatewayTokens | undefined = {
     accessToken: issued.accessToken,
     refreshToken: issued.refreshToken,
+    // expiresAt 设成 epoch：强制 Resolver 认为令牌已过期，从而走轮换路径。
     expiresAt: new Date(0).toISOString(),
     scope: issued.scope,
   };
@@ -76,6 +83,7 @@ test('Gateway Token Resolver 在 Access Token 到期前自动轮换', async (con
     audience: gateway.baseUrl,
   });
   assert.equal(resolved.status, 'resolved');
+  // 解析结果必须是轮换后的新令牌，且新令牌已经回写存储。
   assert.notEqual(resolved.status === 'resolved' ? resolved.value : undefined, issued.accessToken);
   assert.equal(stored?.accessToken, resolved.status === 'resolved' ? resolved.value : undefined);
 });
@@ -128,6 +136,7 @@ test('OpenAPI Mock 覆盖 Device、Refresh 与 Revoke 客户端契约', async ()
   }
 });
 
+// 注入会抛错的 fetch 与固定时钟：即使网络与时间都不可控，也能稳定构造“过期 + 离线”场景。
 test('过期 Gateway Token 网络刷新失败时保留 Gateway 不可达分类', async () => {
   let stored: StoredGatewayTokens | undefined = {
     accessToken: 'expired-access',
@@ -146,6 +155,8 @@ test('过期 Gateway Token 网络刷新失败时保留 Gateway 不可达分类',
     () => Date.parse('2026-08-26T00:00:00Z'),
   );
 
+  // 网络失败必须归类为 gateway_unreachable，而不是被吞成“没有凭据”，
+  // 这样上层才能区分“没登录”和“暂时连不上”。
   await assert.rejects(
     resolver.resolve('gateway-token:default', {
       purpose: 'gateway_access',
@@ -165,6 +176,7 @@ test('过期 Gateway Refresh Token 被服务端拒绝后要求重新登录', asy
         scope: ['models:read'],
       };
     },
+    // invalid_grant 意味着 refresh token 本身作废，任何保存都会留下不可用凭据。
     async save() { throw new Error('不应保存'); },
     async clear() {},
   };
@@ -176,6 +188,7 @@ test('过期 Gateway Refresh Token 被服务端拒绝后要求重新登录', asy
     }),
   );
 
+  // 服务端明确拒绝（invalid_grant）时解析结果必须是 missing，等价于要求用户重新登录。
   const result = await resolver.resolve('gateway-token:default', {
     purpose: 'gateway_access',
     audience: 'https://gateway.example.com',
@@ -183,6 +196,8 @@ test('过期 Gateway Refresh Token 被服务端拒绝后要求重新登录', asy
   assert.deepEqual(result, { status: 'missing' });
 });
 
+// 错误码是客户端契约的一部分：调用方靠 code 决定是否重试或引导重新登录，
+// 因此断言必须锁定具体 code 与 retryable 标志，而不是只断言“抛了错”。
 test('GatewayClient preserves stable token and upstream error codes', async () => {
   const expiredMock = await startGatewayOpenApiMock({
     'GET /v1/auth/status': { status: 401, example: 'token_expired' },
@@ -195,6 +210,7 @@ test('GatewayClient preserves stable token and upstream error codes', async () =
     await assert.rejects(client.authStatus(), (error: unknown) => {
       assert.ok(error instanceof GatewayClientError);
       assert.equal(error.code, 'token_expired');
+      // 令牌过期重试没有意义：必须走重新认证，所以不可重试。
       assert.equal(error.retryable, false);
       return true;
     });
@@ -213,6 +229,7 @@ test('GatewayClient preserves stable token and upstream error codes', async () =
     await assert.rejects(client.listModels(), (error: unknown) => {
       assert.ok(error instanceof GatewayClientError);
       assert.equal(error.code, 'upstream_unavailable');
+      // 上游临时不可用值得重试：与令牌类错误形成对比。
       assert.equal(error.retryable, true);
       return true;
     });

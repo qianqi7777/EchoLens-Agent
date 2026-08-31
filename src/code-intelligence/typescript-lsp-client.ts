@@ -46,6 +46,8 @@ export class TypeScriptLspClient {
 
   async definition(relativePath: string, line: number, column: number, signal?: AbortSignal): Promise<CodeLocation[]> {
     const document = await this.openDocument(relativePath);
+    // 只执行 tsserver 内置的“跳转到源位置”命令，绝不转发任意 workspace 命令，
+    // 避免把项目自定义命令当作可执行入口。
     const sourceDefinition = this.normalizeLocations(await this.request('workspace/executeCommand', {
       command: '_typescript.goToSourceDefinition',
       arguments: [document.uri, position(line, column)],
@@ -89,11 +91,15 @@ export class TypeScriptLspClient {
     const document = await this.openDocument(relativePath);
     const existing = this.diagnosticsByUri.get(document.uri);
     if (existing) return structuredClone(existing);
+    // 诊断由服务器异步推送：didOpen 后等待最多 5s，收到推送即提前返回，
+    // 超时按空诊断处理而不是报错；signal 中止也走同一完成回调。
     await waitForDiagnostics(this.diagnosticWaiters, document.uri, signal, 5_000);
     return structuredClone(this.diagnosticsByUri.get(document.uri) ?? []);
   }
 
   async close(): Promise<void> {
+    // 按 LSP 规范顺序关闭：先 shutdown、再发 exit 通知、最后断开连接；
+    // 1s 内未自行退出则强杀子进程，避免残留 tsserver 占住文件句柄。
     this.closed = true;
     const connection = this.connection;
     const child = this.process;
@@ -119,6 +125,8 @@ export class TypeScriptLspClient {
     const normalized = path.relative(policy.workspaceRoot, file.canonicalPath).replaceAll('\\', '/');
     const uri = pathToFileURL(file.canonicalPath).href;
     const current = this.documents.get(normalized);
+    // 语义分析要求服务器持有完整、最新的文件内容：首次打开推送 didOpen 并缓存，
+    // 内容变化时递增版本推送 didChange，同时清掉旧诊断缓存。
     if (!current) {
       const opened = { uri, version: 1, content: file.content };
       this.documents.set(normalized, opened);
@@ -142,6 +150,7 @@ export class TypeScriptLspClient {
   private async ensureStarted(): Promise<void> {
     if (this.closed) throw new CodeIntelligenceError('lsp_unavailable', 'TypeScript LSP 已关闭');
     if (this.connection) return;
+    // 并发调用共享同一个 startup Promise，保证只拉起一次子进程。
     if (!this.startup) this.startup = this.start();
     return this.startup;
   }
@@ -151,6 +160,8 @@ export class TypeScriptLspClient {
     const cliPath = this.options.cliPath ?? resolveLanguageServerCli();
     let child: ChildProcessWithoutNullStreams;
     try {
+      // 外部进程隔离：argv 直接传给操作系统、不经过 shell，避免参数注入；
+      // 并只透传白名单环境变量（safeProcessEnvironment），不继承会话凭据与代理配置。
       child = spawn(executable, [cliPath, '--stdio'], {
         cwd: this.workspaceRoot,
         env: safeProcessEnvironment(),
@@ -162,6 +173,7 @@ export class TypeScriptLspClient {
       throw new CodeIntelligenceError('lsp_unavailable', '无法启动 TypeScript Language Server');
     }
     this.process = child;
+    // tsserver 的日志走 stderr，直接丢弃以免积压阻塞子进程或被误当作协议输出。
     child.stderr.on('data', () => undefined);
     const connection = createMessageConnection(
       new StreamMessageReader(child.stdout),
@@ -179,6 +191,7 @@ export class TypeScriptLspClient {
     connection.onRequest('client/registerCapability', () => null);
     connection.onRequest('window/workDoneProgress/create', () => null);
     connection.onNotification('textDocument/publishDiagnostics', (params: PublishDiagnosticsParams) => {
+      // 服务器推送的诊断按 URI 缓存；数量与单条消息长度都设上限，避免不可信大文本拖垮回填。
       const diagnostics = params.diagnostics.slice(0, 500)
         .map((value) => this.normalizeDiagnostic(params.uri, value))
         .filter(Boolean) as CodeDiagnostic[];
@@ -214,6 +227,7 @@ export class TypeScriptLspClient {
       await connection.sendNotification('initialized', {});
     } catch {
       await this.close();
+      // 初始化失败按可重试处理：复位 closed，允许后续调用重新拉起子进程。
       this.closed = false;
       throw new CodeIntelligenceError('lsp_unavailable', 'TypeScript Language Server 初始化失败');
     }
@@ -221,6 +235,9 @@ export class TypeScriptLspClient {
 
   private async request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     await this.ensureStarted();
+    // 响应按 request id 由 vscode-jsonrpc 关联；取消/超时只影响当前请求（经
+    // $/cancelRequest 通知服务器），共享的 LSP 会话保持可用。任何失败统一映射为
+    // lsp_request_failed，由上层决定降级到 tree-sitter，不把原始 LSP 错误暴露出去。
     const cancellation = new CancellationTokenSource();
     const abort = () => cancellation.cancel();
     if (signal?.aborted) abort();
@@ -257,6 +274,7 @@ export class TypeScriptLspClient {
     try {
       const absolute = fileURLToPath(uri);
       const relative = path.relative(path.resolve(this.workspaceRoot), path.resolve(absolute));
+      // LSP 返回的位置是不可信证据：工作区外的 URI 直接丢弃，只保留工作区内相对路径。
       if (relative.startsWith('..') || path.isAbsolute(relative)) return undefined;
       return {
         path: relative.replaceAll('\\', '/'),
@@ -302,6 +320,7 @@ function position(line: number, column: number): LspPosition {
   if (!Number.isInteger(line) || line < 1 || !Number.isInteger(column) || column < 1) {
     throw new CodeIntelligenceError('code_intelligence_failed', '行列必须从 1 开始');
   }
+  // LSP 使用 0 基行列，本接口对外按 1 基约定，此处完成协议层转换。
   return { line: line - 1, character: column - 1 };
 }
 
@@ -313,6 +332,7 @@ function isPosition(value: unknown): value is LspPosition {
 }
 function isRecord(value: unknown): value is Record<string, any> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function languageId(relative: string): string {
+  // jsx/tsx 必须映射到 React 方言的 languageId，tsserver 才能按 JSX 语法解析。
   if (/\.tsx$/iu.test(relative)) return 'typescriptreact';
   if (/\.jsx$/iu.test(relative)) return 'javascriptreact';
   if (/\.(?:js|mjs|cjs)$/iu.test(relative)) return 'javascript';
@@ -333,6 +353,8 @@ function dedupeLocations(items: CodeLocation[]): CodeLocation[] {
 }
 
 async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  // typescript-language-server 会再拉起 tsserver 子进程；Windows 上必须整棵进程树终止，
+  // 否则只杀包装进程会残留孤儿 tsserver。
   if (process.platform === 'win32' && child.pid) await terminateWindowsProcessTree(child.pid);
   if (child.exitCode === null && child.signalCode === null) child.kill();
   await waitForExit(child, 1_000);

@@ -83,6 +83,8 @@ test('ReactAgent completes a tool round trip', async () => {
   );
   assert.ok(finalMessage && isMessageItem(finalMessage));
   assert.equal(messageText(finalMessage), result.answer);
+  // 协议不变量：持久化的对话项不得残留 Chat Completions 线格式字段（tool_calls、
+  // tool_call_id），否则换协议重放时会把 Provider 特有字段泄漏进后续请求。
   assert.doesNotMatch(JSON.stringify(result.items), /tool_calls|tool_call_id/);
   assert.equal(events.some((event) => event.payload.type === 'workspace.file.observed'
     && event.payload.operation === 'read'
@@ -117,6 +119,8 @@ test('workspace tools reject paths outside the workspace', async () => {
   const registry = new ToolRegistry();
   registerWorkspaceTools(registry);
   const executor = new ToolExecutor(registry);
+  // 安全攻击样本：`..\` 用反斜杠分隔符尝试逃出工作区；校验必须拒绝，
+  // 不能把反斜杠路径当作普通字面文件名放行。
   const result = await executor.invoke('read_file', { path: '..\\outside.txt' }, {
     workspaceRoot: workspace,
     allowedPermissions: new Set(['workspace.read']),

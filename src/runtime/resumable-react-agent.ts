@@ -48,6 +48,12 @@ import type {
 } from './types.js';
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 
+/**
+ * 一次 run/resume 的完整结果。
+ *
+ * `answer` 在结构化摘要校验通过时取自摘要字段，否则回退为未验证的 raw 输出；
+ * `checkpoint` 保存完整 items，供后续 resume 继续执行。
+ */
 export interface AgentRunResult {
   answer: string;
   items: ConversationItem[];
@@ -113,6 +119,12 @@ export class ReactAgent {
     this.toolScheduler = options.toolScheduler ?? new ToolScheduler();
   }
 
+  /**
+   * 发起一轮新对话。
+   *
+   * 历史里 role=system 的消息会被过滤（见下），确保系统指令只能来自 System Policy；
+   * 首次进入前先保存一次 checkpoint，之后每一步的状态都可在任意时刻恢复。
+   */
   async run(
     userMessage: string,
     history: ConversationItem[] = [],
@@ -130,6 +142,8 @@ export class ReactAgent {
       runId,
       step: 0,
       phase: 'model',
+      // system 指令仅源于 System Policy：历史中 role=system 的消息被过滤，
+      // 防止外部对话记录注入伪系统指令或绕过既定规则优先级。
       items: [
         systemPolicyMessage(),
         ...history.filter((item) => item.type !== 'message' || item.role !== 'system'),
@@ -184,14 +198,19 @@ export class ReactAgent {
     signal: AbortSignal | undefined,
     eventSink: AgentEventSink | undefined,
   ): Promise<AgentRunResult> {
+    // 本次 execute 全程复用同一个 itemId 工厂，计数器从已有 items 数量起步并持续递增，
+    // 跨越 model/tools 多次循环及恢复后都不产生重复 ID。
     const itemId = itemIdFactory(machine.runId, machine.items.length);
     const tools = providerTools(this.model, this.registry);
     const runtimePermissions = this.options.permissions ?? new Set<Permission>(['workspace.read']);
 
+    // stepLimit 从 checkpoint 步数起算而非从 0 计数：恢复后的每个新片段都只获得
+    // 一份 maxSteps 预算，已耗步数不重复计，因此不会因多次恢复而无限延长执行。
     const stepLimit = machine.step + (this.options.maxSteps ?? 8);
     while (machine.step < stepLimit) {
       if (signal?.aborted) return this.cancel(machine, eventSink, signal.reason);
 
+      // tools 阶段先执行所有挂起工具；执行结果决定继续、暂停还是取消。
       if (machine.phase === 'tools') {
         const pending = pendingToolCalls(machine.items);
         const result = await this.executeTools(
@@ -231,6 +250,8 @@ export class ReactAgent {
           signal,
         });
       } catch (error) {
+        // 请求失败后先判定中止：已中止则按取消处理而不是失败重试，
+        // 避免中止的运行被恢复或触发重试并再次计费。
         if (signal?.aborted) return this.cancel(machine, eventSink, signal.reason);
         const code = errorCode(error);
         await emit(machine, eventSink, {
@@ -367,7 +388,12 @@ export class ReactAgent {
       ),
       this.model.capabilities.supportsParallelToolCalls,
     );
+    // 调度器已按 callIndex 排序（tool-scheduler.execute）且同批完成后再统一写回，
+    // 因此并行工具完成顺序即使不同，写回顺序也与模型看到的工具调用顺序一致，
+    // 保证下一轮 Provider 消息稳定；副作用工具不会与其他写操作交叉。
     for (const { value } of scheduled) {
+      // 清除历史里等待审批写入的占位结果：用户批准后该工具必须真正执行，
+      // 占位结果不删会导致同一次调用出现两条 tool_result。
       machine.items = machine.items.filter((item) => !(item.type === 'tool_result'
         && item.callId === value.call.callId
         && item.error?.code === 'approval_required'));
@@ -400,6 +426,8 @@ export class ReactAgent {
       targetPath: typeof call.arguments.path === 'string'
         ? call.arguments.path : this.options.instructionTarget,
     });
+    // 工具可执行的权限完全来自 ContextManager 构建的权限规则；
+    // 工具输出/MCP 内容只能作为不可信证据回填，不能反向修改权限集合或 System Policy。
     const context: ToolContext = {
       workspaceRoot: this.options.workspaceRoot,
       allowedPermissions: new Set(prepared.permissions.effectivePermissions),
@@ -620,6 +648,8 @@ function toolResultItem(
   };
 }
 
+// 恢复时按 callId 去重：已存在非 approval_required 结果的工具视为完成，不再重新执行。
+// approval_required 工具不算完成，因为用户批准后该工具需要真正执行一次。
 function pendingToolCalls(items: readonly ConversationItem[]): ToolCallItem[] {
   const completed = new Set(items
     .filter((item): item is ToolResultItem => item.type === 'tool_result')
@@ -675,6 +705,8 @@ function itemIdFactory(runId: string, offset: number): (kind: string) => string 
   return (kind) => `${runId}:${kind}:${next += 1}`;
 }
 
+// 整个 run 的所有事件都经同一个 sink 串行 append（单写者），由 sink 维护递增 seq。
+// 未挂 sink 时退化为内存事件并固定 seq=0，此时仅用于回调观察，不承诺持久化顺序。
 async function emit(
   machine: RunMachine,
   sink: AgentEventSink | undefined,

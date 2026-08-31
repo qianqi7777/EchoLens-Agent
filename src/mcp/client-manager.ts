@@ -35,6 +35,12 @@ export class McpClientError extends Error {
   }
 }
 
+/**
+ * MCP Server 外部进程 / HTTP 连接的生命周期管理者。
+ *
+ * 对外读取（catalogs()、toolDefinition()、connect() 返回值）均为快照副本，
+ * 调用方无法持有对内部连接或能力目录的引用。
+ */
 export class McpClientManager {
   private readonly connections = new Map<string, ConnectedServer>();
 
@@ -54,6 +60,8 @@ export class McpClientManager {
   async connect(config: McpServerConfig, signal?: AbortSignal): Promise<McpServerCatalog> {
     if (this.connections.has(config.id)) throw new McpClientError('mcp_config_invalid', `MCP Server 已连接：${config.id}`);
     const mode = protocolMode(config.protocolMode);
+    // 客户端按 fail-closed 配置：严格能力校验 + input_required 不自动完成，
+    // 防止不可信服务器声明未实现的能力或驱动连续回填的请求链。
     const client = new Client(
       { name: 'echolens-agent', version: '0.5.0' },
       {
@@ -81,6 +89,9 @@ export class McpClientManager {
           : Promise.resolve({ prompts: [] }),
       ]);
       enforceCatalogLimits(config.id, toolsResult.tools.length, resourcesResult.resources.length, promptsResult.prompts.length);
+      // 信任边界：autoApproveReadOnly 仅对 trust=trusted 的服务器生效，不可信服务器
+      // 永远不会获得自动审批；permissions.tools 作为白名单在目录构建期过滤，
+      // 未列出的工具不会暴露给模型。
       const allowedTools = config.permissions?.tools ? new Set(config.permissions.tools) : undefined;
       const serverVersion = client.getServerVersion();
       const catalog: McpServerCatalog = {
@@ -97,6 +108,8 @@ export class McpClientManager {
       this.connections.set(config.id, { config: structuredClone(config), client, catalog });
       return structuredClone(catalog);
     } catch (error) {
+      // 失败策略：连接或能力发现失败时先关闭客户端（释放子进程 / HTTP 传输），
+      // 避免残留孤儿进程，再统一转成 mcp_connection_failed 类型错误。
       await client.close().catch(() => undefined);
       if (error instanceof McpClientError) throw error;
       throw new McpClientError(
@@ -125,6 +138,8 @@ export class McpClientManager {
     const definition = connection.catalog.tools.find((tool) => tool.name === name);
     if (!definition) throw new McpClientError('mcp_request_failed', `MCP 工具不存在：${serverId}/${name}`);
     try {
+      // 参数先克隆再发送，避免调用方在途修改共享对象；请求携带 AbortSignal，
+      // resetTimeoutOnProgress 使持续上报进度的长任务不被空闲超时中断。
       return await connection.client.callTool(
         { name, arguments: structuredClone(args) },
         {
@@ -186,9 +201,13 @@ export class McpClientManager {
         onInsufficientScope: 'throw',
       });
     }
+    // command 只允许裸可执行文件名（无路径分隔符与 shell 元字符），args 原样
+    // 传给 spawn 而非 shell，保证子进程派生路径无注入面。
     if (!/^[A-Za-z0-9._+-]{1,128}$/u.test(config.transport.command)) {
       throw new McpClientError('mcp_config_invalid', `MCP stdio command 必须是简单可执行文件名：${config.id}`);
     }
+    // 子进程 cwd 经 PathPolicy 解析并规范化：必须落在工作区内且不含链接组件；
+    // stderr 用 pipe 捕获而不继承终端，消息读取缓冲上限 4 MiB，防止子进程输出耗尽内存。
     const cwd = config.transport.cwd ?? '.';
     const policy = await PathPolicy.create(this.workspaceRoot);
     const resolvedCwd = await policy.resolveExisting(cwd, 'directory');
@@ -207,6 +226,8 @@ export class McpClientManager {
   }
 }
 
+// Streamable HTTP 仅允许 HTTPS，http 仅限回环地址；URL 内嵌凭据一律拒绝，
+// 防止把配置用于请求任意明文端点或在传输中泄露账密。
 function validatedHttpUrl(serverId: string, value: string): URL {
   let url: URL;
   try { url = new URL(value); }
@@ -226,11 +247,13 @@ function requestOptions(config: McpServerConfig, signal?: AbortSignal) {
   return { signal, timeout, maxTotalTimeout: timeout };
 }
 
+// MCP 协议版本协商：legacy 让 SDK 在默认版本列表内兼容协商，'2026-07-28' 固定到该版本。
 function protocolMode(mode: McpServerConfig['protocolMode']): VersionNegotiationMode {
   if (mode === '2026-07-28') return { pin: mode };
   return mode ?? 'auto';
 }
 
+// 固定版本模式的候选列表以目标版本优先；legacy 直接复用 SDK 默认协商。
 function supportedProtocolVersions(mode: VersionNegotiationMode): string[] | undefined {
   if (mode === 'legacy') return undefined;
   const modern = typeof mode === 'object' ? mode.pin : '2026-07-28';
@@ -240,6 +263,7 @@ function supportedProtocolVersions(mode: VersionNegotiationMode): string[] | und
 function resolveEnvironmentMap(mapping: Record<string, string> | undefined): Record<string, string> {
   const resolved: Record<string, string> = {};
   for (const [target, source] of Object.entries(mapping ?? {})) {
+    // fail-closed：引用的环境变量缺失时拒绝启动，避免把空值静默注入子进程环境。
     const value = process.env[source];
     if (value === undefined) throw new McpClientError('mcp_config_invalid', `MCP 引用的环境变量未配置：${source}`);
     resolved[target] = value;
@@ -247,6 +271,7 @@ function resolveEnvironmentMap(mapping: Record<string, string> | undefined): Rec
   return resolved;
 }
 
+// 目录规模上限：防止不可信或故障服务器返回海量能力，导致内存与模型上下文耗尽。
 function enforceCatalogLimits(serverId: string, tools: number, resources: number, prompts: number): void {
   if (tools > 128 || resources > 256 || prompts > 128) {
     throw new McpClientError('mcp_connection_failed', `MCP 能力目录超过上限：${serverId}`);

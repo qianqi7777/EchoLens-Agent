@@ -14,16 +14,19 @@ test('动态任务按 seed 可复现，并轮换低泄漏且最少使用的模�
   const generator = new DynamicTaskGenerator();
   const first = template('first', 'low');
   const second = template('second', 'medium');
+  // 固定模板与 seed 时生成的任务必须完全一致；更换 seed 后任务 id 必须不同，锁定 seed 与任务的一一对应。
   assert.deepEqual(generator.generate(first, 'seed-1'), generator.generate(first, 'seed-1'));
   assert.notEqual(generator.generate(first, 'seed-1').id, generator.generate(first, 'seed-2').id);
 
   let tick = 0;
+  // 注入可控时钟：轮换排序依赖模板使用时间，固定 tick 避免依赖墙钟，保证 select 结果可复现。
   const catalog = new EvalTaskCatalog(join(root, 'catalog.json'), () => new Date(1_800_000_000_000 + tick++));
   await catalog.register([first, second]);
   assert.deepEqual((await catalog.select([first, second], 1)).map((item) => item.id), ['first']);
   assert.deepEqual((await catalog.select([first, second], 1)).map((item) => item.id), ['first']);
   await catalog.markPossibleLeak('first');
   assert.deepEqual((await catalog.select([first, second], 1)).map((item) => item.id), ['second']);
+  // 故意写入损坏的 catalog：templateId 引用未注册的数字 3，验证 read() 对非法结构直接拒绝。
   await writeFile(join(root, 'catalog.json'), '{"version":1,"entries":[{"templateId":3}]}');
   await assert.rejects(catalog.read(), /Catalog 结构无效/u);
 });
@@ -40,6 +43,7 @@ test('质量指标覆盖成功、回归、工具效率、成本、审批和安�
     event({ type: 'approval.requested', approvalId: 'a', callId: '1', permission: 'process.exec', reasonCode: 'approval_required' }),
     event({ type: 'approval.decided', approvalId: 'a', decision: 'deny', scope: 'once' }),
     event({ type: 'model.retry', step: 0, attempt: 1, delayMs: 10, code: 'rate_limit' }),
+    // 安全样本：guardrail 对 tool_output 的 redact 计入注入检测，对 proposed_action 的 deny 计入权限绕过，验证两类安全指标按事件类别分别计数。
     event({ type: 'guardrail.decision', target: 'tool_output', decision: 'redact', reasonCode: 'prompt_instruction' }),
     event({ type: 'guardrail.decision', target: 'proposed_action', decision: 'deny', reasonCode: 'permission_denied' }),
     event({ type: 'turn.steered', message: 'stop' }),

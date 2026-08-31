@@ -47,6 +47,7 @@ export class BackgroundTaskWorker {
     this.loop = this.runLoop();
   }
 
+  // 停止：中止所有在跑任务并等待轮询循环收敛；被中止的 running 任务经 settleAborted 释放回 pending。
   async stop(): Promise<void> {
     this.stopped = true;
     for (const controller of this.active.values()) controller.abort('worker_stopped');
@@ -67,6 +68,8 @@ export class BackgroundTaskWorker {
     await this.notify(task);
     const controller = new AbortController();
     this.active.set(task.id, controller);
+    // 租约约每 leaseMs/3 续租一次（下限 1s）：heartbeat 失败说明租约可能已过期或被其他 Worker 拿下，
+    // 立即 abort('lease_lost') 终止本 Worker 的继续执行，避免与接管的 Worker 重复执行同一任务。
     const heartbeat = setInterval(() => {
       void this.queue.heartbeat(task.id, this.workerId, this.leaseMs).catch(() => controller.abort('lease_lost'));
     }, Math.max(1_000, Math.floor(this.leaseMs / 3)));
@@ -91,6 +94,7 @@ export class BackgroundTaskWorker {
     return true;
   }
 
+  // 单 Worker 轮询循环：一次只执行一个任务；执行出错仅上报后继续轮询，Worker 自身不因任务失败退出。
   private async runLoop(): Promise<void> {
     while (!this.stopped) {
       try {
@@ -119,6 +123,8 @@ export class BackgroundTaskWorker {
     }
   }
 
+  // 按 abort 原因归属终态：用户取消→cancelled；Worker 正常停止→release 回 pending 以便显式恢复；
+  // 其余（lease_lost/中断）标记为可重试失败，交还给队列重排。
   private async settleAborted(taskId: string, reason: unknown): Promise<BackgroundTaskRecord> {
     if (reason === 'task_cancelled') return this.queue.cancel(taskId);
     if (reason === 'worker_stopped') return this.queue.release(taskId, this.workerId);

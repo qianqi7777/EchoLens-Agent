@@ -23,6 +23,8 @@ export interface ProposedActionGuardrail {
 export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
   private readonly policies = new Map<string, Promise<PathPolicy>>();
 
+  // 判断顺序从最严格到最宽松（deny-first）：先查显式审批，再查权限未授予、原型污染键，
+  // 然后是副作用审批，最后才放行只读。任何高优先级命中即返回，避免工具借读路径绕过限制。
   async evaluate(
     tool: ToolSpec,
     args: Record<string, unknown>,
@@ -63,6 +65,7 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
     try {
       const policy = await this.policyFor(context.workspaceRoot);
       const resolved = await policy.resolveExisting(requestedPath);
+      // 解析校验后把路径改写为工作区相对路径：既保持只读语义，也防止处理过程把参数改成越权路径。
       const normalizedPath = path.relative(policy.workspaceRoot, resolved.canonicalPath) || '.';
       return outcome('allow', 'workspace_path_verified', '只读路径已限制在工作区内', {
         ...args,
@@ -74,6 +77,7 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
     }
   }
 
+  // 用规范化路径做缓存键；Windows 文件系统大小写不敏感，需统一小写，否则同一工作区会被缓存成多个策略。
   private policyFor(workspaceRoot: string): Promise<PathPolicy> {
     const key = process.platform === 'win32'
       ? path.resolve(workspaceRoot).toLowerCase()
@@ -87,6 +91,7 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
   }
 }
 
+// 通过 structuredClone 隔离返回的参数，避免调用方对参数对象的后续修改反向影响 guardrail 与传入方。
 function outcome(
   decision: GuardrailDecisionKind,
   reasonCode: string,
@@ -104,6 +109,8 @@ function effectForPermission(permission: ToolSpec['permission']): ToolEffect {
   return 'external';
 }
 
+// 递归检查参数中的原型污染键（__proto__ / prototype / constructor）：这些键可能在对象展开或序列化时
+// 改写原型，必须在任何工具执行前阻断。
 function hasDangerousObjectKey(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some(hasDangerousObjectKey);

@@ -25,6 +25,8 @@ const validArguments = {
 
 test('ToolRegistry precompiles strict schemas and rejects unsafe root schemas', () => {
   const registry = new ToolRegistry();
+  // 故意用类型断言注入违反契约的 schema（additionalProperties: true），
+  // 验证安全校验在类型系统之外仍然兜底，注册期即被拒绝。
   assert.throws(() => registry.register({
     name: 'unsafe_tool',
     description: 'unsafe',
@@ -37,6 +39,7 @@ test('ToolRegistry precompiles strict schemas and rejects unsafe root schemas', 
     execute: async () => ({ status: 'ok', content: 'ok', summary: 'ok', evidenceIds: [] }),
   }), /additionalProperties=false/);
 
+  // 注册期编译器不支持的 format 关键字同样在 register 时抛错，静态校验不放过非常规字段。
   assert.throws(() => registry.register({
     name: 'invalid_format_tool',
     description: 'invalid schema',

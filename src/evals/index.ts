@@ -1,3 +1,4 @@
+// Eval 公共出口：任务类型、校验、结果存储、运行器与指标。
 export * from './types.js';
 export * from './task-validation.js';
 export * from './result-store.js';

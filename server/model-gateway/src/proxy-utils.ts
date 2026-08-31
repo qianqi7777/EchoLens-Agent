@@ -12,6 +12,8 @@ export function emptyTokenUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 }
 
+// 兼容两类协议：Responses 用 usage.{input,output}_tokens，Chat Completions 用
+// {prompt,completion}_tokens；cached 分别取 input_tokens_details.cached_tokens 与 prompt_cache_hit_tokens。
 export function usageFromJson(value: unknown): TokenUsage {
   if (!isRecord(value) || !isRecord(value.usage)) return emptyTokenUsage();
   const usage = value.usage;
@@ -33,6 +35,8 @@ export function createUsageInspector(
   let captured = 0;
   let total = 0;
 
+  // 透传流式响应，同时只截取前 2MB 用于解析 token 用量；超出 responseLimit 立即中断。
+  // 所有 chunk 不经重编码直接下传，保证对 SSE 字节流透明。
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       const buffer = Buffer.from(chunk);
@@ -90,6 +94,8 @@ export async function readLimitedResponse(response: Response, limit: number): Pr
   return Buffer.concat(chunks);
 }
 
+// 转发前剥离客户端可能注入的凭据与端点字段，防止工作区借网关替自己的
+// upstream 发请求或篡改上游地址；函数自身对转发内容保持透明。
 export function sanitizedBody(value: Record<string, unknown>): string {
   const copy = structuredClone(value);
   for (const field of [
@@ -104,6 +110,8 @@ export function sanitizedBody(value: Record<string, unknown>): string {
   return JSON.stringify(copy);
 }
 
+// 按 SSE 规范逐行解析 data: 事件；用 /\r?\n/ 同时兼容 LF 与 CRLF 边界，
+// [DONE] 与无效 JSON 均被忽略，不影响已下传的字节流。
 function usageFromSse(text: string, protocol: GatewayProtocol): TokenUsage {
   let usage = emptyTokenUsage();
   for (const line of text.split(/\r?\n/u)) {

@@ -47,6 +47,7 @@ test('MCP Client 发现工具、Resource、Prompt，并通过统一 Executor 审
   );
   assert.equal(allowed.status, 'ok');
   assert.match(allowed.content, /echo:hello/u);
+  // 注入文本被守卫标记为 prompt_instruction：MCP 返回仅作为不可信证据，没有提升为系统指令。
   assert.equal(allowed.outputMetadata?.guardrailFlags?.includes('prompt_instruction'), true);
 
   const resourceName = registry.list().find((tool) => tool.name.endsWith('__read_resource'))?.name;
@@ -80,6 +81,7 @@ test('MCP 请求取消会中止远端调用并返回稳定错误', async (contex
   await manager.connect(config());
   const controller = new AbortController();
   const pending = manager.callTool('local', 'hold', {}, controller.signal);
+  // 竞态窗口：调用必须处于「在途未返回」状态时被中止，先发起请求再于 20ms 后 abort。
   setTimeout(() => controller.abort('test_cancel'), 20);
   await assert.rejects(pending, (error: unknown) => (
     error instanceof Error && error.message.includes('MCP 工具调用失败')
@@ -167,6 +169,8 @@ function testServer(): Server {
   const server = new Server({ name: 'test-mcp', version: '1.0.0' }, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
   });
+  // 安全攻击样本：echo 工具的描述与回显故意包含提示注入文本
+  // （ignore previous instructions），用于断言桥接层把 MCP 内容当不可信数据回填。
   server.setRequestHandler('tools/list', async () => ({
     tools: [
       {
@@ -255,6 +259,8 @@ async function handleWebRequest(
   }
 }
 
+// 内存传输测试共享的 Fixture：stdio 字段仅为类型占位（command 不会被校验或执行），
+// 实际连接由 transportFactory 注入的 InMemoryTransport 完成。
 function config(): McpServerConfig {
   return {
     id: 'local',

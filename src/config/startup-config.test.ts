@@ -10,6 +10,7 @@ class ScriptedTerminal implements SetupTerminal {
   constructor(private readonly answers: string[]) {}
 
   async question(): Promise<string> {
+    // 按固定队列顺序消费预设回答；输入耗尽时立即抛错让场景失败，而不是让向导挂起。
     const answer = this.answers.shift();
     if (answer === undefined) throw new Error('测试输入不足');
     return answer;
@@ -17,6 +18,8 @@ class ScriptedTerminal implements SetupTerminal {
 }
 
 test('首次启动默认生成 DeepSeek Chat Completions 配置', async () => {
+  // 直连模式把明文 API Key 写入本地 .env.local，同时断言不混入任何网关
+  // 凭据字段；一并覆盖默认 DeepSeek 预设与默认 Chat Completions 协议。
   const env: NodeJS.ProcessEnv = {};
   let written = '';
   const result = await ensureStartupConfiguration({
@@ -38,6 +41,8 @@ test('首次启动默认生成 DeepSeek Chat Completions 配置', async () => {
 });
 
 test('云端向导只生成 Gateway 凭据引用', async () => {
+  // 网关模式首次配置不得收集、落盘或透传任何 Token：断言只产生凭据引用
+  // gateway-token:default，文件里既无网关 Access Token 也无直连 API Key。
   const env: NodeJS.ProcessEnv = {};
   let written = '';
   const result = await ensureStartupConfiguration({
@@ -65,6 +70,8 @@ test('云端向导只生成 Gateway 凭据引用', async () => {
 });
 
 test('生成的 .env.local 可以由 Node 原生加载', async (context) => {
+  // 用含 # 和 = 的值验证 quoteEnv 的 JSON 引号在 Node 原生 loadEnvFile 下
+  // 无损往返；这里故意使用真实 process.env，依赖 after 钩子清理。
   const projectRoot = await mkdtemp(join(tmpdir(), 'echolens-startup-'));
   context.after(async () => {
     delete process.env.AGENT_DIRECT_API_KEY;

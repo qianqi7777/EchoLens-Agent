@@ -15,6 +15,8 @@ export class SubagentBackgroundService {
     onStateChange?: (task: BackgroundTaskRecord) => void | Promise<void>,
     onError?: (error: unknown) => void | Promise<void>,
   ) {
+    // 把子 Agent 终态映射为后台任务态：paused→waiting_approval（等待显式恢复重跑）、cancelled→可重试失败、
+    // completed→完成；其余异常统一记为 failed 并带 subagent_ 前缀错误码。
     const executor: BackgroundTaskExecutor = {
       execute: async (task, signal) => {
         const result = await orchestrator.run({
@@ -30,6 +32,7 @@ export class SubagentBackgroundService {
     this.worker = new BackgroundTaskWorker(queue, executor, { onStateChange, onError });
   }
 
+  // 入队或恢复后必须唤醒 Worker 轮询，否则任务会停留在 pending 无人认领。
   async enqueue(profile: string, objective: string, isolation: BackgroundTaskIsolation = 'sandbox'): Promise<BackgroundTaskRecord> {
     const task = await this.queue.enqueue({ isolation, payload: { profile, objective } });
     await this.worker.start();

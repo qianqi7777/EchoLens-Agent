@@ -102,6 +102,12 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
   });
 }
 
+/**
+ * 应用结构化 Patch 并立即写入 Edit Checkpoint。
+ *
+ * 副作用：属于工作区写操作，调用方（ToolExecutor）必须先完成权限与审批；
+ * 每次调用会推进 workspaceRevision 并生成新的 checkpoint，失败时按 PatchError 分类返回。
+ */
 export async function applyStructuredPatch(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
   try {
     const result = await applyPatch(context.workspaceRoot, args.patch);
@@ -119,6 +125,8 @@ export async function applyStructuredPatch(args: Record<string, unknown>, contex
     );
   } catch (error) {
     if (error instanceof PatchError) {
+      // 分类原则：context/hash/invalid 归为参数或文本不匹配（invalid），rollback 回滚归为 failed；
+      // 未识别的 PatchError 一律归 denied（fail-closed），不会把未知错误放行成成功。
       const status = error.code.includes('context') || error.code.includes('hash') || error.code.includes('invalid')
         ? 'invalid' : error.code.includes('rollback') ? 'failed' : 'denied';
       return toolFailure(status, error.code, error.message, {
@@ -131,6 +139,8 @@ export async function applyStructuredPatch(args: Record<string, unknown>, contex
 
 async function readFile(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
   const { path: relative, start = 1, end = start + 199 } = args as unknown as ReadFileArguments;
+  // end 缺省时限定最多 200 行，配合 Schema 的 start/end 上限把单次回读输出封顶，
+  // 避免一次读取超大文件导致回填过大。
   if (end < start) return toolFailure('invalid', 'invalid_arguments', '结束行不能小于开始行');
   try {
     const policy = await pathPolicyFor(context.workspaceRoot);
@@ -150,6 +160,8 @@ async function grep(args: Record<string, unknown>, context: ToolContext): Promis
     const policy = await pathPolicyFor(context.workspaceRoot);
     for await (const file of walkSourceFiles(policy, relative, context.signal)) {
       const { content } = await policy.readTextFile(file);
+      // 用字面量 includes 而非正则匹配，避免用户输入 pattern 触发 ReDoS；
+      // 命中数封顶 100 条，防止超大结果集导致输出膨胀。
       for (const [index, line] of content.split(/\r?\n/).entries()) {
         if (line.includes(pattern)) {
           hits.push(`${displayPath(file)}:${index + 1}: ${line.trim()}`);
@@ -201,6 +213,7 @@ async function* walkSourceFiles(
   const { entries } = await policy.readDirectory(relative);
   for (const entry of entries) {
     if (signal.aborted) return;
+    // 跳过符号链接，防止经由链接逃逸出 workspace 根；同时跳过供应商/构建目录。
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory() && ignoredDirectories.has(entry.name.toLowerCase())) continue;
     const child = relative === '.' ? entry.name : path.join(relative, entry.name);
@@ -218,6 +231,8 @@ function errorResult(content: string): ToolResult {
 }
 
 function pathPolicyFor(workspaceRoot: string): Promise<PathPolicy> {
+  // 按 workspaceRoot 缓存 PathPolicy（Windows 归一化大小写），避免重复创建句柄；
+  // 创建失败时清掉缓存项，让后续调用可重试而不是永久命中坏缓存。
   const key = process.platform === 'win32'
     ? path.resolve(workspaceRoot).toLowerCase()
     : path.resolve(workspaceRoot);
@@ -235,6 +250,8 @@ function pathPolicyFor(workspaceRoot: string): Promise<PathPolicy> {
 function pathFailure(error: unknown, fallback: string): ToolResult {
   if (!(error instanceof PathPolicyError)) return errorResult(fallback);
   const data = { pathPolicyCode: error.code };
+  // 未列入下面两组的 PathPolicyError 一律归 denied（fail-closed）：新增错误码不会
+  // 意外被当作成功或宽松分类放行，需显式加入分组才会改变归类。
   if (['path_io_error', 'workspace_changed', 'identity_unavailable', 'handle_identity_mismatch'].includes(error.code)) {
     return toolFailure('failed', 'tool_failed', error.message, { data });
   }

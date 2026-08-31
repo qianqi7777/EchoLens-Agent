@@ -38,6 +38,8 @@ export class GatewayClientError extends Error {
   readonly requestId?: string;
   readonly retryAfterMs?: number;
 
+  // 安全边界：错误消息、cause 与 requestId 可能携带 Gateway 回显的令牌或用户数据，
+  // 在写入实例前统一脱敏，确保 Error 被记入日志时凭据不会外泄。
   constructor(options: GatewayClientErrorOptions) {
     super(redactText(options.message), {
       cause: options.cause === undefined ? undefined : redactValue(options.cause),
@@ -51,12 +53,19 @@ export class GatewayClientError extends Error {
   }
 }
 
+/**
+ * Gateway 协议客户端：设备授权、令牌轮换、账户与模型查询。
+ *
+ * 凭据只存在于 Authorization 头，从不写入日志；所有响应按不可信输入严格校验结构
+ * （decode* 系列），失败统一抛 `GatewayClientError` 并携带稳定错误码。
+ */
 export class GatewayClient {
   private readonly gatewayUrl: string;
   private readonly fetchImplementation: typeof globalThis.fetch;
   private readonly requestTimeoutMs: number;
 
   constructor(private readonly options: GatewayClientOptions) {
+    // 去掉末尾斜杠，避免与以 / 开头的 path 拼接时出现双斜杠破坏路由。
     this.gatewayUrl = options.gatewayUrl.replace(/\/$/, '');
     this.fetchImplementation = options.fetch ?? globalThis.fetch;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
@@ -66,6 +75,7 @@ export class GatewayClient {
     return decodeAuthStatus(await this.getJson('/v1/auth/status', signal));
   }
 
+  // 默认 scope 只申请当前功能所需的最小权限集；调用方需要更多权限时必须显式传入。
   async createDeviceAuthorization(
     clientId = 'echolens-cli',
     scope = ['models:read', 'inference:create', 'usage:read', 'account:read'],
@@ -103,6 +113,8 @@ export class GatewayClient {
     }, signal);
     if (!response.ok) {
       const code = isRecord(payload) && typeof payload.error === 'string' ? payload.error : 'unknown_gateway_error';
+      // RFC 8628 Device Authorization：authorization_pending 表示用户尚未完成授权，
+      // slow_down 表示轮询过快需放慢——两者都不是错误，沿用服务端建议的 interval（缺省 5 秒）。
       if (code === 'authorization_pending' || code === 'slow_down') {
         return { pending: true, interval: numberField(payload, 'interval') ?? 5 };
       }
@@ -185,6 +197,9 @@ export class GatewayClient {
           signal: attempt.signal,
         });
       } catch (error) {
+        // 内部超时只 abort 本请求的 controller，不会置位外部 signal，
+        // 因此用 externalSignal.aborted 区分“用户取消”与“超时/断连”。
+        // 取消不可重试（用户已主动中止），超时与断连可重试。
         const cancelled = externalSignal?.aborted ?? false;
         throw new GatewayClientError({
           code: cancelled ? 'request_cancelled' : 'gateway_unreachable',
@@ -215,6 +230,9 @@ export class GatewayClient {
   }
 }
 
+// Gateway 可在错误体里显式声明 retryable（布尔字段），优先采用；
+// 缺省时仅 429（限流）与 5xx（上游故障）判定为可重试，其余 4xx 不重试。
+// 同时把 Retry-After 头换算为毫秒交给调用方退避。
 function gatewayHttpError(response: Response, payload: unknown, requestId?: string): GatewayClientError {
   const details = safeProviderDetails(payload);
   const code = isGatewayErrorCode(details.code) ? details.code : defaultGatewayCode(response.status);

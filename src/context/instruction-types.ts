@@ -57,6 +57,11 @@ export interface InstructionAdapter {
   parse(candidate: InstructionCandidate, source: InstructionSource): Promise<InstructionDocument>;
 }
 
+/**
+ * 权限指令。effect 只能是 deny 或 request_approval——刻意不含 allow。
+ * 规则文件不可信：指令只能收紧权限或申请审批，不能放宽或新增权限；
+ * 解析端必须拒绝任何非以上两种的效果。
+ */
 export interface InstructionPermissionDirective {
   id: string;
   sourceId: string;
@@ -93,6 +98,9 @@ export const DEFAULT_INSTRUCTION_DISCOVERY_POLICY: InstructionDiscoveryPolicy = 
   oneFilePerDirectory: true,
 };
 
+// 规则优先级：deny 最高且不可被后续申请恢复；request_approval 只能对运行时
+// 已授权的权限生效，不能新增权限；超出运行时权限上限的申请被拒绝（fail-closed），
+// 未知或非法效果同样被拒绝，保证规则只能收紧、永远无法放宽。
 export function evaluateInstructionPermissions(
   runtimeGranted: ReadonlySet<Permission>,
   directives: readonly InstructionPermissionDirective[],

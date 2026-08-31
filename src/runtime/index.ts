@@ -1,3 +1,5 @@
+// runtime 公共出口：聚合核心消息、Provider、凭据、Session、工具执行与沙箱等能力。
+// 对外只暴露类型与工厂，内部实现细节不从这里泄漏。
 export * from '../core/messages.js';
 export * from '../core/system-policy.js';
 export * from '../core/permissions.js';

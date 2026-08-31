@@ -25,6 +25,8 @@ const emptySchema = {
 
 test('unknown tools and unexpected exceptions return stable errors without raw exception text', async () => {
   const registry = new ToolRegistry();
+  // 异常文本故意携带 secret- 前缀，验证错误面（content/summary）永不回显底层异常消息，
+  // 同步抛出与异步拒绝两条路径都覆盖。
   registry.register(tool('sync_failure', () => {
     throw new Error('secret-sync-stack-message');
   }));
@@ -78,6 +80,8 @@ test('timeouts, cancellation, permission denial, and budget exhaustion stay dist
   const controller = new AbortController();
   const cancellation = new ToolExecutor(cancellationRegistry, { timeoutMs: 1000 })
     .invoke('cancel_me', {}, context(controller.signal));
+  // 必须先等 execute 内部注册完 abort 监听再取消：若取消发生在监听器挂载前，
+  // 该调用只会退化为普通失败，无法稳定复现 cancelled 分支。
   await executionStarted;
   controller.abort();
   const cancelled = await cancellation;

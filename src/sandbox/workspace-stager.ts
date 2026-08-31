@@ -43,6 +43,7 @@ export class FileSystemWorkspaceStager implements WorkspaceStager {
   }
 
   async prepare(workspaceRoot: string, id: string): Promise<StagedWorkspace> {
+    // id 是每次运行生成的随机 UUID，被拼进暂存目录路径；严格校验避免路径拼接被插入任意片段。
     if (!/^echolens-[a-f0-9-]{36}$/u.test(id)) throw new SandboxError('sandbox_stage_failed', 'Sandbox 工作区 ID 无效');
     const policy = await PathPolicy.create(workspaceRoot);
     const sandboxBase = path.join(policy.workspaceRoot, '.echolens', 'sandboxes');
@@ -72,6 +73,8 @@ export class FileSystemWorkspaceStager implements WorkspaceStager {
         assertInside(targetRoot, target);
         await mkdir(path.dirname(target), { recursive: true });
         await writeFile(target, source.bytes, { mode: 0o644 });
+        // 源文件带可执行位时保留 0o755；在 POSIX 下这是真实的执行权限，Windows 的 mode 位不全时该条件自然为假，
+        // 不会误加权限，只在源文件确有可执行语义时补齐容器内的执行位。
         const sourceStat = await policy.resolveExisting(relative, 'file');
         if ((Number(sourceStat.stat.mode) & 0o111) !== 0) await chmod(target, 0o755);
         baseline.push({ path: relative, bytes: Buffer.from(source.bytes), mode: Number(sourceStat.stat.mode) });
@@ -95,6 +98,8 @@ export class FileSystemWorkspaceStager implements WorkspaceStager {
   }
 }
 
+// 优先用 git ls-files（--cached --modified --others --exclude-standard）获得“被跟踪 + 未忽略”的文件清单，
+// 从而尊重 .gitignore；git 不可用（如非 Git 目录）时回退到手动遍历。
 async function gitVisibleFiles(root: string): Promise<string[] | undefined> {
   try {
     const result = await promisify(execFile)('git', [
@@ -112,6 +117,7 @@ async function walkVisibleFiles(policy: PathPolicy, relative: string): Promise<s
   for (const entry of directory.entries) {
     const child = relative === '.' ? entry.name : `${relative.replaceAll('\\', '/')}/${entry.name}`;
     if (!isPublicPath(child)) continue;
+    // 符号链接可能指向工作区其他位置，拷入容器会扩大暴露面；直接拒绝、不跟随。
     if (entry.isSymbolicLink()) throw new SandboxError('sandbox_stage_failed', `Sandbox 快照拒绝符号链接：${child}`);
     if (entry.isDirectory()) files.push(...await walkVisibleFiles(policy, child));
     else if (entry.isFile()) files.push(child);
@@ -119,6 +125,7 @@ async function walkVisibleFiles(policy: PathPolicy, relative: string): Promise<s
   return files;
 }
 
+// 任意路径段命中 PRIVATE_NAMES 或以 .env/.env.* 开头都被排除，确保密钥文件不会被拷入容器。
 function isPublicPath(relative: string): boolean {
   const segments = normalizeRelative(relative).split('/').filter(Boolean);
   return !segments.some((segment) => PRIVATE_NAMES.has(segment.toLowerCase())

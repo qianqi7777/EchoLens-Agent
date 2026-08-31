@@ -205,6 +205,9 @@ test('gateway signed-out, expired-token, and upstream failures remain distinct',
 });
 
 test('remote HTTP fails closed while implemented privacy routes connect explicitly', async () => {
+  // 安全不变量：direct 路由拒绝明文 HTTP 基线，inspect()（离线）阶段即返回
+  // direct_config_invalid——不解析凭据、不发起网络请求，失败关闭，
+  // 避免凭据经非 TLS 通道传输。
   const insecure = ModelRouter.fromEnv({
     AGENT_MODEL_ROUTE: 'direct',
     AGENT_DIRECT_BASE_URL: 'http://provider.example/v1',

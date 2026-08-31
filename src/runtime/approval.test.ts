@@ -26,6 +26,8 @@ test('Policy Engine deny 优先于 allow，并对副作用默认要求审批', (
     { id: 'allow-write', effect: 'allow', permission: 'workspace.write', explanation: '允许写入' },
     { id: 'deny-secret', effect: 'deny', pathPrefix: 'secrets/', explanation: '拒绝敏感目录' },
   ]);
+  // 安全不变量：同一请求同时命中 allow 与 deny 时 deny 必须无条件优先，
+  // 否则可用宽 allow 条件或规则顺序绕过目录级拒绝，造成权限升级。
   assert.equal(engine.evaluate({ toolName: 'apply_patch', permission: 'workspace.write', path: 'secrets/a.txt' }).decision, 'deny');
   assert.equal(engine.evaluate({ toolName: 'apply_patch', permission: 'workspace.write', path: 'src/a.ts' }).decision, 'allow');
   assert.equal(new PolicyEngine().evaluate({ toolName: 'run', permission: 'process.exec' }).decision, 'require_approval');
@@ -41,6 +43,8 @@ test('持久化审批只保存参数哈希，不保存完整 Patch 或 Shell arg
     id: 'shell-approval',
     toolName: 'shell_exec',
     permission: 'process.exec',
+    // 攻击样本：Shell argv 内为不应落盘的敏感值；验证持久化只写 argumentsHash，
+    // 磁盘上的审批文件不得出现明文 argv 或完整 Patch 内容。
     arguments: { executable: 'tool', args: ['opaque-private-value'] },
   });
   await store.save(shellRequest, { decision: 'allow', scope: 'project', decidedAt: new Date().toISOString() });

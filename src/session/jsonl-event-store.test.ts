@@ -14,6 +14,7 @@ test('并行 append 由单写者分配连续 seq 且每行完整', async (contex
     flushEachEvent: false,
   });
 
+  // 10 个 append 并发发起且不加外部同步，验证单写者队列在乱序完成时仍分配连续 seq。
   const written = await Promise.all(Array.from({ length: 10 }, (_, callIndex) => store.append({
     turnId: 'turn-1',
     runId: 'run-1',
@@ -42,6 +43,7 @@ test('恢复会移除损坏尾部并保留最后完整事件', async (context) =
   const first = new JsonlEventStore(root, 'session-tail', { flushEachEvent: false });
   await first.append({ payload: { type: 'session.created', workspaceRoot: 'D:\\repo' } });
   await first.close();
+  // 手工追加不带换行结尾的截断行，模拟崩溃时最后一条事件只写了一半。
   await appendFile(join(root, 'session-tail.jsonl'), '{"version":1,"seq":2');
 
   const recovered = new JsonlEventStore(root, 'session-tail', { flushEachEvent: false });
@@ -55,6 +57,7 @@ test('中间损坏和 seq 缺口会失败关闭', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-events-'));
   context.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'session-corrupt.jsonl');
+  // 故意构造损坏的行 JSON 并跳过 2 号 seq，验证读取端拒绝任何不连续日志而非静默忽略。
   await writeFile(path, [
     JSON.stringify(event(1)),
     '{broken}',
@@ -71,6 +74,7 @@ test('支持 afterSeq、Session 列表并在写入前脱敏', async (context) =>
   context.after(() => rm(root, { recursive: true, force: true }));
   const store = new JsonlEventStore(root, 'session-query', { flushEachEvent: false });
   await store.append({ payload: { type: 'session.created', workspaceRoot: 'D:\\repo' } });
+  // 敏感样本：明文模拟 Authorization 头，验证脱敏在持久化前生效。
   await store.append({ payload: { type: 'turn.started', userMessage: 'Authorization: Bearer secret-value' } });
 
   const events = await store.read(1);

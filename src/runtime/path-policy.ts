@@ -28,6 +28,12 @@ export type PathPolicyErrorCode =
   | 'handle_identity_mismatch'
   | 'path_io_error';
 
+/**
+ * 路径策略错误。
+ *
+ * `code` 是面向调用方的稳定错误码，`message` 仅用于人读提示；调用方应依赖 `code` 而非
+ * 错误文本做分支判断，错误文本可能随版本变化。
+ */
 export class PathPolicyError extends Error {
   constructor(
     readonly code: PathPolicyErrorCode,
@@ -69,6 +75,14 @@ interface ResolvedPath {
   stat: BigIntStats;
 }
 
+/**
+ * 工作区路径访问的安全边界。
+ *
+ * 输入一律视为工作区相对路径，规范化后必须仍位于工作区之内；同时拒绝重解析点
+ * （符号链接 / Junction）、UNC、设备命名空间、ADS 以及 Windows 保留路径形态。
+ * 返回的 `FileHandle` 由调用方持有并负责关闭；本策略在打开与校验之间通过
+ * `afterHandleOpen` 钩子比对文件身份，以检测打开后发生的路径替换。
+ */
 export class PathPolicy {
   private constructor(
     readonly workspaceRoot: string,
@@ -81,6 +95,8 @@ export class PathPolicy {
     const rootLink = await lstat(rootInput, { bigint: true }).catch((error) => {
       throw ioError(error, '工作区根目录不存在');
     });
+    // 根目录自身不能是符号链接或 Junction，否则无论解析到哪里都会偏离预期的工作区边界，
+    // 后续以 realpath + dev/ino 固化的身份也会不一致，因此在入口处直接拒绝。
     if (rootLink.isSymbolicLink()) {
       throw new PathPolicyError('reparse_point_denied', '工作区根目录不能是符号链接或 Junction');
     }
@@ -91,6 +107,8 @@ export class PathPolicy {
       throw ioError(error, '无法读取工作区根目录');
     });
     if (!rootStat.isDirectory()) throw new PathPolicyError('not_a_directory', '工作区根路径不是目录');
+    // 固化根目录身份（dev/ino）并在每次访问时重新比对，用于检测工作区根在运行期间被替换，
+    // 避免后续操作落在已被迁移到别处的目录上。
     return new PathPolicy(canonical, identity(rootStat), options);
   }
 
@@ -109,6 +127,8 @@ export class PathPolicy {
       if (openedStat.size > BigInt(maxBytes)) {
         throw new PathPolicyError('file_too_large', `文件超过读取上限：${maxBytes} bytes`);
       }
+      // 先读入比上限多 1 字节作为探测：若文件超过上限则 bytesRead 必然大于 maxBytes；读后再次
+      // stat 并与打开时比对，用于检测读取期间发生的并发追加或替换，避免一次性读入超限内容。
       const buffer = Buffer.allocUnsafe(Math.min(maxBytes + 1, Number(openedStat.size) + 1));
       const { bytesRead } = await verified.handle.read(buffer, 0, buffer.length, 0).catch((error) => {
         throw ioError(error, '无法读取工作区文件');
@@ -146,6 +166,7 @@ export class PathPolicy {
       if (openedStat.size > BigInt(maxBytes)) {
         throw new PathPolicyError('file_too_large', `文件超过读取上限：${maxBytes} bytes`);
       }
+      // 与 readTextFile 共享同一套上限读取与大小复核逻辑，修改时须保持两处一致。
       const buffer = Buffer.allocUnsafe(Math.min(maxBytes + 1, Number(openedStat.size) + 1));
       const { bytesRead } = await verified.handle.read(buffer, 0, buffer.length, 0).catch((error) => {
         throw ioError(error, '无法读取工作区文件');
@@ -281,6 +302,9 @@ export class PathPolicy {
     handle: FileHandle,
     kind: 'file' | 'directory',
   ): Promise<string> {
+    // 先持有句柄，再重新解析路径并按 dev/ino 比对，用于检测“解析后、打开前”目标被替换的
+    // rename-after-open 竞态。afterHandleOpen 钩子有意在此窗口内运行，测试借此在单线程内
+    // 确定性地复现该竞态，因此该钩子先于身份复核执行。
     const handleStat = await handle.stat({ bigint: true }).catch((error) => {
       throw ioError(error, '无法读取已打开句柄');
     });
@@ -312,6 +336,8 @@ export class PathPolicy {
   }
 
   private async verifyNewHandle(input: string, candidatePath: string, handle: FileHandle): Promise<string> {
+    // 与 verifyHandle 相同的身份复核逻辑，但针对刚创建的文件：确保创建期间目标未被替换，
+    // 避免调用方拿到的句柄指向其它文件。
     const handleStat = await handle.stat({ bigint: true }).catch((error) => {
       throw ioError(error, '无法读取新建文件句柄');
     });
@@ -345,6 +371,8 @@ export class PathPolicy {
   private async assertNoLinkComponents(candidatePath: string): Promise<void> {
     const relative = path.relative(this.workspaceRoot, candidatePath);
     if (!relative) return;
+    // realpath 会静默跟随符号链接 / Junction，因此仅校验 canonicalPath 不足以拒绝链接；
+    // 必须逐段 lstat，显式拒绝中间路径组件里出现的重解析点。相对路径为空即指向工作区根，无需检查。
     let current = this.workspaceRoot;
     for (const segment of relative.split(path.sep).filter(Boolean)) {
       current = path.join(current, segment);
@@ -358,6 +386,8 @@ export class PathPolicy {
   }
 
   private assertInside(candidatePath: string): void {
+    // 用字符串前缀判断包含关系前先归一化（去尾部分隔符、Windows 统一小写），否则大小写或
+    // 结尾分隔符的差异会让边界判断失真；候选路径等于工作区根时需单独放行。
     const root = comparablePath(this.workspaceRoot);
     const candidate = comparablePath(path.resolve(candidatePath));
     if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
@@ -368,6 +398,8 @@ export class PathPolicy {
   private assertForbiddenSegments(candidatePath: string): void {
     const relative = path.relative(this.workspaceRoot, candidatePath);
     const segments = relative.split(path.sep).filter(Boolean);
+    // 在 normalize / realpath 之后再次检查 .git 与 .echolens，与 validateRelativePath 构成双层防御：
+    // 前者拦原始输入，这里拦解析后的路径，防止通过大小写变体或解析结果绕过。
     if (segments.some((segment) => segment.toLowerCase() === '.git')) {
       throw new PathPolicyError('git_metadata_denied', '拒绝访问 .git 内部目录');
     }
@@ -383,27 +415,37 @@ export function validateRelativePath(input: string): void {
   }
   if (input.length > 32_000) throw new PathPolicyError('path_too_long', '路径长度超过限制');
 
+  // 将 / 统一归一化为 \，使后续校验全部按 Windows 路径规则分析；工具输入允许同时使用两种
+  // 分隔符，以兼容 Linux/Windows 两种工作区习惯。
   const windows = input.replaceAll('/', '\\');
+  // \\?\ 与 \\.\ 是 Windows 设备命名空间，可绕过路径规范化并引用任意卷或设备；UNC 前缀指向
+  // 网络共享，既超出工作区也不可本地信任。二者都在进入路径解析前拒绝。
   if (/^\\\\[?.]\\/i.test(windows) || /^\\\?\?\\/i.test(windows)) {
     throw new PathPolicyError('device_path', '拒绝 Windows 设备命名空间路径');
   }
   if (windows.startsWith('\\\\')) throw new PathPolicyError('unc_path', '拒绝 UNC 路径');
+  // C:relative 是盘符相对路径，会基于当前进程驱动器解析到工作区之外，故拒绝。
   if (/^[A-Za-z]:[^\\]/.test(windows)) {
     throw new PathPolicyError('drive_relative_path', '拒绝盘符相对路径');
   }
+  // 同时用 win32 与 posix 判断绝对路径：输入可能符合任意一方语义，必须双重覆盖。
   if (path.win32.isAbsolute(windows) || path.posix.isAbsolute(input)) {
     throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
   }
 
+  // 以下按组件逐一校验，覆盖 NTFS 特有的 ADS、8.3 短名、保留设备名与元数据目录等形态。
   const segments = windows.split('\\').filter(Boolean);
   for (const segment of segments) {
     if (segment === '..') throw new PathPolicyError('path_outside_workspace', '拒绝包含 .. 的路径');
     if (segment === '.') continue;
     if (segment.length > 255) throw new PathPolicyError('path_too_long', '路径组件长度超过限制');
+    // 冒号在 NTFS 中引入 Alternate Data Stream，可指向同一文件上的隐藏数据流。
     if (segment.includes(':')) {
       throw new PathPolicyError('alternate_data_stream', '拒绝 NTFS Alternate Data Stream');
     }
     if (/[<>"|?*]/.test(segment)) throw new PathPolicyError('invalid_path', '路径包含 Windows 非法字符');
+    // 以点或空格结尾的组件会被 Windows 静默截断，8.3 短文件名（如 SOURCE~1）可遮蔽真实目录名，
+    // 二者都作为潜在的绕过形态拒绝。
     if (/[. ]$/.test(segment)) {
       throw new PathPolicyError('trailing_dot_or_space', '拒绝以点或空格结尾的路径组件');
     }
@@ -411,6 +453,7 @@ export function validateRelativePath(input: string): void {
       throw new PathPolicyError('short_name', '拒绝 8.3 短文件名形态');
     }
     const baseName = segment.split('.')[0]!.toUpperCase();
+    // CON/PRN/AUX/NUL/COM1-9/LPT1-9 是 Windows 保留设备名，访问它们不会得到普通文件语义。
     if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(baseName)) {
       throw new PathPolicyError('reserved_name', '拒绝 Windows 保留设备名');
     }
@@ -429,6 +472,8 @@ interface FileIdentity {
 }
 
 function identity(value: BigIntStats): FileIdentity {
+  // 部分文件系统（尤其 Windows 上某些句柄）不提供 ino；此时无法唯一标识文件身份，
+  // 必须失败而不是放行，否则 dev/ino 比对会退化并失去路径替换检测能力。
   if (value.ino === 0n) {
     throw new PathPolicyError('identity_unavailable', '文件系统未提供可用的文件身份标识');
   }
@@ -441,11 +486,15 @@ function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
 
 function comparablePath(value: string): string {
   const resolved = path.resolve(value).replace(/[\\/]$/, '');
+  // Windows 文件系统大小写不敏感，比较前须归一到同一大小写，否则工作区根与候选路径的大小写
+  // 差异会造成边界判断失真；POSIX 则以原始大小写比较。
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function ioError(error: unknown, message: string): PathPolicyError {
   if (error instanceof PathPolicyError) return error;
+  // 将底层系统错误稳定映射：ENOENT → path_not_found，其余归为 path_io_error。调用方依赖的是
+  // 稳定错误码而非系统错误文本，因此不对外承诺底层 errno 的稳定性。
   const code = isNodeError(error) && error.code === 'ENOENT' ? 'path_not_found' : 'path_io_error';
   return new PathPolicyError(code, message);
 }

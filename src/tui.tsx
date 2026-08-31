@@ -29,6 +29,7 @@ import {
 } from './orchestration/task-command.js';
 
 const DEFAULT_HEIGHT = 24;
+// 主题色集中在此：TUI 所有组件共享同一套色板，调整外观只改这里。
 const BRAND = '#d97757';
 const ACCENT = '#7aa2f7';
 const DIM = '#63666c';
@@ -38,6 +39,10 @@ const BAD = '#e5484d';
 const WARN = '#f5a524';
 const BODY = '#e6e6e6';
 
+/**
+ * TUI 的装配参数。所有能力都以回调注入，TerminalUi 不直接依赖 Session/Runtime 实现，
+ * 这样既能复用现有协议，也便于测试时替换成假实现。
+ */
 export interface TuiOptions {
   model: string;
   route: string;
@@ -60,6 +65,8 @@ export interface TuiOptions {
 
 type Tone = 'info' | 'success' | 'warn' | 'error' | 'dim';
 
+// 会话转录的渲染模型：把 Session 事件流归一成五种可渲染条目。
+// 每条有稳定 id（seq 生成），React 用 key 做增量更新；streaming 标记驱动光标与收尾逻辑。
 type ViewItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'assistant'; id: string; text: string; streaming: boolean; summary?: FinalSummary }
@@ -116,6 +123,9 @@ interface Line {
 
 // ---- Tiny reactive store (injected into React via useSyncExternalStore) -------
 
+// 极简外部状态源：全部状态集中在一个不可变对象里，更新走 fn(prev) => next，
+// 通知订阅者后由 useSyncExternalStore 触发重渲染。不用 Context/Reducer 是因为
+// 事件回调（onEvent）来自 React 树之外，需要一个独立于组件的存储。
 class UiStore {
   private state: TuiState;
   private readonly listeners = new Set<() => void>();
@@ -141,6 +151,12 @@ class UiStore {
 
 // ---- Layout helpers ---------------------------------------------------------
 
+/**
+ * 按终端显示列宽换行，兼容中文全角字符与无空格长串。
+ *
+ * 先用 `\r` 清洗再用 wrapAnsi 逐段硬换行：wrapAnsi 按显示宽度（ANSI 转义不计宽）
+ * 工作，硬换行保证没有空格的超长 token 也不会撑破布局。
+ */
 export function wrapDisplayText(text: string, width: number): string[] {
   const columns = Math.max(1, width);
   return text.replace(/\r/g, '').split('\n').flatMap((paragraph) => {
@@ -149,10 +165,15 @@ export function wrapDisplayText(text: string, width: number): string[] {
   });
 }
 
+/**
+ * 按显示宽度截断文本并以省略号结尾。
+ * @returns 不超宽时原样返回；宽度不足 1 时只返回省略号，避免产生空行。
+ */
 export function truncateDisplayText(value: string, width: number): string {
   if (stringWidth(value) <= width) return value;
   if (width <= 1) return '…';
   let output = '';
+  // 逐字符累计并预检“加省略号后的宽度”：提前终止保证最终结果严格不超过 width。
   for (const character of value) {
     if (stringWidth(`${output}${character}…`) > width) break;
     output += character;
@@ -441,6 +462,8 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
   const approvalSpace = approvalBlock.length > 0 ? approvalBlock.length + 1 : 0;
   const viewport = Math.max(2, maxRows - reserve - approvalSpace);
 
+  // 视口计算：从底部向上取 viewport 行；scrollFromBottom 大于 0 时向上偏移，
+  // 并把“上方还有内容”的提示行挤掉一行，避免提示行把正文顶出屏幕。
   const scrollFromBottom = Math.min(state.scrollFromBottom, Math.max(0, allLines.length - viewport));
   const start = Math.max(0, allLines.length - viewport - scrollFromBottom);
   const hasMoreAbove = start > 0;
@@ -546,6 +569,7 @@ export class TerminalUi {
     if (!stdin.isTTY || !stdout.isTTY || !stdin.setRawMode) {
       throw new Error('当前终端不支持 TUI，请使用交互式终端运行');
     }
+    // 进入备用屏幕缓冲区并隐藏光标；退出时必须在 finally 前的出口恢复（见下方 ?25h/?1049l）。
     stdout.write('\u001b[?1049h\u001b[?25l');
     for (const [prefix, value] of [
       ['workspace ', this.options.workspaceRoot],
@@ -555,12 +579,15 @@ export class TerminalUi {
     }
     for (const message of this.options.startupMessages ?? []) this.pushNotice(message, 'info');
     this.store.update((s) => ({ ...s, status: '就绪' }));
+    // exitOnCtrlC: false——Ctrl+C 由 handleKey 自行解释（有活动 Turn 时只取消 Turn）。
     this.inkInstance = render(<App store={this.store} controller={this} />, { exitOnCtrlC: false });
+    // start 挂起直到 quit() 被调用，期间事件循环持续为 TUI 服务。
     await new Promise<void>((resolve) => {
       this.exitResolver = resolve;
     });
     this.inkInstance?.unmount();
     this.inkInstance = undefined;
+    // 恢复光标并离开备用屏幕，回到调用前的终端状态。
     stdout.write('\u001b[?25h\u001b[?1049l\n');
   }
 
@@ -570,6 +597,7 @@ export class TerminalUi {
       try {
         preview = await previewApprovalRequest(request);
       } catch (error) {
+        // 预览失败按拒绝处理：不能因为拿不到 diff 就放行一个用户没看过的改动。
         this.pushNotice(`Patch 预览失败：${message(error)}`, 'error');
         return { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: 'Patch 预览失败' };
       }
@@ -586,6 +614,7 @@ export class TerminalUi {
       status: `需要审批：${request.toolName}`,
       statusTone: 'warn',
     }));
+    // 返回的 Promise 由用户按键决定何时 resolve；期间 TUI 停留在审批界面。
     return new Promise<ApprovalDecision>((resolve) => {
       const current = this.store.get();
       if (current.approval) current.approval.resolve = resolve;
@@ -596,6 +625,7 @@ export class TerminalUi {
     this.pushNotice(message, 'info');
   }
 
+  // 按键分发：审批界面优先于一切普通输入；滚动键独立于输入框；其余才落到输入编辑。
   handleKey(input: string, key: Key): void {
     const state = this.store.get();
     if (state.approval) {
@@ -647,9 +677,11 @@ export class TerminalUi {
       this.store.update((s) => ({ ...s, input: s.input.slice(0, -1) }));
       return;
     }
+    // 过滤控制字符：raw mode 下组合键会产生转义序列，只有可打印字符才进输入框。
     if (input && !key.meta) {
       const printable = [...input].every((character) => character >= ' ' && character !== '');
       if (printable) {
+        // 20_000 字符上限：防止粘贴超长内容把 TUI 渲染拖垮。
         this.store.update((s) => ({ ...s, input: (s.input + input).slice(0, 20000) }));
       }
     }
@@ -706,7 +738,9 @@ export class TerminalUi {
   private async submit(): Promise<void> {
     const state = this.store.get();
     const prompt = state.input.trim();
+    // busy 时忽略提交：活动 Turn 期间不允许再发起新输入，避免并发运行。
     if (!prompt || state.busy) return;
+    // 历史只保留最近 100 条，防止长会话里历史列表无限增长。
     this.store.update((s) => ({ ...s, input: '', history: [...s.history, prompt].slice(-100), historyIndex: -1 }));
     this.pushUser(prompt);
 
@@ -956,6 +990,8 @@ export class TerminalUi {
     });
   }
 
+  // delta 合并到 16ms 一帧再刷新：模型流式输出频率远高于渲染频率，逐条更新
+  // 会让 React 每毫秒都重渲染，合并后既保证观感连续，也避免 CPU 空转。
   private scheduleFlush(): void {
     if (this.deltaTimer) return;
     this.deltaTimer = setTimeout(() => {
@@ -975,6 +1011,7 @@ export class TerminalUi {
     this.store.update((s) => {
       const transcript = [...s.transcript];
       const last = transcript[transcript.length - 1];
+      // 追加到正在流式的 assistant 条目；没有流式条目（例如事件顺序异常）时新建一条。
       if (last && last.kind === 'assistant' && last.streaming) {
         transcript[transcript.length - 1] = { ...last, text: last.text + text };
       } else {
@@ -1002,9 +1039,11 @@ export class TerminalUi {
     return `v${this.seq.value}`;
   }
 
+  // stopped 防重入：quit 可能被 Ctrl+C、Ctrl+D、/exit 多次触发，第二次直接忽略。
   private quit(): void {
     if (this.stopped) return;
     this.stopped = true;
+    // 退出即取消活动 Turn；挂起的审批按拒绝结算，避免调用方永远等不到决定。
     this.activeAbort?.abort('user_exit');
     const state = this.store.get();
     if (state.approval) {

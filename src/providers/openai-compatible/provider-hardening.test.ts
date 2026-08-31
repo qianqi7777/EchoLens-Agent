@@ -101,6 +101,8 @@ test('401 is not retried and provider errors do not expose credentials', async (
     calls += 1;
     response.statusCode = 401;
     response.setHeader('content-type', 'application/json');
+    // 攻击样本：服务端把客户端发出的 Authorization 头拼进错误消息回显，模拟不可信 Provider 反射凭据。
+    // 不变量：ProviderError 的 JSON 序列化及 error.cause 均不得包含该凭据。
     response.end(JSON.stringify({
       error: {
         code: 'invalid_api_key',
@@ -146,6 +148,8 @@ test('cancelling during backoff stops before another request', async () => {
   try {
     const controller = new AbortController();
     const provider = providerFor(server.baseUrl, {
+      // 竞态窗口：待 sleep 真正进入退避（已收到 429、尚未发出下一次请求）后再 abort，
+      // 以确定性的方式覆盖“退避中被取消”的分支，并验证不再发起任何后续请求。
       retry: {
         sleep: async (_delayMs, signal) => {
           enteredBackoff();
@@ -179,6 +183,9 @@ test('cancelling during backoff stops before another request', async () => {
 
 test('a response body interruption is classified but never replayed', async () => {
   let calls = 0;
+  // 恶意样本：响应体发出合法前缀后以网络错误中断，且错误消息内嵌凭据，
+  // 模拟被截断并可能被注入敏感信息的网络流。不变量：部分响应绝不重放（calls 为 1），
+  // 中断原因中的凭据也不得进入 ProviderError 序列化。
   const fetchImplementation: typeof fetch = async () => {
     calls += 1;
     const body = new ReadableStream<Uint8Array>({
@@ -239,6 +246,8 @@ test('request deadlines are classified as retryable timeouts', async () => {
   const provider = providerFor('https://provider.invalid/v1', {
     requestTimeoutMs: 5,
     retry: { maxRetries: 0 },
+    // fetch 永不自行结束，只有内部 deadline 触发的 abort 能终止它，
+    // 从而单独覆盖“请求超时被归为可重试错误（timeout）”的分支。
     fetch: async (_input, init) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener(
         'abort',

@@ -56,7 +56,11 @@ async function* decodeChatStream(
       for (const raw of choice.delta.tool_calls) mergeToolCall(calls, raw);
     }
   }
+  // 未收到 [DONE] 且没有 finish_reason 即退出，说明连接中断；按未正常结束抛错触发重试，
+  // 而不是把半截流当作完成结果返回。
   if (!completed && finishReason === undefined) throw new Error('Chat Completions SSE 未正常结束');
+  // 先把流式增量拼成与 Chat Completions 同构的 payload，再复用非流式 codec 解码，
+  // 让停止原因与 usage 的口径只有一处实现。
   const payload = {
     id,
     choices: [{
@@ -101,10 +105,14 @@ async function* decodeResponsesStream(
       terminal = new ResponsesCodec().decode(response, requestId);
     }
   }
+  // Responses 流以事件类型区分增量文本与终止：只有 response.completed/failed/incomplete
+  // 携带最终响应。若从未收到终止事件即结束，按流中断抛错触发重试，不把未完成流当成功返回。
   if (!terminal) throw new Error('Responses SSE 缺少终止事件');
   yield { type: 'response.completed', result: terminal };
 }
 
+// Chat Completions 流式按 index 分片下发 tool_calls，name/arguments 需跨 chunk 拼接；
+// 以 index 为键累积，最后按 index 排序还原调用顺序，确保并行工具调用结果顺序稳定。
 function mergeToolCall(
   calls: Map<number, { id: string; name: string; arguments: string }>,
   raw: unknown,

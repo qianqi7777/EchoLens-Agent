@@ -9,6 +9,7 @@ import type { BackgroundTaskIsolation } from './task-queue.js';
 
 const execute = promisify(execFile);
 
+/** 后台任务工作区租约：`cleanup` 必须由使用方在 finally 中调用，回收资源。 */
 export interface TaskWorkspaceLease {
   id: string;
   mode: BackgroundTaskIsolation;
@@ -21,6 +22,10 @@ export interface TaskWorkspaceAllocator {
   allocate(workspaceRoot: string, mode: BackgroundTaskIsolation): Promise<TaskWorkspaceLease>;
 }
 
+/**
+ * 按隔离模式分配后台任务工作区：sandbox 用一次性暂存副本，worktree 用 git worktree。
+ * 工作区分配只做隔离，不做任何业务判断；任务能否写回由调用方依据 changedFiles 决策。
+ */
 export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
   constructor(private readonly stager = new FileSystemWorkspaceStager()) {}
 
@@ -30,6 +35,7 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
       : this.allocateSandbox(workspaceRoot);
   }
 
+  // sandbox 使用临时暂存副本：只读分析或运行受控测试，改动随 cleanup 丢弃，因此 changedFiles 恒为空。
   private async allocateSandbox(workspaceRoot: string): Promise<TaskWorkspaceLease> {
     const id = `echolens-${randomUUID()}`;
     const staged = await this.stager.prepare(workspaceRoot, id);
@@ -44,6 +50,8 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
 
   private async allocateWorktree(workspaceRoot: string): Promise<TaskWorkspaceLease> {
     const id = `echolens-worktree-${randomUUID()}`;
+    // --detach：只检出 HEAD 生成隔离副本，不在源仓库创建新分支、不触碰当前 checked-out 分支。
+    // 目录按 workspace 根路径哈希分桶，同一工作区并发任务再用 uuid 区分，避免子 Agent 互相碰撞。
     const rootHash = createHash('sha256').update(path.resolve(workspaceRoot)).digest('hex').slice(0, 12);
     const base = path.join(os.tmpdir(), 'echolens-worktrees', rootHash);
     const target = path.join(base, id);
@@ -64,6 +72,7 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
       root: target,
       changedFiles: () => worktreeChanges(target),
       cleanup: async () => {
+        // cleanup 只执行一次，确保外部多次调用时也只 remove 一次 worktree 并删除目录。
         if (cleaned) return;
         cleaned = true;
         try {
@@ -90,6 +99,7 @@ async function worktreeChanges(root: string): Promise<string[]> {
     const entry = entries[index]!;
     const status = entry.slice(0, 2);
     changed.push(entry.slice(3).replaceAll('\\', '/'));
+    // porcelain v1 中 rename/copy 会输出源与目标两条记录，这里跳过紧随其后的记录，避免路径统计重复。
     if (/[RC]/u.test(status)) index += 1;
   }
   return [...new Set(changed)].sort();

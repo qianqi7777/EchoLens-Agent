@@ -1,5 +1,8 @@
 import { BlockList, isIP } from 'node:net';
 
+// 代理按“全球可路由”做 deny 为默认的黑名单：覆盖私网、loopback、链路本地、CGNAT、文档与测试网段、
+// 组播及保留地址（RFC 1918/5735/5737/4193 等），并包含 IPv4/IPv6 映射、NAT64、Teredo/6to4 特殊前缀，
+// 避免借映射地址绕过对私网回环的封锁。
 const RESERVED_IPV4_SUBNETS = [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
   ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
@@ -29,6 +32,8 @@ function egressBlockLists(): { ipv4: BlockList; ipv6: BlockList } {
   return { ipv4, ipv6 };
 }
 
+// 这段代理源码以 sidecar 方式挂载进容器运行（见 prepareAllowedNetwork），是工作负载唯一的出口。
+// 默认 deny：只有 hostname 命中 allowlist、端口命中且解析结果非私网才放行，其余请求统一返回 403 并断开连接。
 export const EGRESS_PROXY_SOURCE = String.raw`
 import http from 'node:http';
 import net from 'node:net';
@@ -91,6 +96,9 @@ server.maxConnections = 64;
 server.listen(3128, '0.0.0.0');
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close(() => process.exit(0)));
 
+// hostname 必须命中 allowlist 且端口在 allowlist 内，二者同时满足才可能放行。
+  // 再对域名做 DNS 解析并只接受“存在一个非私网解析结果”：若域名同时解析回内网/私网地址则整体拒绝，
+  // 防止 DNS 重绑定或“域名在 allowlist 但实际解析回内网”绕过私网封锁。
 async function authorize(rawHostname, port) {
   const hostname = normalizeDomain(rawHostname);
   if (!domains.has(hostname) || !ports.has(port)) throw new Error('target denied');
@@ -100,6 +108,7 @@ async function authorize(rawHostname, port) {
   return allowed.address;
 }
 
+// CONNECT 请求的 authority 为 host:port；从最后一个冒号拆分，兼容 [ipv6]:port 的方括号写法。
 function parseAuthority(value) {
   const separator = value.lastIndexOf(':');
   if (separator <= 0) throw new Error('invalid authority');
@@ -110,12 +119,14 @@ function parseAuthority(value) {
 }
 
 function normalizeDomain(value) {
+  // 域名先做 ASCII/punycode 规范化并去末尾点；拒绝纯 IP 字面量，否则请求方可用 IP 形式绕过域名 allowlist。
   const normalized = domainToASCII(String(value).trim().toLowerCase().replace(/\.$/u, ''));
   if (!normalized || net.isIP(normalized)) throw new Error('invalid domain');
   return normalized;
 }
 
 function isPrivateAddress(value) {
+  // 与主机的 isPublicEgressAddress 共用一个保留网段表；非 IP 字面量视为不可路由（拒绝）。
   const family = net.isIP(value);
   if (!family) return true;
   return family === 4

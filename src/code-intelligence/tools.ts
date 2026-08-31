@@ -20,6 +20,13 @@ const positionProperties: Record<string, JsonSchemaNode> = {
   column: { type: 'integer', minimum: 1, maximum: 1_000_000 },
 };
 
+/**
+ * 注册五个只读代码定位工具：outline_file / find_symbols / go_to_definition /
+ * find_references / get_diagnostics。
+ *
+ * 全部为 workspace.read 权限、effect: read，无副作用也不触发审批。
+ * 工具输出只是不可信证据回填，不得进入 System Policy 或改变权限集合。
+ */
 export function registerCodeIntelligenceTools(
   registry: ToolRegistry,
   service: CodeIntelligenceService,
@@ -97,6 +104,7 @@ async function run<T extends CodeLocation>(
 ): Promise<ToolResult> {
   try {
     const result = await operation();
+    // 降级发生时在文本里追加 [warning]，让模型感知结果来自降级来源而非纯净 LSP 语义结果。
     const warning = result.fallbackReason ? `\n[warning] ${result.fallbackReason}` : '';
     return toolSuccess(
       `${format(result.items) || '[info] 没有结果'}${warning}`,
@@ -106,6 +114,8 @@ async function run<T extends CodeLocation>(
     );
   } catch (error) {
     if (error instanceof CodeIntelligenceError) {
+      // code_intelligence_failed 是确定性失败（如不支持的文件类型），不可重试；
+      // 其余错误（如 LSP 会话问题）标记为可重试。
       return toolFailure('failed', error.code, error.message, { retryable: error.code !== 'code_intelligence_failed' });
     }
     return toolFailure('failed', 'code_intelligence_failed', fallbackMessage);

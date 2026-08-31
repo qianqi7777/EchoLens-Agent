@@ -33,6 +33,8 @@ export async function ensureStartupConfiguration(
   }
 
   const currentRoute = routeValue(env.AGENT_MODEL_ROUTE);
+  // 已配置过有效路由时直接复用并跳过向导，重复启动不应改写既有配置；
+  // 只有显式 force 才允许覆盖重配。
   if (!options.force && currentRoute) {
     return { configured: false, configPath, route: currentRoute };
   }
@@ -59,6 +61,7 @@ export async function ensureStartupConfiguration(
   Object.assign(env, values);
 
   notify(`配置已保存：${configPath}`);
+  // 完成后只上报配置路径与路由，凭据取值（如 API Key）不打印到终端或日志。
   notify(`当前路由：${values.AGENT_MODEL_ROUTE}`);
   return {
     configured: true,
@@ -68,6 +71,8 @@ export async function ensureStartupConfiguration(
 }
 
 function loadLocalEnv(path: string, env: NodeJS.ProcessEnv): void {
+  // loadEnvFile 只能写入 process.env；env 是调用方注入的临时对象时跳过，
+  // 避免测试或契约依赖意外污染真实进程环境。
   if (env !== process.env) return;
   try {
     loadEnvFile(path);
@@ -134,6 +139,8 @@ async function gatewayConfiguration(
   notify('云端模式会把模型上下文发送到你配置的 EchoLens Gateway。');
   notify('Gateway 只代理模型请求，不获得本机工具和工作区执行权限。');
   const confirmed = await askChoice(terminal, '确认继续 [y/n]', ['y', 'n'], 'n');
+  // 网关模式会把模型上下文上传到外部服务，必须显式确认（默认 n）；
+  // 未确认即回退到自定义 API，隐私默认是 fail-closed。
   if (confirmed !== 'y') {
     notify('已改用自定义 API 设置。');
     return directConfiguration(terminal, env, notify);
@@ -192,15 +199,21 @@ function renderEnv(values: Record<string, string>): string {
 }
 
 function quoteEnv(value: string): string {
+  // JSON.stringify 用双引号包裹并转义，使含 #、=、空格的值经 Node loadEnvFile
+  // 解析后无损还原；拒绝换行则防止多行值向 .env.local 注入额外配置行。
   if (/[\r\n]/u.test(value)) throw new Error('环境变量值不能包含换行符');
   return JSON.stringify(value);
 }
 
 async function writePrivateEnvFile(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
+  // 先写 .tmp 再 rename 覆盖，进程中断也不会留下半截配置；
+  // 创建时即限定 0600，密钥文件只允许属主读写。
   const temporaryPath = `${path}.${process.pid}.tmp`;
   await writeFile(temporaryPath, content, { encoding: 'utf8', mode: 0o600 });
   await rename(temporaryPath, path);
+  // POSIX 下再显式 chmod 0o600，固定落盘权限不被 umask 放宽；
+  // Windows 没有 POSIX 权限位语义，访问控制由 NTFS ACL 负责，故跳过。
   if (process.platform !== 'win32') await chmod(path, 0o600);
 }
 

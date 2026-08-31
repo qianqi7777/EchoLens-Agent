@@ -17,6 +17,12 @@ export interface OpenApiMockRequest {
   body?: unknown;
 }
 
+/**
+ * 网关测试替身：契约来自 contracts/gateway.openapi.json，只按文档里的 operation
+ * 与 example 应答，不访问真实网络，让 Gateway 客户端测试获得可断言的本地端点。
+ * 与生产网关的刻意差异：authorization 头只记录不校验，x-request-id 是
+ * mock-<序号> 而非生产格式。
+ */
 export async function startGatewayOpenApiMock(
   selections: Record<string, OpenApiMockSelection> = {},
 ) {
@@ -63,6 +69,8 @@ async function handleRequest(
   const method = (request.method ?? 'GET').toUpperCase();
   const path = new URL(request.url ?? '/', 'http://mock.local').pathname;
   const key = `${method} ${path}`;
+  // 原始请求（含 authorization 头）全部入列，供测试事后断言客户端实际发出的
+// 内容与凭据头；这里不做任何鉴权校验，是刻意保持的测试替身差异。
   requests.push({
     method,
     path,
@@ -74,6 +82,8 @@ async function handleRequest(
   if (!operation) return { status: 404, headers: {}, body: { error: `No OpenAPI operation for ${key}` } };
 
   const selection = selections[key] ?? {};
+  // 未显式指定状态码时默认取文档中第一个 2xx；测试可用 selections 按
+  // `${method} ${path}` 精确覆盖状态码、示例名与响应头。
   const status = selection.status ?? firstSuccessStatus(operation.responses);
   const unresolved = operation.responses[String(status)];
   if (!unresolved) throw new Error(`OpenAPI response ${status} is missing for ${key}`);
@@ -117,6 +127,8 @@ function resolveReference(document: OpenApiDocument, value: OpenApiResponse | Op
   return current as OpenApiResponse;
 }
 
+// 选取优先级：命名的 examples 项 > 顶层 example > 第一个 examples 项；
+// 全部缺失时抛错，避免 mock 在测试中途静默返回空 body。
 function selectedExample(media: OpenApiMedia, name?: string): unknown {
   if (name) {
     const selected = media.examples?.[name];

@@ -28,6 +28,7 @@ const model: GatewayModel = {
 
 test('Gateway Device Flow、固定上游代理、模型目录和注销闭环', async (context) => {
   const upstream = createServer((request, response) => {
+    // 上游只认可固定的 upstream apiKey：客户端 access token 不得透传到上游，凭据替换发生在 Gateway 边界。
     assert.equal(request.headers.authorization, 'Bearer upstream-secret');
     assert.equal(request.headers['x-request-id'] !== undefined, true);
     response.writeHead(200, { 'content-type': 'application/json', 'x-request-id': 'upstream-1' });
@@ -86,6 +87,8 @@ test('Gateway 不接受客户端传入的任意上游地址', async (context) =>
   const { device_code } = await device.json() as { device_code: string };
   gateway.approveDeviceCode(device_code);
   const token = await fetch(`${gateway.baseUrl}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=${device_code}&client_id=echolens-cli` }).then((response) => response.json()) as { access_token: string };
+  // 攻击样本：客户端在请求体注入 base_url 指向云元数据地址（169.254.169.254），试图让 Gateway 转发到内网元数据端点。
+  // 验证 Gateway 忽略客户端指定的上游地址，转发目标只能来自服务端 upstreams 配置。
   const response = await fetch(`${gateway.baseUrl}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${token.access_token}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: model.id, base_url: 'http://169.254.169.254/latest', messages: [] }) });
   assert.notEqual(response.status, 200);
 });
@@ -132,6 +135,8 @@ test('Gateway 透明转发 Responses SSE 且不改写事件边界', async (conte
     body: JSON.stringify({ model: responsesModel.id, input: [{ role: 'user', content: 'hello' }], stream: true }),
   });
   assert.equal(response.status, 200);
+  // 断言透传字节与上游完全一致：跨多次 write 的分片顺序、事件定界符不得被改写；
+  // 用量统计可以并行解析 SSE，但不能影响转发字节。
   assert.equal(await response.text(), 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"A"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}\n\n');
   const usage = await fetch(`${gateway.baseUrl}/v1/usage`, { headers: { authorization: `Bearer ${token.access_token}` } }).then((value) => value.json()) as { inputTokens: number; outputTokens: number };
   assert.deepEqual({ input: usage.inputTokens, output: usage.outputTokens }, { input: 5, output: 2 });
@@ -149,6 +154,7 @@ test('SQLite 状态跨重启恢复且数据库不保存原始 Token', async (con
   const first = await startGatewayServer({ ...options, stateStore: new GatewayStateStore(databasePath) });
   const token = await issueToken(first, 'acct-persist');
   await first.close();
+  // 先关闭服务器再读库文件，确保 Token 写入已刷入 SQLite；断言原始 access/refresh token 不以明文落盘。
   const databaseBytes = await readFile(databasePath);
   assert.equal(databaseBytes.includes(Buffer.from(token.access_token)), false);
   assert.equal(databaseBytes.includes(Buffer.from(token.refresh_token)), false);
@@ -173,6 +179,7 @@ test('Device 审批页要求服务端密钥，错误密钥不能签发 Token', a
   });
   context.after(() => gateway.close());
   const device = await createDevice(gateway.baseUrl);
+  // 审批页由服务端共享密钥保护：携带错误密钥的审批必须返回 403，且不得推进设备流签发任何 Token。
   const denied = await fetch(`${gateway.baseUrl}/device/approve`, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ user_code: device.user_code, approval_secret: 'wrong' }),
@@ -216,6 +223,7 @@ test('Entitlement、Quota 和请求体上限在访问上游前失败关闭', asy
     body: JSON.stringify({ model: model.id, messages: [{ role: 'user', content: 'x'.repeat(512) }] }),
   });
   assert.equal(oversized.status, 413);
+  // 配额与请求体上限在访问上游前失败关闭：断言上游调用数为 0，保证被拦截的请求不消耗上游额度、不计费。
   assert.equal(upstreamCalls, 0);
 });
 
@@ -238,6 +246,7 @@ test('OAuth slow_down 持久增加轮询间隔', async (context) => {
   const device = await createDevice(gateway.baseUrl);
 
   assert.equal((await pollToken(gateway.baseUrl, device.device_code)).status, 400);
+  // 用固定 now 时钟驱动轮询而非真实 sleep：验证 OAuth Device Flow 的 slow_down 使建议轮询间隔单调累加（5→10→15）。
   const firstSlowDown = await pollToken(gateway.baseUrl, device.device_code);
   const secondSlowDown = await pollToken(gateway.baseUrl, device.device_code);
   assert.equal((await firstSlowDown.json() as { interval: number }).interval, 10);
@@ -275,6 +284,8 @@ test('月度额度按 UTC 月份隔离', async (context) => {
 
   assert.equal((await requestInference(gateway.baseUrl, token.access_token)).status, 200);
   assert.equal((await requestInference(gateway.baseUrl, token.access_token)).status, 429);
+  // 时钟从 8 月末推进到 9 月初：额度桶按 UTC 月份切分即重置；
+  // upstreamCalls === 2 证实 8 月的超额请求被拦截、未到达上游。
   current = Date.parse('2026-09-01T00:01:00Z');
   assert.equal((await requestInference(gateway.baseUrl, token.access_token)).status, 200);
   assert.equal(upstreamCalls, 2);
@@ -329,6 +340,8 @@ test('上游限流、响应大小和超时返回稳定代理错误', async (cont
   assert.equal(large.status, 502);
   assert.equal((await large.json() as { error: { code: string } }).error.code, 'upstream_response_too_large');
 
+  // timeout 场景没有上游响应分支，依赖真实时钟触发 25ms 的 maxUpstreamDurationMs 上限；
+  // 三个场景共同固定错误码映射：429 可重试 / 502 响应超限 / 503 超时。
   const timeout = await requestInference(gateway.baseUrl, token.access_token, 'timeout');
   assert.equal(timeout.status, 503);
   assert.equal((await timeout.json() as { error: { code: string } }).error.code, 'upstream_timeout');

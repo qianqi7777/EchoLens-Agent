@@ -53,6 +53,8 @@ export class CodeIntelligenceService {
     column: number,
     signal?: AbortSignal,
   ): Promise<CodeIntelligenceResult<CodeLocation>> {
+    // LSP 优先、tree-sitter 兜底，且两条结果合并去重：即使 LSP 可用，本地解析也会补充
+    // 它可能遗漏的位置；LSP 返回空或抛错时整体降级并携带 fallbackReason 供调用方感知来源。
     try {
       const locations = await this.languageService.definition(path, line, column, signal);
       const fallback = await this.definitionFallback(path, line, column);
@@ -78,6 +80,7 @@ export class CodeIntelligenceService {
     column: number,
     signal?: AbortSignal,
   ): Promise<CodeIntelligenceResult<CodeLocation>> {
+    // 与 goToDefinition 相同的合并与降级策略。
     try {
       const locations = await this.languageService.references(path, line, column, signal);
       const fallback = await this.referencesFallback(path, line, column);
@@ -98,6 +101,8 @@ export class CodeIntelligenceService {
   }
 
   async getDiagnostics(path: string, signal?: AbortSignal): Promise<CodeIntelligenceResult<CodeDiagnostic>> {
+    // 诊断不做合并：LSP 可用时以其为唯一来源（避免与 tree-sitter 语法提示相互重复）；
+    // 仅当 LSP 不可用时降级到 tree-sitter 语法诊断。
     try {
       return { engine: 'lsp', items: await this.languageService.diagnostics(path, signal) };
     } catch (error) {
@@ -133,6 +138,7 @@ function recoverableLspReason(error: unknown): 'lsp_unavailable' | 'lsp_request_
     && (error.code === 'lsp_unavailable' || error.code === 'lsp_request_failed')) {
     return error.code;
   }
+  // 未知异常也按 lsp_request_failed 归类，保证降级结果始终带可追踪的 fallbackReason。
   return 'lsp_request_failed';
 }
 

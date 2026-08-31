@@ -30,8 +30,12 @@ export interface EvalCatalogEntry {
 export class DynamicTaskGenerator {
   generate(template: EvalTaskTemplate, seed: string | number): EvalTaskDefinition {
     assertTemplate(template);
+    // 相同 (template, seed) 必须产出完全一致的任务与变体 ID，保证评测可复现、
+    // 结果可跨运行对比，这是任务→结果映射确定性的根基。
     const random = seededRandom(String(seed));
     const variables: Record<string, string | number> = {};
+    // 按变量名排序后再迭代，使生成结果与模板对象键序无关，避免 JSON 解析或 map 键序
+    // 差异破坏同一 seed 的确定性。
     for (const [name, definition] of Object.entries(template.variables).sort(([left], [right]) => left.localeCompare(right))) {
       variables[name] = pickVariable(definition, random);
     }
@@ -114,6 +118,8 @@ export class EvalTaskCatalog {
   }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    // register/select/markPossibleLeak 都是读-改-写，必须串行执行，避免并发时互相覆盖
+    // useCount 与 lastUsedAt 造成丢更新。
     const next = this.writeQueue.then(operation);
     this.writeQueue = next.catch(() => undefined);
     return next;
@@ -135,6 +141,7 @@ export class EvalTaskCatalog {
   }
 
   private async write(entries: EvalCatalogEntry[]): Promise<void> {
+    // 先写临时文件再原子 rename，进程崩溃或写入失败时不会留下半截 catalog；权限 0600。
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
     await writeFile(temporary, `${JSON.stringify({ version: 1, entries })}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -168,6 +175,8 @@ function pickVariable(definition: EvalTemplateVariable, random: () => number): s
 }
 
 function seededRandom(seed: string): () => number {
+  // xorshift32 由 seed 的 SHA-256 派生初值，产出确定、可复现的伪随机序列；相比
+  // Math.random，同一 seed 在跨运行/跨进程可重放，支撑变量采样与变体 ID 稳定。
   let state = createHash('sha256').update(seed).digest().readUInt32LE(0) || 1;
   return () => {
     state ^= state << 13;
@@ -189,6 +198,8 @@ function compareCatalog(
   };
   const leftUsed = left?.lastUsedAt ? Date.parse(left.lastUsedAt) : 0;
   const rightUsed = right?.lastUsedAt ? Date.parse(right.lastUsedAt) : 0;
+  // 优先级：先压低泄漏风险（leaked/possibleLeak 排最后），再选最近未使用最久的，
+  // 最后选使用次数更少的，让评测负载摊开而不过度集中，降低污染/泄漏面。
   return risk(left, leftTemplate) - risk(right, rightTemplate)
     || leftUsed - rightUsed
     || (left?.useCount ?? 0) - (right?.useCount ?? 0)

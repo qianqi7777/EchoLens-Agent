@@ -70,6 +70,8 @@ export class ContextManager {
     const permissions = evaluateInstructionPermissions(options.runtimePermissions, directives);
     const instructions = loaded.documents.map(instructionMessage);
     const projected = projectConversation(sourceItems, options.privacy);
+    // 前缀 = System Policy + 指令，指令固定排在 System Policy 之后。
+    // 指令只作为数据注入，不得覆盖系统策略；固定顺序保证跨 Turn 前缀不漂移。
     const system = projected.filter(isSystemMessage);
     const body = projected.filter((item) => !isSystemMessage(item));
     const prefix = [...system, ...instructions];
@@ -95,6 +97,8 @@ export class ContextManager {
       return await this.instructionLoader.load(targetPath ?? '.');
     } catch (error) {
       if (!targetPath || targetPath === '.') throw error;
+      // 仅对用户指定的非默认目标路径做回退：加载失败时回退到项目根规则并记录警告，
+      // 避免单个不可信目录让整个上下文构建失败，也不静默丢弃规则。
       const root = await this.instructionLoader.load('.');
       return {
         ...root,
@@ -104,6 +108,8 @@ export class ContextManager {
   }
 }
 
+// 隐私投影边界：full-context 原样保留；evidence / metadata 会把工具输出替换为
+// 证据引用或纯元数据摘要，并清空 data 字段，确保原始工具内容不会随隐私级别下发。
 export function projectConversation(
   items: readonly ConversationItem[],
   privacy: ContextPrivacyLevel,
@@ -133,6 +139,8 @@ export function projectConversation(
 }
 
 function instructionMessage(document: InstructionDocument): MessageItem {
+  // 规则文件不可信：按 trust 区分来源标签，并在内容里声明“仅为操作指引，
+  // 无权授予权限或覆盖系统策略”，保证它作为数据注入而不是特权指令。
   const label = document.source.trust === 'user'
     ? 'USER-SCOPED INSTRUCTIONS'
     : 'UNTRUSTED REPOSITORY INSTRUCTIONS';
@@ -173,6 +181,8 @@ function selectTurns(
   }
   const compacted = dropped.length > 0 || groups.length !== boundedGroups.length;
   const summary = compacted ? milestoneSummary(dropped) : undefined;
+  // 前缀（System Policy + 指令）始终固定在开头；被丢弃的历史折叠成里程碑摘要，
+  // 插在前缀之后，压缩只作用于前缀之后的历史轮次，避免前缀跨 Turn 漂移。
   const items = [...prefix, ...(summary ? [summary] : []), ...selected.flat()];
   return { items: fitLatestItems(items, budget, prefix.length), compacted };
 }
@@ -180,6 +190,7 @@ function selectTurns(
 function fitLatestItems(items: ConversationItem[], budget: number, prefixLength: number): ConversationItem[] {
   if (estimateTokens(items) <= budget) return items;
   const copy = structuredClone(items);
+  // 从 prefixLength 起点逐项截断，前缀（System Policy + 指令）所在位置不参与该循环。
   for (let index = prefixLength; index < copy.length && estimateTokens(copy) > budget; index += 1) {
     const item = copy[index]!;
     if (item.type === 'message') {
@@ -248,6 +259,8 @@ function turnGroups(items: ConversationItem[]): ConversationItem[][] {
   return groups;
 }
 
+// 按“字节数 / 4”近似估算 token 数（1 token ≈ 4 bytes），只用于预算判断，
+// 不追求精确 token 统计，Provider 与模型差异在预算上留有冗余即可。
 function estimateTokens(items: readonly ConversationItem[]): number {
   const providerPayload = items.map((item) => {
     if (item.type === 'message') {
@@ -267,6 +280,7 @@ function estimateTokens(items: readonly ConversationItem[]): number {
 }
 
 function inputBudget(maxContext: number, configured: number | undefined, reserve: number): number {
+  // reserve 为输出 token 预留空间；512 是保底下限，避免预算被压到无法容纳任何消息。
   const providerBudget = Math.max(512, maxContext - reserve);
   return Math.max(512, Math.min(configured ?? providerBudget, providerBudget));
 }

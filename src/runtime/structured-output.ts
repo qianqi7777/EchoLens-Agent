@@ -59,6 +59,8 @@ export type StructuredOutputResult<T> =
   | { verified: true; value: T; raw: string; issues: [] }
   | { verified: false; raw: string; issues: StructuredOutputIssue[] };
 
+// 三个输出 Schema 均设 additionalProperties=false 并对字段与条目给出上限，约束模型输出的字段与规模，
+// 防止生成超长或无关内容；required 列表保证解析结果具备后续流程所需的最小字段。
 export const PLAN_SCHEMA: JsonSchema = {
   type: 'object',
   properties: {
@@ -156,6 +158,8 @@ export const FINAL_SUMMARY_SCHEMA: JsonSchema = {
   additionalProperties: false,
 };
 
+// strict:true 表示该结构可由 Provider 作为结构化输出（function calling）强制执行；当 Provider 不支持
+// 结构化输出时会降级为 parseFinalSummary 解析原始文本，两种路径复用同一份 FINAL_SUMMARY_SCHEMA，保证契约一致。
 export const FINAL_SUMMARY_FORMAT = {
   name: 'echolens_final_summary',
   description: 'Verified structure for the final safe-edit agent result.',
@@ -179,6 +183,8 @@ export function parseFinalSummary(raw: string): StructuredOutputResult<FinalSumm
   return parseStructuredOutput(raw, finalSummaryValidator);
 }
 
+// 复用 compileToolSchema / validateToolArguments，让结构化输出与工具参数共享同一套严格 schema；
+// JSON.parse 失败映射为稳定的 invalid_json 错误码，调用方据此做分支而非解析提示文本。
 function parseStructuredOutput<T>(
   raw: string,
   validator: ReturnType<typeof compileToolSchema>,

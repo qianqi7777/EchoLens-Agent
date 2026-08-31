@@ -25,6 +25,8 @@ export interface RetryNotification {
   code: string;
 }
 
+// 默认退避上限：maxRetries 限制重试次数，maxDelayMs 封顶单次 sleep，
+// totalBudgetMs 是包含全部重试与等待在内的硬性时间预算，超出即失败。
 const defaults: RetryPolicyOptions = {
   maxRetries: 2,
   baseDelayMs: 500,
@@ -35,6 +37,14 @@ const defaults: RetryPolicyOptions = {
   sleep: abortableSleep,
 };
 
+/**
+ * 带总预算约束的重试执行器。
+ *
+ * 每次调用前都会检查剩余时间预算并传给 operation，让单次尝试（如网络请求超时）
+ * 不会超过剩余预算；只有显式 retryable 的错误才会触发退避重试。
+ * @returns 成功值、尝试次数与总耗时。
+ * @throws 超过总预算或错误不可重试时抛出 `ProviderError`（带 attempts/elapsedMs 元数据）。
+ */
 export async function runWithRetry<T>(
   operation: (attempt: number, remainingBudgetMs: number) => Promise<T>,
   overrides: RetryPolicyOverrides = {},
@@ -74,6 +84,7 @@ export async function runWithRetry<T>(
       }
 
       const delayMs = retryDelay(providerError, attempts, policy);
+      // 本次退避会直接撞上总预算时不再空等立即失败，避免在截止边缘的无效等待。
       if (elapsedMs + delayMs >= policy.totalBudgetMs) {
         throw providerError.withAttemptMetadata(attempts, elapsedMs);
       }
@@ -97,6 +108,7 @@ export async function runWithRetry<T>(
   }
 }
 
+// Retry-After（RFC 9110）允许返回秒数或 HTTP 日期两种格式，统一换算为毫秒供退避使用。
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
@@ -106,6 +118,8 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
   return Math.max(0, timestamp - now);
 }
 
+// 优先遵循服务的 Retry-After 且受 maxDelayMs 封顶（防止远端返回超长 sleep）；
+// 否则指数退避（base × 2^(attempt-1)）叠加随机抖动，打散多请求重试的同步冲击。
 function retryDelay(error: ProviderError, attempt: number, policy: RetryPolicyOptions): number {
   if (error.retryAfterMs !== undefined) return Math.min(error.retryAfterMs, policy.maxDelayMs);
   const exponential = policy.baseDelayMs * 2 ** (attempt - 1);
@@ -113,6 +127,8 @@ function retryDelay(error: ProviderError, attempt: number, policy: RetryPolicyOp
   return Math.min(policy.maxDelayMs, Math.round(exponential * jitter));
 }
 
+// 退避等待必须响应取消：用户撤销时若继续 sleep 到自然结束，会让整个请求长时间无法返回。
+// 外部 signal 已 aborted 时立即以取消错误结束等待，不进入计时。
 async function abortableSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (delayMs <= 0) return;
   await new Promise<void>((resolve, reject) => {
@@ -133,6 +149,8 @@ async function abortableSleep(delayMs: number, signal?: AbortSignal): Promise<vo
   });
 }
 
+// 只有显式标记 retryable 的 ProviderError 才会被重试；取消与未知错误默认不可重试，
+// 避免在请求可能已成功或属于请求方错误时重复发送（重复计费或掩盖真实缺陷）。
 function normalizeRetryError(error: unknown, signal?: AbortSignal): ProviderError {
   if (signal?.aborted) return cancelledProviderError(error);
   if (error instanceof ProviderError) return error;

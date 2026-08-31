@@ -32,6 +32,8 @@ import {
   usageFromJson,
 } from './proxy-utils.js';
 
+// Gateway 是本地工作区与 Provider 之间的安全边界：它持有上游凭据，
+// 只做认证、转发与用量追踪，不执行任何本地代码，也不向工作区暴露上游凭据。
 const DEFAULT_SCOPES = new Set(['models:read', 'inference:create', 'usage:read', 'account:read']);
 const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
 const MAX_DEFAULT_BODY = 4 * 1024 * 1024;
@@ -60,10 +62,13 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
 
   async function dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const requestId = randomUUID();
+    // 所有响应都带 request-id 与 no-store：请求与响应可关联审计，且令牌类内容不被缓存。
     response.setHeader('x-request-id', requestId);
     response.setHeader('cache-control', 'no-store');
     const method = (request.method ?? 'GET').toUpperCase();
     const url = new URL(request.url ?? '/', 'http://gateway.local');
+    // 前段是公开端点（health、OAuth 设备授权与人工审批页面），后段全部要求 Bearer 认证；
+    // 公开端点只有 /health 与设备审批相关路径，其余一律进入 authenticate 分支。
     if (method === 'GET' && url.pathname === '/health') {
       writeJson(response, 200, { status: 'ok', service_version: '0.4.0' });
       return;
@@ -113,6 +118,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
       return;
     }
     if (method === 'POST' && url.pathname === '/device/approve') {
+      // 设备码审批是人工认证边界：必须持 approval_secret 才能批准，
+      // 网关不会仅凭设备码自动签发令牌。
       const form = await readForm(request);
       if (!options.deviceApprovalSecret || !secureEquals(form.approval_secret ?? '', options.deviceApprovalSecret)) {
         writeJson(response, 403, { error: 'approval_denied' });
@@ -214,6 +221,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
   async function issueToken(request: IncomingMessage, response: ServerResponse, requestId: string): Promise<void> {
     const form = await readForm(request);
     if (form.grant_type === 'refresh_token') {
+      // Refresh 路径：令牌一次性轮换。一旦发现 refresh token 已被撤销，
+      // 整个账号的会话一并作废，防止已泄露的令牌继续轮换出新凭据。
       const refreshToken = form.refresh_token ?? '';
       const existing = state.getRefreshToken(refreshToken);
       if (!existing || existing.refreshExpiresAt <= now().getTime()) {
@@ -239,6 +248,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
       writeJson(response, 400, { error: 'unsupported_grant_type' });
       return;
     }
+    // Device Flow 轮询路径：未批准返回 authorization_pending；轮询过快返回 slow_down
+    // 并逐步加大 interval（每次 +5s），与服务端建议的退避语义一致。
     const pending = state.getDevice(form.device_code ?? '');
     if (!pending || pending.clientId !== form.client_id || pending.expiresAt <= now().getTime()) {
       writeJson(response, 400, { error: 'expired_token' });
@@ -287,6 +298,7 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     const period = usagePeriod(now());
     const disconnect = new AbortController();
     request.once('aborted', () => disconnect.abort('client_disconnected'));
+    // 并发与频率上限按账号维度施加，且在转发前检查，避免占住上游资源后才被拒。
     const active = activeByAccount.get(account.accountId) ?? 0;
     const recent = (recentByAccount.get(account.accountId) ?? []).filter((time) => time > now().getTime() - 60_000);
     if (active >= (options.maxConcurrentRequests ?? 4)
@@ -316,10 +328,14 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     if (!isRecord(parsed) || typeof parsed.model !== 'string') {
       writeJson(response, 400, errorPayload('model_not_allowed', requestId, false, '请求缺少模型')); return;
     }
+    // 模型与上游只按服务端固定配置解析；客户端仅能指定已配置的 model id，
+    // 找不到匹配的固定上游时走下面的 403 (fail-closed)，绝不按请求内容动态路由。
     const model = options.models.find((candidate) => candidate.id === parsed.model);
     const upstream = model
       ? options.upstreams[`${model.id}:${protocol}`] ?? options.upstreams[model.id]
       : undefined;
+    // 双重复核：请求协议必须与固定上游协议一致，且模型在账号授权 (entitlements)
+    // 白名单内；任一不满足即拒发，保证转发透明的同时不越权。
     if (!model || !upstream || !model.protocols.includes(protocol) || upstream.protocol !== protocol) {
       writeJson(response, 403, errorPayload('model_not_allowed', requestId, false));
       return;
@@ -339,6 +355,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     activeByAccount.set(account.accountId, active + 1);
     state.recordUsage(account.accountId, period, { requests: 1 });
     try {
+      // 透明转发：仅剥离客户端可能注入的凭据/端点字段 (sanitizedBody)，body 其余原样上抛；
+      // 上游超时与客户端断连合并为同一 AbortSignal，任一触发即中止，避免取消后仍产生计费请求。
       const fetcher = upstream.fetch ?? globalThis.fetch;
       const upstreamUrl = `${upstream.baseUrl.replace(/\/$/u, '')}/${protocol === 'responses' ? 'responses' : 'chat/completions'}`;
       const timeout = AbortSignal.timeout(options.maxUpstreamDurationMs ?? 120_000);
@@ -372,6 +390,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
         response.end();
         return;
       }
+      // 流式 (SSE) 与非流式两条路径都按上游 content-type 分派，并把提取到的
+      // token 用量写入 resultUsage，确保断流或中途失败也能在下方 recordUsage 中累加。
       const contentType = upstreamResponse.headers.get('content-type') ?? 'application/json';
       let resultUsage = emptyTokenUsage();
       const responseLimit = options.maxUpstreamResponseBytes ?? MAX_DEFAULT_RESPONSE;
@@ -396,6 +416,7 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
       }
       else response.destroy(error instanceof Error ? error : undefined);
     } finally {
+      // finally 必定归还并发槽位，保证任何出错路径都不会泄漏 active 计数。
       activeByAccount.set(account.accountId, Math.max(0, (activeByAccount.get(account.accountId) ?? 1) - 1));
     }
   }
@@ -414,6 +435,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     };
   }
 
+  // 工作区对网关的认证入口：接收 Bearer 访问令牌并查表校验。
+  // 上游 API Key 始终留在网关内，绝不下发或透传给工作区。
   function authenticate(request: IncomingMessage): TokenRecord | undefined {
     const value = request.headers.authorization;
     if (!value?.startsWith('Bearer ')) return undefined;
@@ -425,8 +448,11 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
 
   function hasScope(token: TokenRecord, scope: string): boolean { return token.scopes.has(scope); }
   function audit(event: GatewayAuditEvent): void {
+    // 审计回调自身失败不能中断转发链路，因此吞掉异常只保留注释说明。
     try { options.audit?.(event); } catch { /* Audit backends cannot break inference. */ }
   }
+  // 认证端点（设备授权/取令牌）按来源 IP 限流：这些端点无需令牌即可访问，
+  // 是唯一能被外部刷的入口，限流阈值比业务接口低得多。
   function allowAuthRequest(request: IncomingMessage, limit: number): boolean {
     const key = request.socket.remoteAddress ?? 'unknown';
     const cutoff = now().getTime() - 60_000;
@@ -436,6 +462,8 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
     recentAuthByIp.set(key, recent);
     return true;
   }
+  // 未配置 entitlements 时向所有账号开放全部模型（fail-open 只在白名单缺省场景生效）；
+  // 配置后账号未列出的模型一律拒绝，杜绝通过账号字段越权访问模型。
   function allowedModels(accountId: string): GatewayModel[] {
     const allowed = options.entitlements?.[accountId];
     return allowed ? options.models.filter((model) => allowed.includes(model.id)) : options.models;
@@ -467,6 +495,13 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
   };
 }
 
+/**
+ * 启动 Gateway 并监听端口。
+ *
+ * 成功后把实际绑定地址写回 handle.baseUrl；绑定失败会关闭已创建的 server 再抛错，
+ * 调用方应处理 `error` 事件以避免未捕获异常。
+ * @throws 端口绑定失败或无法解析监听地址时抛出错误。
+ */
 export async function startGatewayServer(options: GatewayServerOptions): Promise<GatewayServerHandle & { server: Server }> {
   const handle = createGatewayServer(options);
   try {
@@ -496,6 +531,8 @@ function validateOptions(options: GatewayServerOptions): void {
     if (configured.some((upstream) => !upstream)) throw new Error(`模型 ${model.id} 缺少固定上游配置`);
     for (const upstream of configured) {
       if (!upstream) continue;
+      // 上游强制 HTTPS 以保护凭据传输；仅允许本机 Mock (127.0.0.1/localhost) 走 HTTP，
+      // 防止 API Key 在明文通道上泄露。
       const url = new URL(upstream.baseUrl);
       if (url.protocol !== 'https:' && !(url.hostname === '127.0.0.1' || url.hostname === 'localhost')) {
         throw new Error('Gateway 上游必须使用 HTTPS，只有本机 Mock 允许 HTTP');

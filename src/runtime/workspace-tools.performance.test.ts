@@ -17,6 +17,8 @@ test('read-only workspace tools remain useful on a repository with thousands of 
   const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-performance-'));
   context.after(async () => rm(workspace, { recursive: true, force: true }));
 
+  // 构造 2500 文件 / 50 目录的仓库，保证 list/grep 触发完整树形扫描而非单目录 IO；
+  // 下方操作均选取字母序最后的文件（value2499 / file-2499.ts）作为最坏情况输入。
   const filesPerDirectory = 50;
   for (let directoryIndex = 0; directoryIndex < fileCount / filesPerDirectory; directoryIndex += 1) {
     const directory = path.join(workspace, `module-${directoryIndex.toString().padStart(2, '0')}`);

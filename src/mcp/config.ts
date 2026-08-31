@@ -6,6 +6,8 @@ import type { McpConfigFile, McpServerConfig } from './types.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 const ENV_NAME = '^[A-Za-z_][A-Za-z0-9_]{0,127}$';
+// 配置 Schema 采用 fail-closed 约束：对象一律 additionalProperties: false、
+// version 固定为 1、数量与长度均有上限；未知字段或超限输入在解析阶段直接拒绝。
 const configSchema = {
   type: 'object',
   required: ['version', 'servers'],
@@ -77,6 +79,8 @@ export async function loadMcpConfig(
 ): Promise<McpConfigFile> {
   let source: Buffer;
   try {
+    // 真实路径规范化后必须位于工作区内：realpath 消除符号链接，lstat 校验必须是
+    // 普通小文件；越界、链接或超大文件一律拒绝，防止读取工作区外任意路径。
     validateRelativePath(relativePath);
     const canonicalRoot = await realpath(workspaceRoot);
     const requested = path.resolve(canonicalRoot, relativePath);
@@ -89,6 +93,7 @@ export async function loadMcpConfig(
     assertInside(canonicalRoot, canonicalFile);
     source = await readFile(canonicalFile);
   } catch (error) {
+    // 配置文件缺失视为未配置（返回空目录）；其余路径错误才统一报错。
     if (isNotFound(error)) return { version: 1, servers: [] };
     if (error instanceof McpConfigError) throw error;
     throw new McpConfigError('mcp_config_path', 'MCP 配置必须位于当前工作区内');
@@ -111,6 +116,8 @@ export async function loadMcpConfig(
   return config;
 }
 
+// 敏感命名的环境变量禁止直接内联，必须经 envFrom 从 Agent 自身环境读取，
+// 保证密钥不落入配置文件（防止配置文件被提交或泄露）。
 function validateServerSecrets(server: McpServerConfig): void {
   if (server.transport.type !== 'stdio') return;
   for (const name of Object.keys(server.transport.env ?? {})) {
@@ -120,6 +127,8 @@ function validateServerSecrets(server: McpServerConfig): void {
   }
 }
 
+// URL 仅允许 HTTPS（http 限回环）、拒绝内嵌凭据；解析期即失败，
+// 无效配置不会触发任何外部连接，与 client-manager 的连接期校验互为纵深防御。
 function validateTransportUrl(server: McpServerConfig): void {
   if (server.transport.type !== 'streamable_http') return;
   let url: URL;

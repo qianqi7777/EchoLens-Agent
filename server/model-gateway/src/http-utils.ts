@@ -16,6 +16,8 @@ export async function readForm(request: IncomingMessage): Promise<Record<string,
   return Object.fromEntries(new URLSearchParams(await readBody(request, 64 * 1024)).entries());
 }
 
+// 请求体上限：先按 content-length 预检(若可信)，再在实际流式累加中复核，
+// 防止客户端谎报长度绕过大小限制；超限统一抛 413。
 export async function readBody(request: IncomingMessage, limit: number): Promise<string> {
   const declaredLength = Number(request.headers['content-length']);
   if (Number.isFinite(declaredLength) && declaredLength > limit) {
@@ -51,6 +53,8 @@ export function errorPayload(
   return { error: { code, message, retryable }, request_id: requestId };
 }
 
+// 用户可控字符串拼进 HTML 前必须转义，防止脚本注入 (XSS)；
+// 用于 /device 页面里回显的 user_code。
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/gu, (character) => ({
     '&': '&amp;',
@@ -61,6 +65,8 @@ export function escapeHtml(value: string): string {
   }[character] ?? character));
 }
 
+// 对 secret 做常量时间比较 (timingSafeEqual)。先用 SHA-256 固定摘要长度，
+// 避免长度差异与逐位比较带来的时序侧信道；用于 deviceApprovalSecret 校验。
 export function secureEquals(left: string, right: string): boolean {
   const leftDigest = createHash('sha256').update(left).digest();
   const rightDigest = createHash('sha256').update(right).digest();

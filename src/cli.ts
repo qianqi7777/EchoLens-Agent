@@ -1,3 +1,5 @@
+// 交互式 CLI 入口：负责装配运行时组件（工具、模型路由、审批、会话、TUI/行模式），
+// 自身不包含任何业务逻辑。--setup 只执行初始化，不进入对话循环。
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
@@ -44,12 +46,16 @@ try {
 }
 setupTerminal.close();
 
+// 只有两端都是 TTY 且支持原始模式才启用 TUI；管道/重定向场景退化为纯行交互，
+// 避免 TUI 在非交互环境里刷屏或阻塞。
 const workspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
 const useTui = Boolean(input.isTTY && output.isTTY && input.setRawMode);
 const lineTerminal = useTui ? undefined : readline.createInterface({ input, output });
 const registry = new ToolRegistry();
 registerWorkspaceTools(registry);
 try {
+  // 沙箱适配器在注册时即校验配置（镜像/可执行文件是否存在），配置无效直接退出，
+  // 而不是让后续每一次沙箱调用都失败。
   registerSandboxTools(registry, new DockerSandboxAdapter({
     image: process.env.AGENT_SANDBOX_IMAGE,
     executable: process.env.AGENT_DOCKER_EXECUTABLE,
@@ -141,6 +147,7 @@ if (!model) {
     }
     process.exitCode = 0;
   } else {
+  // 行模式下的单轮执行封装：统一处理取消信号、流式渲染与结果打印。
   let activeTurn: AbortController | undefined;
   const executeTurn = async (
     operation: (
@@ -154,10 +161,13 @@ if (!model) {
     try {
       const result = await operation(activeTurn.signal, renderer.onEvent);
       renderer.finish();
+      // 模型已流式输出过文本、或 Provider 支持结构化输出时，answer 已在事件流里呈现，
+      // 不再重复打印，避免同一份内容出现两次。
       if (!renderer.renderedText || model.capabilities.supportsStructuredOutput) {
         console.log(`\n${result.answer}`);
       }
       console.log(`[${result.state}] turn=${result.turnId}`);
+      // completed 但未通过校验时明确标注 raw：不能让用户把未验证输出当成已确认结果。
       if (!result.finalSummary.verified && result.state === 'completed') {
         console.error('结构化结果校验失败：以上内容作为未验证 raw 输出显示。');
       }
@@ -169,6 +179,7 @@ if (!model) {
     }
   };
   lineTerminal!.on('SIGINT', () => {
+    // 有活动 Turn 时第一次 Ctrl-C 只取消该 Turn，不退出进程，避免误触丢失整个会话。
     if (activeTurn && !activeTurn.signal.aborted) {
       output.write('\n正在取消当前 Turn...\n');
       activeTurn.abort('user_cancelled');
@@ -248,6 +259,7 @@ async function interactiveApproval(
   console.log(`\n需要审批：${request.toolName} (${request.permission})`);
   console.log(`原因：${request.reason}`);
   if (request.toolName === 'apply_patch' || request.toolName === 'apply_sandbox_patch') {
+    // 有差异可看时才展示 diff；预览失败按拒绝处理，而不是无预览放行。
     try {
       const preview = await previewApprovalRequest(request);
       if (!preview) throw new Error('没有可预览的 Patch');
@@ -260,6 +272,7 @@ async function interactiveApproval(
   }
   const answer = (await terminal.question('允许执行 [y/N]：')).trim().toLowerCase();
   if (answer !== 'y') return { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '用户拒绝' };
+  // 批准范围决定记忆时长：session 只对本会话有效，persistent 会写进磁盘审批库。
   const scope = (await terminal.question('记住范围 [1=once/2=session/3=project/4=persistent]（默认 once）：')).trim();
   const scopes = { '2': 'session', '3': 'project', '4': 'persistent' } as const;
   return {
@@ -277,6 +290,7 @@ async function resolveRequestedSession(
   const index = args.indexOf('--resume');
   if (index < 0) return undefined;
   const requested = args[index + 1];
+  // --resume 后跟合法 ID 就恢复该会话；不带值或值以 -- 开头（例如 --resume --setup）时恢复最近会话。
   const selection = !requested || requested.startsWith('--') ? 'latest' : requested;
   if (selection !== 'latest') return selection;
   const sessions = await JsonlEventStore.list(sessionRoot);

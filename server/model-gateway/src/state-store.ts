@@ -41,6 +41,12 @@ export type RefreshRotationResult =
   | { status: 'invalid' }
   | { status: 'replayed'; accountId: string };
 
+/**
+ * Gateway 状态存储：设备授权、令牌与用量配额的 SQLite 持久化。
+ *
+ * 全部通过同步 `DatabaseSync` 单连接访问——单写者保证事务顺序，配合 WAL 模式
+ * 让读不阻塞写。令牌只存哈希（见 hash()），数据库泄露也不能还原凭据。
+ */
 export class GatewayStateStore {
   private readonly database: DatabaseSync;
 
@@ -86,6 +92,8 @@ export class GatewayStateStore {
     `);
   }
 
+  // device_code 是换取令牌的秘密，只以哈希查询；user_code 是给用户人工输入的展示码
+  // （不具兑换能力），故可明文存储并按它检索审批。
   createDevice(record: DeviceAuthorizationRecord): void {
     this.database.prepare(`
       INSERT INTO device_authorizations
@@ -157,10 +165,13 @@ export class GatewayStateStore {
     const row = this.database.prepare('SELECT * FROM tokens WHERE refresh_hash = ?').get(hash(refreshToken));
     const existing = decodeToken(row);
     if (!existing) return { status: 'invalid' };
+    // Refresh 令牌重放视为凭证泄露：被撤销的 refresh token 再次使用，
+    // 就会撤销整个账号会话 (OAuth refresh token rotation 检测)。
     if (existing.revoked) {
       this.revokeAccount(existing.accountId);
       return { status: 'replayed', accountId: existing.accountId };
     }
+    // BEGIN IMMEDIATE 立即取得写锁，与并发刷新竞争串行化，防止同一 refresh token 被重复轮换。
     this.database.exec('BEGIN IMMEDIATE');
     try {
       this.database.prepare('UPDATE tokens SET revoked = 1 WHERE refresh_hash = ?').run(hash(refreshToken));
@@ -174,6 +185,7 @@ export class GatewayStateStore {
   }
 
   revokeToken(token: string): string | undefined {
+    // access 与 refresh 都按同一摘要查询：任意一个被吊销，成对失效。
     const digest = hash(token);
     const row = this.database.prepare('SELECT account_id FROM tokens WHERE access_hash = ? OR refresh_hash = ?').get(digest, digest) as { account_id?: unknown } | undefined;
     if (typeof row?.account_id !== 'string') return undefined;
@@ -198,6 +210,7 @@ export class GatewayStateStore {
     } : emptyUsage();
   }
 
+  // 用量按 (account_id, period) 聚合；UPSERT 以原子自增累加，避免读-改-写竞态。
   recordUsage(accountId: string, period: string, delta: Partial<UsageRecord>): void {
     this.database.prepare(`
       INSERT INTO usage_monthly
@@ -255,6 +268,7 @@ function decodeToken(value: unknown): TokenRecord | undefined {
   };
 }
 
+// 令牌仅以 SHA-256 摘要落库，绝不保存明文；数据库即使泄露也无法直接还原上游凭据。
 function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }

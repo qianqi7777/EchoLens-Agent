@@ -17,9 +17,17 @@ interface ResponsesPayload {
   };
 }
 
+/**
+ * OpenAI Responses 协议编解码。
+ *
+ * 与 Chat Completions 的关键差异：input 是扁平数组、停止原因来自 status 字段、
+ * 请求默认不落盘（store:false）。字段映射与停止原因分类见函数内注释。
+ */
 export class ResponsesCodec implements ProtocolCodec {
   readonly protocol = 'responses' as const;
 
+  // Responses 把整段对话历史放进扁平的 input 数组，用 type 区分 message / function_call /
+  // function_call_output；与 Chat Completions 的 messages 结构不同，各 codec 须分别适配。
   encode(model: string, request: ProviderRequest): EncodedProviderRequest {
     return {
       endpoint: '/responses',
@@ -36,6 +44,8 @@ export class ResponsesCodec implements ProtocolCodec {
             strict: request.responseFormat.strict,
           },
         } : undefined,
+        // store: false：Responses API 默认在服务端保存会话，这里关闭持久化为无状态请求，
+        // 避免 Provider 留存对话数据，并让重试可安全重放。
         store: false,
         stream: false,
       },
@@ -45,6 +55,8 @@ export class ResponsesCodec implements ProtocolCodec {
   decode(payload: unknown, requestId?: string): ProviderResult {
     const data = decodeResponsesPayload(payload);
     const output: ProviderResult['output'] = [];
+    // callIndex 按 Provider 返回的工具调用顺序递增；工具结果必须按此顺序回填，
+    // 即使并行工具完成顺序不同也不得打乱 callIndex，否则消息序列不稳定。
     let callIndex = 0;
     for (const item of data.output ?? []) {
       if (isResponseMessage(item)) {
@@ -86,6 +98,8 @@ export class ResponsesCodec implements ProtocolCodec {
   }
 }
 
+// Provider 响应不可信：转译为内部消息或工具调用前先校验结构与 status，任意不符立即抛错，
+// 防止畸形 payload 流入后续工具执行流程。
 function decodeResponsesPayload(payload: unknown): ResponsesPayload {
   if (!isRecord(payload) || !isResponseStatus(payload.status)) {
     throw new Error('Responses 响应缺少合法 status');
@@ -179,6 +193,9 @@ function encodeTool(tool: ModelToolDefinition) {
   };
 }
 
+// 停止原因映射即重试安全的关键：queued/in_progress 表示请求尚未就绪，重试可能成功；
+// incomplete 仅在 max_output_tokens 截断时视为 truncated，其余 incomplete 按 fatal_error 处理，
+// 避免把未完成响应误当作成功返回。
 function responseStopReason(data: ResponsesPayload, hasToolCalls: boolean): ProviderStopReason {
   if (hasToolCalls) return 'tool_calls';
   if (data.status === 'cancelled') return 'cancelled';

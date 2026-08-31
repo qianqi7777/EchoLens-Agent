@@ -23,6 +23,7 @@ test('文件 Eval 入口使用本地 Candidate 并持久化脱敏结果', async 
     fixture: { files: [] },
     grader: { type: 'answer', mode: 'exact', expected: 'local-ok' },
   }));
+  // Candidate 元数据故意写入伪造 token，验证结果持久化前脱敏：results.jsonl 不回显原文，仅保留 [REDACTED]。
   await writeFile(candidatePath, JSON.stringify({ answer: 'local-ok', metadata: { token: 'sk-secret' } }));
   const result = await runEvalFiles({ taskPath, candidatePath, resultPath, suiteId: 'local-smoke' });
   assert.equal(result.record.passed, true);

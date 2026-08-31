@@ -38,6 +38,8 @@ interface ChatCompletionPayload {
 export class ChatCompletionsCodec implements ProtocolCodec {
   readonly protocol = 'chat_completions' as const;
 
+  // Chat Completions 用 messages 数组承载对话；response_format 的 json_schema 需再包一层
+  // json_schema 字段，与 Responses 的 text.format 结构不同（见 3.3 协议字段映射）。
   encode(model: string, request: ProviderRequest): EncodedProviderRequest {
     return {
       endpoint: '/chat/completions',
@@ -93,6 +95,7 @@ export class ChatCompletionsCodec implements ProtocolCodec {
   }
 }
 
+// 网络响应不可信：先校验 choices / message / tool_calls 结构，非法即抛错，避免污染内部结果。
 function decodeChatPayload(payload: unknown): ChatCompletionPayload {
   if (!isRecord(payload) || !Array.isArray(payload.choices) || payload.choices.length === 0) {
     throw new Error('Chat Completions 响应缺少 choices');
@@ -118,6 +121,10 @@ function decodeChatPayload(payload: unknown): ChatCompletionPayload {
   return payload as unknown as ChatCompletionPayload;
 }
 
+// Chat Completions 约定：tool 结果须跟在携带对应 tool_calls 的 assistant 消息之后，
+// 同一轮并行的多次工具调用必须合并进同一条 assistant 消息，不能拆成多条。
+// 因此这里把 assistant 消息与其后连续的工具调用合并；对无 assistant 前缀的连续工具调用，
+// 也归并成一条 assistant 消息，避免 Provider 因工具调用归属不明而拒绝请求。
 function encodeMessages(items: ConversationItem[]): ChatMessage[] {
   const messages: ChatMessage[] = [];
   let index = 0;
@@ -172,6 +179,8 @@ function encodeToolCall(call: ToolCallItem): ChatToolCall {
   };
 }
 
+// Chat Completions 的 tools 项需用 function 包裹一层 {type:'function',function:{name,...}}，
+// 与 Responses 的扁平 tools 结构不同。
 function encodeTool(tool: ModelToolDefinition) {
   return {
     type: 'function',

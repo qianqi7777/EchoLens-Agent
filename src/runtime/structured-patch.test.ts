@@ -13,6 +13,8 @@ async function workspace(context: test.TestContext): Promise<string> {
 
 test('结构化 Patch 保留 BOM/CRLF 并生成可审查 diff', async (context) => {
   const root = await workspace(context);
+  // Fixture \u6545\u610f\u8fdd\u53cd\u7eaf LF \u6587\u672c\u7ea6\u5b9a\uff1a\u6587\u4ef6\u5e26 UTF-8 BOM \u4e14\u4f7f\u7528 CRLF \u6362\u884c\uff0c
+  // \u8986\u76d6 Windows \u5e38\u89c1\u6587\u672c\u683c\u5f0f\uff1boldString \u4ee5 LF \u5339\u914d\u987b\u5bb9\u5fcd CRLF\uff0creplace \u540e BOM/CRLF \u5fc5\u987b\u4fdd\u7559\u3002
   await writeFile(join(root, 'note.txt'), Buffer.from('\ufeffone\r\ntwo\r\n', 'utf8'));
   const preview = await previewPatch(root, {
     version: 1,
@@ -31,6 +33,8 @@ test('结构化 Patch 保留 BOM/CRLF 并生成可审查 diff', async (context) 
 test('Patch 对零匹配、多匹配、哈希漂移和已有 create 目标失败关闭', async (context) => {
   const root = await workspace(context);
   await writeFile(join(root, 'a.txt'), 'same\nsame\n');
+  // 失败关闭：上下文零匹配/多匹配时直接报错，不猜测替换目标；哈希漂移与
+  // create 命中已存在目标同理拒绝，防止静默覆盖并发产生的用户数据。
   await assert.rejects(previewPatch(root, { version: 1, operations: [{ op: 'replace', path: 'a.txt', oldString: 'missing', newString: 'x' }] }), (error) => error instanceof PatchError && error.code === 'patch_context_mismatch');
   await assert.rejects(previewPatch(root, { version: 1, operations: [{ op: 'replace', path: 'a.txt', oldString: 'same', newString: 'x' }] }), (error) => error instanceof PatchError && error.code === 'patch_ambiguous');
   await assert.rejects(previewPatch(root, { version: 1, operations: [{ op: 'create', path: 'a.txt', content: 'x' }] }), (error) => error instanceof PatchError && error.code === 'patch_target_exists');

@@ -15,6 +15,8 @@ import type { EncodedProviderRequest, OpenAICompatibleProviderOptions, ProtocolC
 import { parseSse } from './sse.js';
 import { decodeProviderStream } from './streaming.js';
 
+// 默认能力只覆盖 OpenAI Compatible 端点普遍支持的特性；流式与结构化输出默认关闭，
+// 需调用方按 Provider 实际能力显式声明，避免误用导致降级路径失效。
 const baseCapabilities: ProviderCapabilities = {
   maxContextTokens: 128_000,
   supportsStreaming: false,
@@ -49,6 +51,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   async complete(request: ProviderRequest): Promise<ProviderResult> {
     this.validateRequest(request);
     const encoded = this.codec.encode(this.model, request);
+    // 单次尝试的超时不超过剩余重试预算，保证多轮重试与等待累计时间有界。
     const execution = await runWithRetry(
       (_attempt, remainingBudgetMs) => this.completeOnce(
         encoded,
@@ -120,6 +123,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
         }
       }
     } catch (error) {
+      // 流体已经打开并开始输出后，任何中断都不再重试：runWithRetry 只覆盖连接建立阶段，
+      // 消费阶段重试会重复已发出的增量并破坏请求幂等，故此处一律抛出不可重试错误。
       if (error instanceof ProviderError) throw error;
       if (request.signal?.aborted) throw cancelledProviderError(error);
       if (attempt.timedOut()) {
@@ -222,6 +227,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
           signal: attempt.signal,
         });
       } catch (error) {
+        // 用户取消由外部 signal 判定、超时由 attempt.timedOut() 判定（内部 controller 中止不置位外部 signal）。
+        // 取消不可重试，超时与网络错误标记为可重试，交给上层 runWithRetry 决定。
         if (externalSignal?.aborted) throw cancelledProviderError(error);
         if (attempt.timedOut()) {
           throw new ProviderError({
@@ -311,6 +318,8 @@ async function readSafeErrorDetails(response: Response): Promise<ReturnType<type
   }
 }
 
+// 部分 Provider 不返回结构化错误码，context_length 与 content_filter 只能依赖错误描述文本
+// 与 413 等状态码兜底判断；命中不了时再按 HTTP 状态码做通用映射。
 function errorKind(status: number, ...details: Array<string | undefined>): ProviderErrorKind {
   const description = details.filter(Boolean).join(' ').toLowerCase();
   if (/context|token.?limit|max(?:imum)?.?token|request.?too.?large/.test(description) || status === 413) {
@@ -328,6 +337,8 @@ function errorKind(status: number, ...details: Array<string | undefined>): Provi
   return 'unknown';
 }
 
+// 408 请求超时、409 冲突、429 限流与 5xx（含 Cloudflare 529）都是瞬时错误，可安全重试；
+// 其余 4xx 表示请求本身或鉴权问题，重试不会改变结果。
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 409 || status === 429 || status === 500
     || status === 502 || status === 503 || status === 504 || status === 529;

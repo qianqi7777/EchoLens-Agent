@@ -49,6 +49,7 @@ test('Docker Sandbox 只挂载工作区并生成高隔离 argv', async (t) => {
 });
 
 test('Sandbox 暂存区排除 .env、私有目录和 Git 忽略文件', async (t) => {
+  // 暂存样本：.env 与私有目录一旦进入容器，容器内命令即可读取；此断言验证密钥文件不会出现在暂存根。
   const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-stage-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'src'));
@@ -65,6 +66,8 @@ test('Sandbox 暂存区排除 .env、私有目录和 Git 忽略文件', async (t
 });
 
 test('Docker Sandbox 对未授权网络、越界 cwd 和缺失 Docker 失败关闭', async (t) => {
+  // 拒绝样本：非 package_install 申请网络、cwd 用 ../ 越界、Docker 缺失都必须失败，
+  // 且缺失 Docker 时报 sandbox_unavailable 而不降级到宿主 Shell，验证 deny 优先与失败关闭。
   const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-deny-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const runner = new RecordingRunner([result({ spawnError: 'ENOENT' })]);
@@ -80,6 +83,8 @@ test('Docker Sandbox 对未授权网络、越界 cwd 和缺失 Docker 失败关�
 });
 
 test('package_install 使用内部网络和域名代理 sidecar，不提供直连网络', async (t) => {
+  // 网络拓扑断言：工作负载只挂内部网络，HTTP/HTTPS 经代理 sidecar 出去，不带 --network none 的直连，
+  // 并校验结束后网络与代理容器都被回收。
   const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-network-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'package.json'), '{"private":true}\n');
@@ -120,6 +125,8 @@ test('Docker Sandbox 超时后按随机容器名执行强制清理', async (t) =
 });
 
 test('域名代理只允许全球可路由地址并拒绝私网、文档网段和特殊 IPv6', () => {
+  // egress 攻击样本：仅放行全球可路由地址，而私网、loopback、链路本地、CGNAT、文档网段、
+  // 组播及 IPv4/IPv6 映射等特殊地址必须全部拒绝，验证 deny 为默认。
   assert.equal(isPublicEgressAddress('8.8.8.8'), true);
   assert.equal(isPublicEgressAddress('2606:4700:4700::1111'), true);
   for (const address of [

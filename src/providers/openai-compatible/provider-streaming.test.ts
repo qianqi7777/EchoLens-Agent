@@ -153,6 +153,8 @@ test('已输出增量后流中断不会自动重放', async () => {
 });
 
 test('SSE 可解析跨网络分片的 CRLF 事件边界', async () => {
+  // 网络分片故意把 CRLF 与事件边界切碎（chunks[1] 以 '\n' 续上 chunks[0] 末尾的 '\r'），
+  // 验证解析器按事件重组，而非依赖网络层整行投递。
   const chunks = ['data: first\r', '\n\r', '\ndata: second\r\n\r\n'];
   const body = new ReadableStream<Uint8Array>({
     start(controller) {

@@ -53,6 +53,7 @@ test('Eval Harness 支持回答、Patch、终端和安全任务，并隐藏 Grad
 
 test('存在隐藏命令检查但没有 Sandbox 时失败关闭', async () => {
   const runner: EvalCandidateRunner = { run: async () => ({}) };
+  // 无 Sandbox 时隐藏命令检查必须整体失败，不能静默跳过，避免无法执行的检查被当成已满足。
   const result = await new EvalHarness(runner).run(task('terminal', {
     type: 'terminal', checks: [check('hidden', 'input.txt', 'before')],
   }));
@@ -61,6 +62,7 @@ test('存在隐藏命令检查但没有 Sandbox 时失败关闭', async () => {
 });
 
 test('Candidate 或 Patch 异常会形成可持久化失败记录', async () => {
+  // 异常消息故意携带伪造密钥，验证失败记录的断言摘要脱敏后持久化，不回显原文。
   const failedCandidate = await new EvalHarness({
     run: async () => { throw new Error('api_key=sk-example-secret-value'); },
   }).run(task('answer', { type: 'answer', mode: 'exact', expected: 'ok' }));
@@ -68,6 +70,7 @@ test('Candidate 或 Patch 异常会形成可持久化失败记录', async () => 
   assert.equal(failedCandidate.assertions[0]?.id, 'candidate-execution');
   assert.doesNotMatch(failedCandidate.assertions[0]?.summary ?? '', /sk-example/u);
 
+  // 攻击样本：patch 目标路径用 ../ 指向工作区外，验证越界路径被拒绝并产生 patch-apply 失败断言。
   const failedPatch = await new EvalHarness({
     run: async () => ({
       patch: { version: 1, operations: [{ op: 'create', path: '../escape.txt', content: 'bad' }] },

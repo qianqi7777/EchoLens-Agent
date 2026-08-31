@@ -1,7 +1,25 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
+
+/**
+ * 内容可信度阶梯（system 最高、untrusted 最低），由注入方按来源出处标注，
+ * 内容自身无权声明可信度。system 仅用于系统内置消息（如 System Policy）；
+ * 指令类规则文件只会落到 user / repository 层级；来源无法确证的内容归入
+ * untrusted（fail-closed）。消费方据此决定内容能否影响指令、权限或证据展示。
+ */
 export type TrustLevel = 'system' | 'organization' | 'user' | 'repository' | 'untrusted';
+
+/**
+ * 内容类别，是数据与指令分离的锚点。instruction / user_request 属于指引类；
+ * evidence / tool_output 只承载工具执行产生的数据。工具结果必须以 tool_output
+ * 形态回填，绝不能用 instruction 身份进入下游。
+ */
 export type ContextKind = 'instruction' | 'user_request' | 'evidence' | 'tool_output' | 'summary';
 export type ToolExecutionStatus = 'ok' | 'denied' | 'invalid' | 'timeout' | 'cancelled' | 'failed';
+
+/**
+ * 稳定错误码目录：UI 呈现、评测指标、沙箱适配器与重试策略都按这些字符串
+ * 精确匹配或开关行为。新增是向后兼容的；改名或删除必须先审计全部消费方。
+ */
 export type ToolErrorCode =
   | 'unknown_tool'
   | 'invalid_arguments'
@@ -78,6 +96,8 @@ export interface ToolOutputMetadata {
   originalChars: number;
   returnedChars: number;
   truncated: boolean;
+  // content 已先按脱敏规则处理后才允许回填；redactions 只记录实际命中的
+  // 规则类别，供审计与评测引用，下游不得借此请求或还原原始内容。
   redactions: string[];
   guardrailFlags?: string[];
 }
@@ -107,6 +127,8 @@ export interface ToolResultItem {
   callId: string;
   toolName: string;
   status: ToolExecutionStatus;
+  // 工具输出只能作为不可信证据回填：output 恒以 tool_output 数据形态存在，
+  // 不得进入指令通道或改变权限集合；evidenceIds 记录支撑结论的证据引用。
   output: ContextItem;
   summary: string;
   data?: unknown;

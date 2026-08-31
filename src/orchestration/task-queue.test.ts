@@ -14,6 +14,7 @@ const execute = promisify(execFile);
 test('持久任务队列恢复过期租约，并支持等待审批、恢复和完成', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-task-queue-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  // 可注入时钟驱动租约过期：认领后推进 2s 越过 1s 租约，避免真实 sleep 才能覆盖 recoverExpired。
   let now = new Date('2026-08-29T00:00:00.000Z');
   const queue = new PersistentTaskQueue(join(root, 'tasks.json'), () => now);
   const task = await queue.enqueue({ isolation: 'sandbox', payload: { profile: 'explore', objective: 'inspect' } });
@@ -67,6 +68,8 @@ test('Worker 取消竞态保持 cancelled，通知异常不会中断任务收尾
     workerId: 'worker-race',
     onStateChange: async () => { throw new Error('notification unavailable'); },
   });
+  // 竞态窗口：execute 阻塞在 executing 上，等任务进入 running 后 cancel，
+  // 再放行 execute 返回 completed，验证“迟到的完成结果”不会覆盖已取消状态、也不写入 result。
   const running = worker.runOnce();
   while ((await queue.get(task.id))?.state !== 'running') await new Promise((resolve) => setTimeout(resolve, 5));
   await worker.cancel(task.id);
@@ -115,6 +118,7 @@ test('损坏的后台队列失败关闭而不是静默重置', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-task-corrupt-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const filePath = join(root, 'tasks.json');
+  // Fixture 故意写入非法 state，验证队列对损坏文件失败关闭而非静默重置。
   await writeFile(filePath, JSON.stringify({ version: 1, tasks: [{ schemaVersion: 1, id: 'bad', state: 'unknown' }] }));
   const queue = new PersistentTaskQueue(filePath);
   await assert.rejects(queue.list(), /队列结构无效/u);
@@ -124,6 +128,7 @@ test('队列写入端拒绝无效 metadata 并规范化 Evidence ID', async (t) 
   const root = await mkdtemp(join(tmpdir(), 'echolens-task-validation-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  // NaN 属于 number 但非有限值，校验必须拒绝；evidenceIds 单条超长会被截断到 1000 字符上限。
   await assert.rejects(queue.enqueue({
     isolation: 'sandbox',
     payload: { profile: 'explore', objective: 'inspect', metadata: { invalid: Number.NaN } },

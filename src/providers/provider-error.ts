@@ -36,6 +36,12 @@ export interface ProviderErrorOptions {
   cause?: unknown;
 }
 
+/**
+ * Provider 调用失败的统一错误类型。
+ *
+ * 所有字段在构造时完成脱敏（见构造器注释）；`retryable` 与 `code` 是上层重试与
+ * UI 分类的稳定契约，`kind` 用于按类别兜底处理。
+ */
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   readonly retryable: boolean;
@@ -47,6 +53,8 @@ export class ProviderError extends Error {
   readonly elapsedMs?: number;
   readonly details?: ProviderErrorDetails;
 
+  // 安全边界：错误消息、cause、code 与 requestId 都可能回显 Provider 返回的凭据或用户数据，
+  // 构造时统一脱敏，保证 Error 被记入日志时不会外泄敏感信息。
   constructor(options: ProviderErrorOptions) {
     super(redactText(options.message), {
       cause: options.cause === undefined ? undefined : redactValue(options.cause),
@@ -69,6 +77,8 @@ export class ProviderError extends Error {
       : undefined;
   }
 
+  // 重试循环在失败后补记 attempts/elapsedMs 而不是原地修改字段：
+  // 构造器会重新执行脱敏，新实例保证所有路径的脱敏与序列化行为一致。
   withAttemptMetadata(attempts: number, elapsedMs: number): ProviderError {
     return new ProviderError({
       kind: this.kind,

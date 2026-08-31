@@ -53,6 +53,8 @@ test('按用户、根目录到目标目录加载规则且每层只选一个文�
     'feature rules',
   ]);
   assert.deepEqual(loaded.documents.map((item) => item.source.scope.depth), [-1, 0, 1, 2]);
+  // Fixture：根目录同时放置 AGENTS.md 与 AGENTS.override.md，预期每层只选 override，
+  // 因此 "root ignored" 必须被排除，验证 override 在同一目录内的优先级。
   assert.equal(loaded.documents.some((item) => item.content.includes('root ignored')), false);
   assert.deepEqual(loaded.documents.at(-1)?.permissionDirectives.map((item) => item.permission), [
     'network.request',
@@ -84,6 +86,8 @@ test('Context Manager 保持稳定前缀并用仓库规则收紧权限', async (
   assert.equal(first.compacted, true);
   assert.ok(first.estimatedTokens <= 700);
   assert.equal(first.items.some((item) => item.id.startsWith('milestone-summary:')), true);
+  // 两次 build 使用不同的“当前问题”，但断言前两个 item（System Policy + 指令）id
+  // 完全一致，验证稳定前缀跨 Turn 不漂移；仓库 deny 规则已收紧 workspace.write。
   assert.deepEqual(first.items.slice(0, 2).map((item) => item.id), second.items.slice(0, 2).map((item) => item.id));
   assert.equal(first.items[0]?.type === 'message' && first.items[0].role === 'system', true);
   assert.equal(first.items[1]?.type === 'message' && first.items[1].role === 'user', true);
@@ -106,6 +110,8 @@ test('evidence 与 metadata 投影不发送原始工具内容', async (context) 
     runtimePermissions: granted,
   });
 
+  // 断言原始工具内容在任何隐私级别都不下发（存在即说明隐私投影泄漏）：
+  // evidence 保留证据引用，metadata 连证据引用也去除。
   assert.doesNotMatch(JSON.stringify(evidence.items), /UNIQUE_RAW_SOURCE_CONTENT/u);
   assert.match(JSON.stringify(evidence.items), /file:src\/index\.ts:1/u);
   assert.doesNotMatch(JSON.stringify(metadata.items), /UNIQUE_RAW_SOURCE_CONTENT/u);
@@ -136,6 +142,8 @@ test('极小预算压缩后仍保留可编码的原始工具调用', async (cont
   assert.equal(call.rawArguments, undefined);
   assert.ok(built.estimatedTokens <= 512);
 
+  // 极小预算压缩后，tool_call 的 arguments 必须原样保留，
+  // 才能被 ChatCompletions 与 Responses 两种 codec 正常编码（协议兼容）。
   const chat = new ChatCompletionsCodec().encode('model', { items: built.items });
   const chatMessages = chat.body.messages as Array<Record<string, unknown>>;
   const assistant = chatMessages.find((message) => Array.isArray(message.tool_calls));

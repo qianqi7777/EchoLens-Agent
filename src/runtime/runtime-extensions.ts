@@ -31,6 +31,8 @@ export async function initializeRuntimeExtensions(
   const mcpManager = options.mcpManager ?? new McpClientManager(workspaceRoot);
   registerCodeIntelligenceTools(registry, codeIntelligence);
 
+  // 配置解析失败不阻断启动：MCP 是增强能力，缺失或损坏的配置只记入 notices，
+  // 不因此让整个 Agent 无法初始化。
   let config: McpConfigFile = { version: 1, servers: [] };
   try {
     config = options.mcpConfig ?? await loadMcpConfig(workspaceRoot);
@@ -39,6 +41,8 @@ export async function initializeRuntimeExtensions(
   }
 
   const enabled = config.servers.filter((server) => server.enabled);
+  // MCP Server 是外部信任域：逐服务器连接并隔离失败，
+  // 单个连接异常只记入 notices，不阻断运行时初始化；其工具输出后续走不可信证据处理。
   const results = await Promise.allSettled(enabled.map((server) => mcpManager.connect(server)));
   const connectedMcpServers: string[] = [];
   for (const [index, result] of results.entries()) {

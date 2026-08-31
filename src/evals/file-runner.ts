@@ -33,6 +33,8 @@ export interface EvalFileRunResult {
 }
 
 export async function runEvalFiles(options: EvalFileRunOptions): Promise<EvalFileRunResult> {
+  // 任务/模板与候选结果都来自外部文件，属不可信输入；加载后交给 validate/normalize 校验，
+  // 且 taskPath 与 templatePath 二选一，避免同时输入造成歧义。
   if (Boolean(options.taskPath) === Boolean(options.templatePath)) {
     throw new Error('必须且只能指定 taskPath 或 templatePath');
   }
@@ -62,6 +64,7 @@ export async function runEvalFiles(options: EvalFileRunOptions): Promise<EvalFil
 }
 
 async function readJson<T>(filePath: string): Promise<T> {
+  // 读取前先做大小上限与文件类型校验，避免把超大或非常规文件一次性载入内存。
   const absolute = path.resolve(filePath);
   const info = await stat(absolute);
   if (!info.isFile() || info.size > 5 * 1024 * 1024) throw new Error(`Eval 文件无效或过大：${absolute}`);
@@ -74,6 +77,8 @@ async function readJson<T>(filePath: string): Promise<T> {
 }
 
 function normalizeCandidate(value: unknown): EvalCandidateResult {
+  // 候选结果同为不可信输入：对字符串长度与 patch/events/evidenceIds 数量做上限校验，
+  // 防止越界数据进入评分或持久化，再复制以隔离调用方。
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Eval Candidate 必须是对象');
   const candidate = value as Record<string, unknown>;
   if (candidate.answer !== undefined && typeof candidate.answer !== 'string') throw new Error('Candidate answer 必须是字符串');

@@ -41,6 +41,7 @@ test('Sandbox 工具未审批时不执行，批准后只传递 executable 与 ar
     signal: new AbortController().signal,
   };
 
+  // 未配置审批决策器时直接返回 approval_required，且 Sandbox 层零调用（deny-first）。
   const pending = await new ToolExecutor(registry).invoke('shell_exec', {
     executable: 'node', args: ['--version'], workspaceAccess: 'read-only',
   }, context);
@@ -85,8 +86,12 @@ test('run_tests 使用固定 npm argv，非法命令和 package_install 默认�
   assert.equal(verified.status, 'ok');
   assert.deepEqual(sandbox.requests[1]!.command, { executable: 'npm', args: ['run', 'typecheck'] });
 
+  // 攻击样本：把 `cmd.exe /c whoami` 整串作为 executable 传入，
+  // 试图用 shell 拼接绕过固定的 executable+argv 校验，必须被判为 invalid_arguments。
   const invalid = await executor.invoke('shell_exec', { executable: 'cmd.exe /c', args: ['whoami'] }, context);
   assert.equal(invalid.error?.code, 'invalid_arguments');
+  // package_install 默认被拒绝（permission_denied），安装类副作用不会因为带有
+  // allowedDomains 参数就被放行。
   const install = await executor.invoke('package_install', {
     packages: ['ajv'], allowedDomains: ['registry.npmjs.org'],
   }, context);

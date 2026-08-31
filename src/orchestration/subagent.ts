@@ -99,6 +99,13 @@ export class SubagentOrchestrator {
     }));
   }
 
+  /**
+   * 在隔离工作区运行受限子 Agent。
+   *
+   * 子 Agent 只拿到父级工具集的 whitelist 子集与独立权限/预算（maxSteps、maxToolCalls），
+   * 其摘要与 evidence 只是回传父级的不可信证据，不能提升父级权限；无论成败，finally 都会释放注册表与工作区租约。
+   * @throws 未知 Profile、目标无效、工具未注册或工作区分配失败时抛错。
+   */
   async run(request: SubagentRequest, signal = new AbortController().signal): Promise<SubagentResult> {
     const profileDefinition = this.profiles.get(request.profile);
     if (!profileDefinition) throw new Error(`未知子 Agent Profile：${request.profile}`);
@@ -125,6 +132,7 @@ export class SubagentOrchestrator {
       const result = await agent.run(subagentPrompt(profileDefinition, objective), [], signal, {
         onEvent: (event) => { events.push(event); },
       });
+      // 仅 worktree 才回传改动文件；sandbox 是随清理丢弃的暂存副本，变更不映射回主工作区。
       const changedFiles = workspaceMode === 'worktree' ? await lease.changedFiles() : [];
       const summary = result.finalSummary.verified ? result.finalSummary.value : undefined;
       return {
@@ -166,6 +174,7 @@ export async function createWorkspaceBoundSubagentRegistry(
     return { registry, close: async () => undefined };
   }
 
+  // 代码智能服务绑定子 Agent 租约目录而非主工作区，防止查询结果泄漏主工作区符号。
   const codeIntelligence = new CodeIntelligenceService(workspaceRoot);
   try {
     const codeRegistry = new ToolRegistry();
@@ -179,6 +188,7 @@ export async function createWorkspaceBoundSubagentRegistry(
 }
 
 export function registerSubagentTool(registry: ToolRegistry, orchestrator: SubagentOrchestrator): void {
+  // delegate_task 是外部副作用：委派本身需要 external.invoke 权限，且子 Agent 结果只是不可信证据回填。
   registry.register({
     name: 'delegate_task',
     description: '把独立的探索、测试或审查任务委托给受限子 Agent；子 Agent 只有固定工具白名单和独立预算。',
@@ -216,6 +226,8 @@ class DelegatedProfileGuardrail implements ProposedActionGuardrail {
   constructor(private readonly profileDefinition: SubagentProfile) {}
 
   async evaluate(tool: ToolSpec, args: Record<string, unknown>, context: ToolContext): Promise<ProposedActionDecision> {
+    // 子 Agent 权限边界：只能调用 Profile 白名单内的工具，先经基类审批；
+    // 仅当工具 effect 落在该 Profile 的 autoApproveEffects 时才自动放行，绝不扩大父级权限。
     if (!this.profileDefinition.tools.has(tool.name)) {
       return { decision: 'deny', reasonCode: 'subagent_tool_denied', reason: '子 Agent 工具不在 Profile 白名单', normalizedArguments: structuredClone(args) };
     }
@@ -251,6 +263,7 @@ function profile(
 }
 
 function subagentPrompt(profileDefinition: SubagentProfile, objective: string): string {
+  // 提示词要求子 Agent 用工具返回的 evidence ID 支撑结论、无法证明的列入 unresolved，便于父级核对不可信证据来源。
   return [
     `你是受限的 ${profileDefinition.id} 子 Agent。`,
     profileDefinition.description,

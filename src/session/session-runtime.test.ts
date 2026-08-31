@@ -65,6 +65,7 @@ test('工具执行后退出可从同一 Turn 恢复且不重复工具', async (c
     sessionId: 'resume-session',
     storeOptions: { flushEachEvent: false },
   });
+  // 首次 run 在工具批次后因 step 预算暂停，事件全部落盘。
   const paused = await firstSession.run('检查两个值');
   assert.equal(paused.state, 'paused');
   assert.equal(paused.turnId, paused.checkpoint.turnId);
@@ -84,6 +85,7 @@ test('工具执行后退出可从同一 Turn 恢复且不重复工具', async (c
     sessionId: 'resume-session',
     storeOptions: { flushEachEvent: false },
   });
+  // 恢复阶段不重新执行工具：输入由存储中的 tool.completed 重建，executions 保持 2。
   const completed = await resumedSession.resume();
 
   assert.equal(completed.state, 'completed');
@@ -144,6 +146,7 @@ test('并行批次中途退出后从 tool.completed 恢复且只执行未完成�
     summary: 'inspect 0',
     evidenceIds: [],
   };
+  // 手工预置检查点与 call-0 的 tool.completed，构造“并行批次写了一半”的存储快照。
   const firstStore = new JsonlEventStore(sessionRoot, 'partial-session', { flushEachEvent: false });
   await firstStore.append({ payload: { type: 'session.created', workspaceRoot: root } });
   await firstStore.append({
@@ -303,6 +306,7 @@ test('运行中的 steering 在同一 Turn 下一模型步骤生效并持久化'
     },
   );
 
+  // 用 Promise 卡住工具执行，制造 run 已进入工具阶段但未返回的竞态窗口，再注入 steering。
   const running = session.run('原始方向');
   await toolStarted;
   await session.steer('改为检查新的方向');

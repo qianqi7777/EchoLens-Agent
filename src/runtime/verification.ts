@@ -36,6 +36,8 @@ export interface VerificationRunOptions {
   runCommand?: (command: VerificationCommand, signal?: AbortSignal) => Promise<EditVerificationResult>;
 }
 
+// 依据改动文件挑选最少的验证项：改动含 TS 时跑 typecheck，含测试或配置( package.json/tsconfig )变更时跑 test；
+// 都匹配不到时才回退到 test，避免每次改动都无条件跑全套脚本。
 export async function selectVerificationPlan(
   workspaceRoot: string,
   changedFiles: readonly string[],
@@ -52,6 +54,8 @@ export async function selectVerificationPlan(
   return { commands, reason: commands.length ? '根据改动文件选择验证项' : '未找到可安全自动运行的验证脚本' };
 }
 
+// 按顺序执行；任一 required 命令失败则跳过其后所有命令，避免在已知失败基础上继续输出误导性结果。
+// 各处取消（signal.aborted）统一标记为 skipped，不当作失败计入。
 export async function runVerification(
   plan: VerificationPlan,
   options: VerificationRunOptions = {},
@@ -77,6 +81,8 @@ export async function runVerification(
 async function runCommand(command: VerificationCommand, signal?: AbortSignal): Promise<EditVerificationResult> {
   const started = Date.now();
   return new Promise((resolve) => {
+    // shell:false 让参数以 argv 数组传递、不经过 shell 解析，防止命令字符串被注入；
+    // 输出统一脱敏并截断到最近 4000 字符，避免验证脚本的敏感内容外泄。
     const child = spawn(command.executable, [...command.args], {
       cwd: command.cwd,
       shell: false,
@@ -116,6 +122,7 @@ async function runCommand(command: VerificationCommand, signal?: AbortSignal): P
   });
 }
 
+// Windows 上 npm 需通过 npm.cmd 启动，其余平台直接使用 npm；shell 保持关闭，脚本名不作 shell 解析。
 function npmScript(
   script: string,
   label: string,

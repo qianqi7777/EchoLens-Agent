@@ -3,6 +3,7 @@ import test from 'node:test';
 import { NodeProcessRunner } from './process-runner.js';
 
 test('Process Runner 不解析 Shell 元字符并限制输出', async () => {
+  // 注入样本：参数含 ; 等 Shell 元字符，验证 runner 以 shell:false 原样传递、不经 Shell 执行。
   const runner = new NodeProcessRunner();
   const literal = 'literal;echo should-not-run';
   const executed = await runner.run({
@@ -25,6 +26,7 @@ test('Process Runner 不解析 Shell 元字符并限制输出', async () => {
   assert.equal(bounded.outputTruncated, true);
 });
 test('Process Runner 区分超时与外部取消', async () => {
+  // 两种终止都 kill 子进程，但结果标记不同：超时由定时器触发，取消由 AbortSignal 触发。
   const runner = new NodeProcessRunner();
   const timedOut = await runner.run({
     executable: process.execPath,

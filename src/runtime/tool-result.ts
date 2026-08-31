@@ -14,6 +14,7 @@ export function toolSuccess(
   return { status: 'ok', content, summary, data, evidenceIds };
 }
 
+// 失败结果的 content 固定为 { error } 的 JSON 编码，便于模型解析结构化的错误码与数据，而非纯文本提示。
 export function toolFailure(
   status: Exclude<ToolExecutionStatus, 'ok'>,
   code: ToolErrorCode,

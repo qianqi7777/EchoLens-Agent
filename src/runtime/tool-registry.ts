@@ -17,6 +17,7 @@ interface RegisteredTool {
 export class ToolRegistry {
   private readonly items = new Map<string, RegisteredTool>();
 
+  // 同名工具直接抛错而非覆盖，避免安全敏感工具被后续注册静默替换。
   register(tool: ToolSpec): void {
     if (this.items.has(tool.name)) {
       throw new Error(`工具已注册：${tool.name}`);

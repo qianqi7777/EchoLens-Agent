@@ -66,6 +66,13 @@ export interface EvalCandidateResult {
 }
 
 export interface EvalCandidateRunner {
+  /**
+   * 在独立工作区运行候选任务。
+   *
+   * 仅传入 publicTask，不含 grader/fixture/generator，候选无法获取评分标准；workspaceRoot
+   * 为每次运行新建的临时工作区。实现必须返回纯结果且不依赖外部共享状态，以维持
+   * 任务→结果一一对应的隔离不变量。
+   */
   run(
     task: EvalCandidateTask,
     workspaceRoot: string,

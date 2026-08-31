@@ -14,6 +14,7 @@ const proxyImage = process.env.AGENT_SANDBOX_PROXY_IMAGE?.trim() || image;
 const runner = new NodeProcessRunner();
 await requireDocker(runner, executable, image, proxyImage);
 
+// 工作区建在宿主 OS 临时目录，挂载为容器内的 /workspace；容器内路径始终是 POSIX，宿主侧（Windows）使用盘符路径。
 const root = await mkdtemp(join(tmpdir(), 'echolens-docker-smoke-'));
 try {
   await writeFile(join(root, 'input.txt'), 'before\n');
@@ -22,6 +23,7 @@ try {
   await writeFile(join(root, 'network-probe.mjs'), probe);
   const sandbox = new DockerSandboxAdapter({ executable, image, proxyImage });
 
+  // 只读工作区的信任边界：容器内对 /workspace 的写入必须失败，且宿主目录不得出现容器内生成的文件。
   const readOnly = await sandbox.execute(request(root, {
     command: {
       executable: 'node',
@@ -31,6 +33,7 @@ try {
   assert.equal(readOnly.status, 'failed', 'read-only workspace unexpectedly allowed a write');
   await assert.rejects(readFile(join(root, 'blocked.txt')));
 
+  // network=none 必须拦截所有直接出网：对公网 IP 的 fetch 应因拒绝/超时而失败，失败即证明隔离生效。
   const isolated = await sandbox.execute(request(root, {
     command: {
       executable: 'node',
@@ -39,6 +42,8 @@ try {
   }));
   assert.equal(isolated.status, 'passed', 'network=none did not block direct egress');
 
+  // 容器内按批准路径写入的结果不直接落在挂载上，而是以 artifact bundle + structured patch 回归；
+  // 宿主文件保持原样直到 applyPatch 在宿主侧合并，这是写回工作区前的可见校验边界。
   const generated = await sandbox.execute(request(root, {
     workspaceAccess: 'read-write',
     command: {
@@ -54,6 +59,7 @@ try {
   assert.equal(await readFile(join(root, 'input.txt'), 'utf8'), 'after\n');
   assert.equal(await readFile(join(root, 'created.txt'), 'utf8'), 'artifact\n');
 
+  // allowlist 只放行预置的 npm registry 域名；未列出的域名必须被代理拒绝，证明白名单生效。
   const allowed = await sandbox.execute(networkRequest(root, 'registry.npmjs.org', 'allow', '/npm'));
   assert.equal(allowed.status, 'passed', details(allowed));
   const denied = await sandbox.execute(networkRequest(root, 'example.com', 'deny', '/'));
@@ -95,6 +101,7 @@ function networkRequest(root: string, hostname: string, expected: 'allow' | 'den
   });
 }
 
+// 镜像必须已预先在本地准备，脚本不触发 image pull，避免把网络拉取失败混杂进沙箱隔离校验。
 async function requireDocker(
   processRunner: NodeProcessRunner,
   docker: string,

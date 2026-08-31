@@ -16,6 +16,9 @@ const PERMISSIONS = new Set<Permission>([
   'network.request',
   'external.invoke',
 ]);
+// 指令正则刻意只允许 deny / request_approval，不含 allow：
+// 规则文件不可信，只能收紧权限或申请审批，不能放宽；reason 限长 240 字符，
+// 防止把超大字符串灌入待审理由。
 const DIRECTIVE_PATTERN = /<!--\s*echolens:\s*(deny|request_approval)\s+(workspace\.read|workspace\.write|process\.exec|network\.request|external\.invoke)(?:\s+reason="([^"]{1,240})")?\s*-->/gu;
 
 export interface InstructionLoaderOptions {
@@ -58,6 +61,8 @@ export class InstructionLoader {
       appliesTo: string;
     }> = [];
 
+    // 合并顺序 = 全局用户规则 → 工作区根 → 目标目录（root-to-target），
+    // discoveryOrder 记录实际顺序；同目录只选一个候选（override 优先）。
     if (this.userInstructionDirectory) {
       const selected = await selectInstructionFile(
         this.userInstructionDirectory,
@@ -96,6 +101,7 @@ export class InstructionLoader {
     const documents: InstructionDocument[] = [];
     let totalBytes = 0;
     for (const [discoveryOrder, candidate] of candidates.entries()) {
+      // 规则文件不可信，用总字节上限（默认 32KB）约束其体积，防止拖垮上下文预算。
       const remaining = Math.max(0, this.maxCombinedBytes - totalBytes);
       if (remaining === 0) {
         warnings.push(`规则总大小超过 ${this.maxCombinedBytes} 字节，已跳过 ${candidate.path}`);
@@ -194,6 +200,8 @@ async function selectInstructionFile(
   return undefined;
 }
 
+// 仓库规则来自不可信工作区：拒绝符号链接，并对 repository 来源做 realpath 后
+// 校验必须落在 workspaceRoot 内，防止规则文件通过符号链接逃逸到工作区之外。
 async function readSafeInstruction(path: string, workspaceRoot?: string): Promise<Buffer | undefined> {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink()) return undefined;
@@ -215,6 +223,8 @@ function directoriesFromRoot(root: string, target: string): string[] {
   return directories;
 }
 
+// 路径穿越校验：目标一旦解析到工作区之外（.. 前缀或越界）即抛错，
+// 防止规则发现与读取逃逸出工作区。
 function assertWithin(root: string, target: string): void {
   const suffix = relative(resolve(root), resolve(target));
   if (suffix === '..' || suffix.startsWith(`..${sep}`) || resolve(target) === '') {

@@ -23,6 +23,8 @@ export type ToolArgumentValidation =
   | { valid: true; issues: [] }
   | { valid: false; issues: ToolArgumentIssue[] };
 
+// 工具参数视为不可信输入：关闭类型强转、默认值注入与额外字段剥离，只做严格校验。
+// 未知字段依赖 schema 的 additionalProperties=false 报错而非静默剪除，防止参数漂移或原型污染。
 const ajv = new Ajv({
   strict: true,
   allErrors: true,
@@ -33,6 +35,8 @@ const ajv = new Ajv({
 });
 addFormats(ajv);
 
+// 根 Schema 必须为 object 且 additionalProperties=false：工具参数来自模型，入口处即拒绝非对象输入
+// 与未知字段，否则松散 schema 会让后面的校验形同虚设。
 export function compileToolSchema(toolName: string, schema: JsonSchema): ValidateFunction {
   if (schema.type !== 'object' || schema.additionalProperties !== false) {
     throw new Error(`工具 ${toolName} 的根 Schema 必须是 object 且 additionalProperties=false`);
@@ -66,6 +70,8 @@ function argumentIssue(error: ErrorObject): ToolArgumentIssue {
   };
 }
 
+// required / additionalProperties 的错误 instancePath 不指向具体字段，需从 params 取出字段名拼成
+// /path/field，供调用方定位到出错参数；字段名中的 / 与 ~ 按 JSON Pointer 规则转义。
 function issuePath(error: ErrorObject): string {
   const base = error.instancePath || '';
   if (error.keyword === 'required' && typeof error.params.missingProperty === 'string') {
@@ -77,6 +83,7 @@ function issuePath(error: ErrorObject): string {
   return base || '/';
 }
 
+// 把 Ajv keyword 映射为面向调用方的稳定错误码。调用方依赖 code 做分支判断，不依赖可能变化的英文 message。
 function issueCode(keyword: string): ToolArgumentErrorCode {
   if (keyword === 'required') return 'missing_required';
   if (keyword === 'type') return 'invalid_type';

@@ -20,6 +20,9 @@ export interface GatewayAuthStatus {
   expiresAt?: string;
 }
 
+/**
+ * defaultProtocol 必须同时出现在 protocols 中，该不变量由 client.ts 解码时强制校验。
+ */
 export interface GatewayModelDescriptor {
   id: string;
   protocols: OpenAICompatibleProtocol[];
@@ -31,6 +34,11 @@ export interface GatewayModelList {
   models: GatewayModelDescriptor[];
 }
 
+/**
+ * OAuth Device Authorization Response（RFC 8628）。
+ *
+ * interval 为服务端建议的轮询间隔秒数；客户端应据此轮询，遇到 slow_down 时进一步放慢。
+ */
 export interface GatewayDeviceAuthorization {
   deviceCode: string;
   userCode: string;
@@ -40,6 +48,11 @@ export interface GatewayDeviceAuthorization {
   interval: number;
 }
 
+/**
+ * OAuth 令牌集，包含真实的访问与刷新凭据。
+ *
+ * 持有时按 secrets 管理：不得写入日志、错误体或非加密的持久化位置。
+ */
 export interface GatewayTokenSet {
   accessToken: string;
   refreshToken?: string;

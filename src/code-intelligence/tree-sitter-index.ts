@@ -15,6 +15,9 @@ interface ParsedFile {
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
 const IGNORED_DIRECTORIES = new Set(['.git', '.echolens', 'node_modules', 'coverage', 'dist', 'build', 'studydocs']);
+// tree-sitter 查询采用 S-expression 树匹配语法，节点名对应 TypeScript grammar。
+// 只索引顶层可寻址声明与类成员：函数/类/接口/类型别名/枚举/方法/字段，以及
+// 值恰好为箭头函数或函数表达式的 const 声明；结果用于确定性的代码大纲。
 const SYMBOL_QUERY = String.raw`
   (function_declaration name: (identifier) @name) @definition.function
   (class_declaration name: (type_identifier) @name) @definition.class
@@ -27,6 +30,8 @@ const SYMBOL_QUERY = String.raw`
 `;
 
 export class TreeSitterIndex {
+  // 文件一律经 PathPolicy 读取（路径规范化、2MB 大小上限），本模块只做纯解析、
+  // 不做任何代码求值，确保只读代码定位不越过工作区间读取边界。
   private readonly cache = new Map<string, ParsedFile>();
   private readonly queries = new Map<'typescript' | 'tsx', Parser.Query>();
 
@@ -53,6 +58,7 @@ export class TreeSitterIndex {
     const parsed = await this.parse(workspaceRoot, relativePath);
     const row = line - 1;
     const col = column - 1;
+    // 命中同一位置时取跨度最小的符号（文本上最内层的定义），与编辑器符号定位习惯一致。
     return parsed.symbols
       .filter((symbol) => contains(symbol, row, col))
       .sort((left, right) => span(left) - span(right))[0];
@@ -64,6 +70,7 @@ export class TreeSitterIndex {
     }
     const parsed = await this.parse(workspaceRoot, relativePath);
     const point = { row: line - 1, column: column - 1 };
+    // 从命中位置所在的叶节点向上寻找最近的标识符祖先，覆盖大纲查询未捕获的引用/类型名位置。
     let node: Parser.SyntaxNode | null = parsed.tree.rootNode.descendantForPosition(point, point);
     while (node) {
       if (['identifier', 'type_identifier', 'property_identifier', 'private_property_identifier'].includes(node.type)) {
@@ -75,6 +82,8 @@ export class TreeSitterIndex {
   }
 
   async referencesByName(workspaceRoot: string, name: string, relative = '.'): Promise<CodeLocation[]> {
+    // 这是纯文本近似：匹配所有同名 identifier/type_identifier 节点，不做作用域或语义
+    // 解析，结果可能包含无关的同名标识符；只作为 LSP 不可用时的廉价降级。
     const policy = await PathPolicy.create(workspaceRoot);
     const files = await sourceFiles(policy, relative, 5_000);
     const locations: CodeLocation[] = [];
@@ -91,6 +100,7 @@ export class TreeSitterIndex {
   }
 
   async diagnostics(workspaceRoot: string, relativePath: string): Promise<CodeDiagnostic[]> {
+    // tree-sitter 把无法归约的输入标记为 ERROR 结点，此处视为语法错误并取前 100 条。
     const parsed = await this.parse(workspaceRoot, relativePath);
     return parsed.tree.rootNode.descendantsOfType('ERROR').slice(0, 100).map((node) => {
       const target = location(relativePath, node);
@@ -113,9 +123,11 @@ export class TreeSitterIndex {
     const file = await policy.readTextFile(relativePath, 2 * 1024 * 1024);
     const normalizedPath = path.relative(policy.workspaceRoot, file.canonicalPath).replaceAll('\\', '/');
     const hash = createHash('sha256').update(file.content).digest('hex');
+    // 缓存以“工作区根 + 规范化相对路径”为键、内容 hash 为校验，文件未变时直接复用解析树。
     const key = `${policy.workspaceRoot}\0${normalizedPath}`;
     const cached = this.cache.get(key);
     if (cached?.hash === hash) return cached;
+    // tsx/jsx 必须使用 JSX 方言解析器：<T> 泛型与 JSX 标签在两种语法下规则不同。
     const dialect = extension === '.tsx' || extension === '.jsx' ? 'tsx' : 'typescript';
     const language = TypeScript[dialect];
     const parser = new Parser();
@@ -160,6 +172,7 @@ async function walk(policy: PathPolicy, relative: string, files: string[], limit
   const directory = await policy.readDirectory(relative);
   for (const entry of directory.entries) {
     if (entry.isSymbolicLink()) continue;
+    // 目录名统一转小写匹配忽略列表，兼容 Windows 大小写不敏感文件系统。
     if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
     const child = relative === '.' ? entry.name : path.join(relative, entry.name);
     if (entry.isDirectory()) await walk(policy, child, files, limit);

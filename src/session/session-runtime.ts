@@ -37,6 +37,7 @@ export class SessionRuntime {
     const runtime = new SessionRuntime(agent, store);
     const events = await store.read();
     if (events.length === 0) {
+      // 新 Session 首次落盘 session.created，把正式工作区根目录写入事件，供后续 open 校验。
       const event = await store.append({ payload: { type: 'session.created', workspaceRoot: options.workspaceRoot } });
       await options.hooks?.observe(event);
     } else {
@@ -44,6 +45,7 @@ export class SessionRuntime {
       if (!created || created.payload.type !== 'session.created') {
         throw new Error('Session 缺少创建事件');
       }
+      // 拒绝跨工作区恢复：检查点与已恢复的工具结果绑定原工作区路径，套用到新工作区会指向错误文件。
       if (created.payload.workspaceRoot !== options.workspaceRoot) {
         throw new Error('Session 工作区与当前工作区不一致');
       }
@@ -97,6 +99,8 @@ export class SessionRuntime {
     }
   }
 
+  // steering 先进入队列，由下一模型请求前的 takeSteering 取走；同时落盘 turn.steered
+  // 事件，恢复时通过 pendingSteering 重建队列，保证 steering 不因重启丢失。
   async steer(message: string): Promise<void> {
     const normalized = message.trim();
     if (!normalized) throw new Error('Steering 内容不能为空');
@@ -138,7 +142,10 @@ function recoverCheckpoint(
   const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved');
   if (checkpointIndex < 0) return undefined;
   const checkpoint = checkpointFrom(events[checkpointIndex]?.payload);
+  // 仅 tools 阶段需要回填已完成工具结果；model 阶段说明该批次已进入模型步骤。
   if (!checkpoint || checkpoint.phase !== 'tools') return checkpoint;
+  // 恢复不变量：只合并检查点之后落盘的 tool.completed，且跳过检查点内已有 callId 的结果，
+  // 防止已完成工具被重复执行；按 callIndex 排序还原 Provider 消息的稳定顺序。
   const completedIds = new Set(checkpoint.items
     .filter((item) => item.type === 'tool_result')
     .map((item) => item.callId));
@@ -151,10 +158,12 @@ function recoverCheckpoint(
   if (recovered.length === 0) return checkpoint;
   const restored = structuredClone(checkpoint);
   restored.items.push(...recovered);
+  // 回补已发生但未计入检查点预算的工具执行数，避免恢复后超出发行预算。
   restored.toolCallsUsed += recovered.filter(countsAgainstBudget).length;
   return restored;
 }
 
+// 重建未消费的 steering：只有最后一个检查点之后记录的 turn.steered 才需要交给恢复后的 run。
 function pendingSteering(events: Awaited<ReturnType<JsonlEventStore['read']>>): string[] {
   const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved');
   return events.slice(checkpointIndex + 1)
@@ -166,6 +175,7 @@ function callIndex(checkpoint: AgentCheckpoint, callId: string): number {
   return call?.type === 'tool_call' ? call.callIndex : Number.MAX_SAFE_INTEGER;
 }
 
+// 这些错误码代表工具未真正执行（被拒、预算耗尽、未知工具、参数无效），不计入预算。
 function countsAgainstBudget(result: ConversationItem & { type: 'tool_result' }): boolean {
   return ![
     'approval_required',

@@ -49,6 +49,8 @@ export class ToolExecutor {
     private readonly registry: ToolRegistry,
     options: ToolExecutorOptions = {},
   ) {
+    // 回合级预算默认值：单回合工具调用数、单次执行时限与单次输出上限在此封顶，
+    // 即便调用方未提供 options，这些默认值也保证执行边界存在。
     this.maxCalls = options.maxCalls ?? 24;
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.maxOutputChars = options.maxOutputChars ?? 12_000;
@@ -83,6 +85,8 @@ export class ToolExecutor {
         data: { toolName: name },
       }), this.maxOutputChars);
     }
+    // deny-first：未知工具、预算、Schema 校验、Guardrail、审批依次为执行前的安全网关，
+    // 任一拒绝即返回，确保在可能产生副作用的 tool.execute 之前完成全部检查。
     if (this.callCount >= this.maxCalls) {
       const decision = deniedDecision('budget_exhausted', '已达到本回合工具调用预算', args);
       await onDecision?.(decision);
@@ -102,6 +106,8 @@ export class ToolExecutor {
 
     let decision = await this.actionGuardrail.evaluate(tool, args, context);
     if (decision.decision === 'require_approval') {
+      // 审批请求先交给两个 onApprovalRequest 钩子向 UI 暴露，再查记忆与 decider；
+      // 命中记忆（approvalStore）时不再询问 decider，避免对完全相同参数重复打扰用户。
       const request = createApprovalRequest({
         id: context.approvalContext?.callId ?? `${tool.name}:${Date.now()}`,
         sessionId: context.approvalContext?.sessionId,
@@ -127,6 +133,8 @@ export class ToolExecutor {
           : { ...decision, decision: 'deny', reasonCode: selected.ruleId ?? 'approval_denied', reason: selected.reason ?? '用户拒绝动作' };
       }
     }
+    // 审批等待期间其它并行工具可能已占用预算，allow 后再次校验 maxCalls，
+    // 避免同一回合内工具调用数静默超预算。
     let reservedCall = false;
     if (decision.decision === 'allow' && this.callCount >= this.maxCalls) {
       decision = deniedDecision('budget_exhausted', '已达到本回合工具调用预算', args);
@@ -135,6 +143,7 @@ export class ToolExecutor {
       reservedCall = true;
     }
     try {
+      // 先登记决策再执行：onDecision 抛错时撤回刚预留的 callCount，避免回调失败吃掉预算。
       await onDecision?.(decision);
     } catch (error) {
       if (reservedCall) this.callCount -= 1;
@@ -155,15 +164,20 @@ export class ToolExecutor {
         data: decisionData(decision),
       }), this.maxOutputChars);
     }
+    // 审批与决策完成后、真正执行前再次检查 abort，避免取消后仍启动工具。
     if (context.signal.aborted) {
       if (reservedCall) this.callCount -= 1;
       return wrap(decision, toolFailure('cancelled', 'cancelled', '工具调用已取消'), this.maxOutputChars);
     }
 
+    // 工具收到的是本地 signal 而非外部 signal：超时与外部取消共用同一 controller，
+    // 两者都会中止工具，由 controlState 记录最终是 timedOut 还是 cancelled。
     const controller = new AbortController();
     const controlState = { timedOut: false, cancelled: false };
 
     try {
+      // 执行使用审批快照 normalizedArguments 而非原始调用参数：Guardrail 可能已改写或
+      // 清除部分参数，原始参数不得绕过 Guardrail 审批内容执行。
       const result = await withExecutionControls(
         Promise.resolve().then(() => tool.execute(
           decision.normalizedArguments,
@@ -176,6 +190,8 @@ export class ToolExecutor {
       );
       return wrap(decision, result, this.maxOutputChars);
     } catch {
+      // 超时标记 retryable（可能发生在副作用写入前）；取消/普通失败不标记，
+      // 避免对已产生副作用的工具重复执行。
       if (controlState.timedOut) {
         return wrap(decision, toolFailure('timeout', 'timeout', '工具执行超时', {
           retryable: true,
@@ -197,6 +213,10 @@ export class ToolExecutor {
     this.callCount = 0;
   }
 
+  /**
+   * 从持久化预算恢复本轮已用调用数。
+   * @throws callsUsed 非整数或小于 0 时抛出错误。
+   */
   restoreBudget(callsUsed: number): void {
     if (!Number.isInteger(callsUsed) || callsUsed < 0) throw new Error('工具预算状态无效');
     this.callCount = callsUsed;
@@ -213,6 +233,8 @@ function wrap(
   result: ToolResult,
   maxOutputChars: number,
 ): ToolInvocationOutcome {
+  // 工具输出作为不可信证据回填，必须经 hardenToolResult 截断与脱敏；
+  // 裸输出不得直接进入 System Policy 或权限集合。
   return { decision, result: hardenToolResult(result, maxOutputChars) };
 }
 
@@ -224,6 +246,8 @@ function deniedDecision(
   return { decision: 'deny', reasonCode, reason, normalizedArguments: structuredClone(args) };
 }
 
+// 命中路径策略错误码前缀时以 pathPolicyCode 单独呈现，便于 UI 区分路径类拒绝；
+// 前缀清单需与 path-policy 的错误码保持同步，未列出的 reasonCode 一律归为 guardrailReasonCode。
 function decisionData(decision: ProposedActionDecision): Record<string, string> {
   if (/^(?:invalid_path|path_|absolute_path|unc_path|device_path|drive_relative_path|alternate_data_stream|short_name|reserved_name|trailing_dot_or_space|git_metadata_denied|private_metadata_denied|reparse_point_denied|not_a_file|not_a_directory|file_too_large|workspace_changed|identity_unavailable|handle_identity_mismatch)/u.test(decision.reasonCode)) {
     return { pathPolicyCode: decision.reasonCode };
@@ -240,6 +264,8 @@ async function withExecutionControls<T>(
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abort: (() => void) | undefined;
+  // 超时与取消各自用 reject 的 promise 参与 race，谁先到谁决定结果；
+  // 两者都会调 controller.abort() 终止工具，但用 state 标志区分最终归类。
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       state.timedOut = true;

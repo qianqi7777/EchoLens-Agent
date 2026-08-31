@@ -18,6 +18,7 @@ async function main(): Promise<void> {
   const protocols = parseProtocols(process.env.GATEWAY_PROTOCOLS);
   const defaultProtocol = parseDefaultProtocol(process.env.GATEWAY_DEFAULT_PROTOCOL, protocols);
   const modelId = process.env.GATEWAY_MODEL?.trim() || 'deepseek-chat';
+  // 人工审批密钥必须显式配置；缺失即拒绝启动，防止设备码审批被绕过。
   const approvalSecret = required('GATEWAY_DEVICE_APPROVAL_SECRET');
   const upstreams = buildUpstreams(modelId, protocols);
   const model: GatewayModel = {
@@ -50,6 +51,8 @@ async function main(): Promise<void> {
     ),
     models: [model],
     upstreams,
+    // 审计日志只记录请求号/账号/模型/状态/token 计数等元数据，
+    // 不含 access/refresh token 或上游 API Key，构成日志数据边界。
     audit: (event) => console.log(JSON.stringify({ ...event, at: new Date().toISOString() })),
   };
 
@@ -77,6 +80,8 @@ function parseDefaultProtocol(value: string | undefined, protocols: GatewayProto
   return value;
 }
 
+// 上游一律取自服务端固定的环境变量配置，客户端无法指定目标地址或注入凭据；
+// 缺少对应 API Key 时启动即失败 (fail-closed)，避免暴露半配置的认证边界。
 function buildUpstreams(modelId: string, protocols: GatewayProtocol[]): Record<string, GatewayUpstream> {
   return Object.fromEntries(protocols.map((protocol) => {
     const suffix = protocol === 'responses' ? 'RESPONSES' : 'CHAT';

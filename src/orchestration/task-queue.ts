@@ -59,6 +59,7 @@ export interface EnqueueTaskInput {
 }
 
 export class PersistentTaskQueue {
+  // 队列文件是唯一持久化状态，所有变更必须经 serial() 串行化，保证单写者、不丢失更新。
   private writeQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -66,6 +67,8 @@ export class PersistentTaskQueue {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
+  // 崩溃恢复：认领会写入 leaseExpiresAt，进程崩溃后任务停留在 running 且租约过期。
+  // 这里把过期任务重新置为 pending（除非已请求取消），等待下一个 Worker 认领。
   async recoverExpired(): Promise<number> {
     return this.serial(async () => {
       const file = await this.readUnlocked();
@@ -106,6 +109,8 @@ export class PersistentTaskQueue {
     });
   }
 
+  // 认领即写入租约：Worker 需在租约期内持续 heartbeat，否则任务会被 recoverExpired 移交其他 Worker；
+  // attempts 在认领时递增，用于重试计数与 release 时回退。
   async claim(workerId: string, leaseMs = 60_000): Promise<BackgroundTaskRecord | undefined> {
     if (!workerId.trim()) throw new Error('workerId 不能为空');
     boundedInteger(leaseMs, 1_000, 30 * 60_000, 'leaseMs');
@@ -218,12 +223,16 @@ export class PersistentTaskQueue {
     });
   }
 
+  // serial() 把本次读改写排到上一次写之后执行，claim/complete/… 不会交错覆盖。
+  // 读方法(get/list)同样等待 writeQueue，保证不会读到写了一半的队列；写失败不阻塞后续任务。
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.then(operation);
     this.writeQueue = next.catch(() => undefined);
     return next;
   }
 
+  // 队列文件来自磁盘，是不可信输入，读入后必须经 isQueueFile 校验再使用。
+  // 缺失(ENOENT)视为空队列；结构损坏则抛错失败关闭，绝不静默重置，避免丢失任务记录。
   private async readUnlocked(): Promise<QueueFile> {
     try {
       const parsed = JSON.parse(await readFile(this.filePath, 'utf8')) as unknown;
@@ -237,6 +246,8 @@ export class PersistentTaskQueue {
     }
   }
 
+  // 落盘用同目录临时文件 + rename：进程写一半崩溃也不会留下半截队列文件。
+  // 写入前先脱敏并以 0o600 权限保存，避免队列携带的 evidence 泄漏给其他进程。
   private async write(file: QueueFile): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
@@ -294,6 +305,7 @@ function boundedInteger(value: number, min: number, max: number, name: string): 
   return value;
 }
 
+// 校验函数把磁盘 JSON 当作不可信输入逐字段核对，防止被篡改或损坏的任务记录进入运行路径。
 function isQueueFile(value: unknown): value is QueueFile {
   if (!value || typeof value !== 'object') return false;
   const file = value as Partial<QueueFile>;

@@ -108,6 +108,8 @@ test('副作用工具不会与前后只读波次交叉', async () => {
 
   await scheduler.execute(calls, registry, async (item) => {
     timeline.push(`start:${item.callId}`);
+    // write 的耗时刻意短于 read（5ms vs 20ms）：若调度器未显式隔离副作用工具，
+    // 更快的 write 会先完成，start/end 顺序断言就会失败。
     await delay(item.name === 'write' ? 5 : 20);
     timeline.push(`end:${item.callId}`);
     return item.callId;
@@ -139,6 +141,8 @@ test('并行工具不能穿透 ToolExecutor 调用预算', async () => {
     signal: new AbortController().signal,
   };
 
+  // 10 个 invoke 并发竞争 2 次预算：预算的检查与占用必须对高并发安全，
+  // 存在竞态时实际执行数会超过 maxCalls。
   const outcomes = await Promise.all(Array.from({ length: 10 }, () => executor.invokeWithDecision(
     'budgeted_read',
     {},
@@ -169,6 +173,8 @@ function parallelProvider(requests: ProviderRequest[]): ModelProvider {
               id: `item-${index}`,
               callId: `call-${index}`,
               name: 'delayed_read',
+              // delay 随 index 递减：若调度器串行执行完成顺序必为 [0..9]，
+              // 并发执行时顺序必然不同，断言据此区分两种行为。
               arguments: { index, delay: (10 - index) * 3 },
               callIndex: index,
             })),

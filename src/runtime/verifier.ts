@@ -20,6 +20,8 @@ export function verifyClaims(claims: Claim[], knownNodeIds: ReadonlySet<string>,
   const unresolved: string[] = [];
   let rejected = 0;
   for (const claim of claims) {
+    // 必须同时命中已知节点与已知证据才接受（fail-closed），缺少任一项即拒绝。
+    // 未经验证的文本不作为事实，最终以 unresolved 暴露给调用方核查。
     const hasNode = Boolean(claim.nodeId && knownNodeIds.has(claim.nodeId));
     const hasEvidence = claim.evidenceIds.some((id) => knownEvidenceIds.has(id));
     if (hasNode && hasEvidence) accepted.push({ ...claim, confidence: clamp01(claim.confidence) });
@@ -31,6 +33,7 @@ export function verifyClaims(claims: Claim[], knownNodeIds: ReadonlySet<string>,
   return { accepted, unresolved: [...new Set(unresolved)], trace: [{ type: 'warning', message: `Verifier：检查 ${claims.length} 条，保留 ${accepted.length} 条，拒绝 ${rejected} 条` }] };
 }
 
+// 置信度不是有限数字时归 0（fail-closed），并夹到 [0,1]，避免异常置信度向后续流程传播。
 export function clamp01(value: unknown): number {
   const number = typeof value === 'number' && Number.isFinite(value) ? value : 0;
   return Math.max(0, Math.min(1, number));

@@ -38,6 +38,12 @@ export interface JsonSchemaNode {
   additionalProperties?: boolean | JsonSchemaNode;
 }
 
+/**
+ * 顶层对象 Schema。
+ *
+ * `additionalProperties` 必填：即使不放开额外属性也必须显式声明 `false`，
+ * 避免校验器默认放行未知字段，导致工具入参超出预期。
+ */
 export interface JsonSchema extends JsonSchemaNode {
   type: 'object';
   properties?: Record<string, JsonSchemaNode>;
@@ -57,6 +63,12 @@ export interface ToolSpec {
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
 }
 
+/**
+ * 工具执行上下文。
+ *
+ * `allowedPermissions` 是本次运行实际被授予的权限集合；`approvalRequiredPermissions`
+ * 中的权限一旦被工具用到，必须已经过审批，工具自身不能绕过。`signal` 用于取消。
+ */
 export interface ToolContext {
   workspaceRoot: string;
   allowedPermissions: ReadonlySet<Permission>;

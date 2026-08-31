@@ -23,6 +23,7 @@ test('后台任务命令共享解析创建、列出、取消和恢复', async ()
   assert.match(listed.lines[0] ?? '', /test\/worktree/u);
 });
 
+// 用内存桩代替真实队列，只验证命令解析与参数传递，不引入持久化 I/O。
 class RecordingTaskCommands implements BackgroundTaskCommands {
   readonly tasks: BackgroundTaskRecord[] = [];
   enqueued?: { profile: string; objective: string; isolation: BackgroundTaskIsolation };

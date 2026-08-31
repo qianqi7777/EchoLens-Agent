@@ -1,3 +1,6 @@
+// Provider 连通性验证脚本：用真实模型跑一次“强制工具调用 → 回填结果 → 收尾”的两轮对话。
+// 只输出结构化 JSON 摘要（协议、停止原因、是否含 requestId/usage），用于人工或 CI 确认
+// 某个 baseUrl/apiKey/model/protocol 组合可用。需要 AGENT_VERIFY_* 环境变量。
 import {
   OpenAICompatibleProvider,
   textMessage,
@@ -7,10 +10,12 @@ import {
   type ToolResultItem,
 } from '../src/runtime/index.js';
 
+// 凭据只从环境变量读取，脚本本身不接受命令行参数，避免凭据进 shell 历史。
 const baseUrl = required('AGENT_VERIFY_BASE_URL');
 const apiKey = required('AGENT_VERIFY_API_KEY');
 const model = required('AGENT_VERIFY_MODEL');
 const protocol = protocolValue(process.env.AGENT_VERIFY_PROTOCOL);
+// 置 1 时把“第一轮必须产出工具调用”当作失败条件，用于验证 tool calling 能力。
 const requireToolCall = process.env.AGENT_VERIFY_REQUIRE_TOOL_CALL === '1';
 
 const provider = new OpenAICompatibleProvider({
@@ -44,6 +49,8 @@ if (requireToolCall && toolCalls.length === 0) {
   throw new Error('Provider did not return the required tool call.');
 }
 
+// 有工具调用就进入第二轮：把工具结果回填后确认 Provider 还能产出最终消息，
+// 这一轮同时验证多轮对话与 tool result 回填的协议路径。
 let finalStopReason = first.stopReason;
 if (toolCalls.length > 0) {
   const results = toolCalls.map(toolResult);
@@ -57,6 +64,7 @@ if (toolCalls.length > 0) {
   }
 }
 
+// 摘要不含任何消息正文，只含元数据；凭据永不输出。
 console.log(JSON.stringify({
   ok: true,
   protocol,
@@ -94,6 +102,7 @@ function required(name: string): string {
   return value;
 }
 
+// 未指定时默认走 chat_completions：它是兼容面最广的协议，responses 需要显式声明。
 function protocolValue(value: string | undefined): OpenAICompatibleProtocol {
   if (value === 'responses') return 'responses';
   return 'chat_completions';

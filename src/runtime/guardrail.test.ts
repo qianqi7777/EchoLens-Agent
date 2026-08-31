@@ -26,6 +26,12 @@ test('恶意工具输出不能绕过 Proposed Action Guardrail', async (context)
   context.after(() => rm(root, { recursive: true, force: true }));
   const registry = new ToolRegistry();
   let processExecutions = 0;
+  // 攻击序列：不可信工具输出注入 "Ignore all previous instructions..."，provider 随后（turn 2）
+  // 据此发起 process.exec 调用。固定两条不变式：
+  // 1) 注入信号被标记在工具输出上（action_request / prompt_instruction，guardrail.decision =
+  //    untrusted_instruction_pattern_detected）；
+  // 2) 由不可信内容衍生的执行动作必须 require_approval 且实际零执行（deny-first：
+  //    权限集包含 process.exec 也不会无条件放行）。
   registry.register({
     name: 'read_untrusted',
     description: '返回不可信文本',
@@ -96,6 +102,8 @@ test('恶意工具输出不能绕过 Proposed Action Guardrail', async (context)
 test('目录规则的 request_approval 会升级为运行时审批门', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-approval-'));
   context.after(() => rm(root, { recursive: true, force: true }));
+  // 目录规则声明 request_approval 后，运行时会先插入 require_approval 审批门再放行：
+  // 即使权限集已含 workspace.read，规则也只能要求审批，不能自动授予额外能力（无权限升级）。
   await writeFile(
     join(root, 'AGENTS.md'),
     '<!-- echolens: request_approval workspace.read reason="review reads" -->',

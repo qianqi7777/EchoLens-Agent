@@ -10,9 +10,12 @@ export class EvalResultStore {
   constructor(readonly filePath: string) {}
 
   async append(record: EvalRunRecord): Promise<void> {
+    // 追加串行化：持久化顺序必须与调用顺序一致，单条失败不阻塞后续追加。
     const operation = this.writeQueue.then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true });
       this.handle ??= await open(this.filePath, 'a+');
+      // 结果文件会持久化候选输出，其中可能包含答案与运行环境信息；落盘前整体脱敏，
+      // 避免 secrets 或用户数据写入 result.jsonl。
       const sanitized = redactValueWithReport(record).value;
       await this.handle.appendFile(`${JSON.stringify(sanitized)}\n`, 'utf8');
       await this.handle.datasync();
@@ -22,6 +25,7 @@ export class EvalResultStore {
   }
 
   async read(): Promise<EvalRunRecord[]> {
+    // 先等待所有挂起的追加落盘，保证读到的是最新已持久化的区间。
     await this.writeQueue;
     try {
       const text = await readFile(this.filePath, 'utf8');
