@@ -121,6 +121,7 @@ if (!model) {
       model: status.model ?? 'unknown',
       route: status.route ?? 'unknown',
       privacy: status.privacy,
+      maxContextTokens: model.capabilities.maxContextTokens,
       sessionId: session.sessionId,
       workspaceRoot,
       run: (prompt, signal, onEvent) => session.run(prompt, signal, onEvent),

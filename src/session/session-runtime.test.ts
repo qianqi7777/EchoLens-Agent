@@ -76,7 +76,7 @@ test('工具执行后退出可从同一 Turn 恢复且不重复工具', async (c
     finalProvider(requests),
     registry,
     new ToolExecutor(registry),
-    { workspaceRoot: root, maxSteps: 2 },
+    { workspaceRoot: root, maxSteps: 1 },
   );
   const resumedSession = await SessionRuntime.open(resumedAgent, {
     rootDirectory: join(root, 'sessions'),

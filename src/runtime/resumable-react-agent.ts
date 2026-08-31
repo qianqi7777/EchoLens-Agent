@@ -169,7 +169,10 @@ export class ReactAgent {
       takeSteering: runtime.takeSteering,
       hooks: this.options.hooks,
     };
-    this.executor.restoreBudget(checkpoint.toolCallsUsed);
+    // A resume is an explicit request for another bounded execution slice.
+    // Completed tool results stay in the checkpoint, while runtime budgets are
+    // refreshed so step/tool budget pauses can actually make progress.
+    this.executor.resetBudget();
     await emit(machine, runtime.eventSink, {
       payload: { type: 'run.started', model: this.model.model, resumed: true },
     });
@@ -185,7 +188,8 @@ export class ReactAgent {
     const tools = providerTools(this.model, this.registry);
     const runtimePermissions = this.options.permissions ?? new Set<Permission>(['workspace.read']);
 
-    while (machine.step < (this.options.maxSteps ?? 8)) {
+    const stepLimit = machine.step + (this.options.maxSteps ?? 8);
+    while (machine.step < stepLimit) {
       if (signal?.aborted) return this.cancel(machine, eventSink, signal.reason);
 
       if (machine.phase === 'tools') {
