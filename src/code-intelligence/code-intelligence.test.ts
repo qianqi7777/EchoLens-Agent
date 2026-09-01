@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -46,11 +46,14 @@ test('tree-sitter 提取符号并在 LSP 不可用时完成定义、引用和诊
 });
 
 test('真实 TypeScript Language Server 返回工作区相对定义、引用和诊断', async (t) => {
-  const root = await fixture();
+  const actualRoot = await fixture();
+  const root = `${actualRoot}-alias`;
+  await symlink(actualRoot, root, process.platform === 'win32' ? 'junction' : 'dir');
   const client = new TypeScriptLspClient(root, { requestTimeoutMs: 15_000 });
   t.after(async () => {
     await client.close();
     await rm(root, { recursive: true, force: true });
+    await rm(actualRoot, { recursive: true, force: true });
   });
   const usage = "export const message = greet('Echo');";
   const column = usage.indexOf('greet') + 1;
@@ -65,7 +68,9 @@ test('真实 TypeScript Language Server 返回工作区相对定义、引用和�
   assert.ok(references.some((item) => item.path === 'src/usage.ts'));
   assert.ok(diagnostics.every((item) => item.path === 'src/type-error.ts' && item.source === 'lsp'));
   // 校验所有返回位置均为工作区相对路径，不泄露临时根目录的绝对路径。
-  assert.ok([...definitions, ...references, ...diagnostics].every((item) => !item.path.includes(root)));
+  assert.ok([...definitions, ...references, ...diagnostics].every(
+    (item) => !item.path.includes(root) && !item.path.includes(actualRoot),
+  ));
 });
 
 async function fixture(): Promise<string> {

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -40,7 +41,7 @@ export class TypeScriptLspClient {
   private closed = false;
 
   constructor(
-    private readonly workspaceRoot: string,
+    private workspaceRoot: string,
     private readonly options: TypeScriptLspClientOptions = {},
   ) {}
 
@@ -156,6 +157,13 @@ export class TypeScriptLspClient {
   }
 
   private async start(): Promise<void> {
+    try {
+      // LSP 进程、DocumentUri 与返回 Location 必须共享同一个规范根；否则 Windows
+      // 短路径或 Junction 别名会让同一文件在 URI 回转后被误判为工作区外路径。
+      this.workspaceRoot = await realpath(this.workspaceRoot);
+    } catch {
+      throw new CodeIntelligenceError('lsp_unavailable', '无法解析 TypeScript 工作区根目录');
+    }
     const executable = this.options.executable ?? process.execPath;
     const cliPath = this.options.cliPath ?? resolveLanguageServerCli();
     let child: ChildProcessWithoutNullStreams;
@@ -275,7 +283,9 @@ export class TypeScriptLspClient {
       const absolute = fileURLToPath(uri);
       const relative = path.relative(path.resolve(this.workspaceRoot), path.resolve(absolute));
       // LSP 返回的位置是不可信证据：工作区外的 URI 直接丢弃，只保留工作区内相对路径。
-      if (relative.startsWith('..') || path.isAbsolute(relative)) return undefined;
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        return undefined;
+      }
       return {
         path: relative.replaceAll('\\', '/'),
         startLine: range.start.line + 1,
