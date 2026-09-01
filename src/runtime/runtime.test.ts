@@ -133,6 +133,8 @@ test('workspace tools reject paths outside the workspace', async () => {
 });
 
 test('ReactAgent keeps complete recent turns, unique IDs, and provider capability boundaries', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-runtime-history-'));
+  await writeFile(join(workspace, 'AGENTS.md'), '# Runtime test instructions\n');
   const requests: ProviderRequest[] = [];
   const provider: ModelProvider = {
     model: 'history-model',
@@ -182,7 +184,7 @@ test('ReactAgent keeps complete recent turns, unique IDs, and provider capabilit
   const registry = new ToolRegistry();
   registerWorkspaceTools(registry);
   const agent = new ReactAgent(provider, registry, new ToolExecutor(registry), {
-    workspaceRoot: process.cwd(),
+    workspaceRoot: workspace,
     maxHistoryTurns: 2,
   });
 
