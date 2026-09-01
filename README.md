@@ -1,7 +1,7 @@
 # EchoLens Agent
 
-一个从零开始、模型中立的本地代码 Agent。v0.6 提供动态评测、持久后台任务和
-受限子 Agent，并延续 Docker Sandbox、安全编辑闭环与可恢复会话。
+一个从零开始、模型中立的本地代码 Agent。v0.7 加固了持久队列、可恢复会话和
+Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实现。
 
 ## 已有能力
 
@@ -12,7 +12,7 @@
 - 提供 Gateway 登录状态、模型能力目录和 OpenAPI 客户端契约
 - 提供独立 Gateway MVP：Device Flow、Token 刷新/撤销、固定上游代理、SSE、用量和限流
 - 执行 `list_files`、`read_file`、`grep` 只读工具
-- 使用单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
+- 使用带跨进程锁的单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
 - 分层加载 `AGENTS.md`，项目规则只能收紧权限，不能提升到 System
 - 支持 `full-context`、`evidence`、`metadata` 三种上下文隐私模式
@@ -31,8 +31,10 @@
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
 - 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
 - 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
-- 提供持久后台任务队列、租约恢复、显式取消/恢复和状态通知
+- 提供带跨进程锁的持久后台任务队列、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
+- Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
+- TypeScript 启用未使用代码、数组越界、隐式返回、Switch 穿透和 Override 等额外静态检查
 - 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
 
 ## 快速开始
@@ -118,11 +120,13 @@ tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、�
 ## 验证
 
 ```bash
-npm run check
-npm run test:performance
-npm run verify:docker
+npm run check:ci
+npm run gateway:build
+npm run eval:smoke
 npm run audit
 ```
+
+真实 Docker Sandbox 验收仍使用 `npm run verify:docker`，需要本机预先准备镜像。
 
 测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
 由 `package.json` 和 `.github/workflows/ci.yml` 定义。
@@ -149,6 +153,7 @@ src/
     tool-scheduler.ts    有界并行只读调度与副作用屏障
     tool-executor.ts     权限、预算、超时和输出限制
     tool-registry.ts     工具注册表
+    file-lock.ts         Session 与后台队列共用的跨进程文件锁
     workspace-tools.ts   安全的只读代码工具
     sandbox-tools.ts     Sandbox Shell、测试、构建与安装工具
     verifier.ts          声明验证基础
@@ -166,8 +171,8 @@ contracts/
 
 ## 当前边界
 
-v0.6 已实现 Eval、持久后台任务和同进程受限子 Agent。A2A 暂不接入：当前编排没有跨服务、
-跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
+v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
+A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和
 可执行生命周期 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
 

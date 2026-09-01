@@ -1,4 +1,4 @@
-import type { Permission, ToolContext, ToolResult } from './types.js';
+import type { ToolContext, ToolResult } from './types.js';
 import { ToolRegistry } from './tool-registry.js';
 import { toolFailure } from './tool-result.js';
 import { hardenToolResult } from './tool-output.js';

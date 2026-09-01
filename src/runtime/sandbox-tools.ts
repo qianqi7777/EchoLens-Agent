@@ -1,6 +1,7 @@
 import type { JsonSchema, JsonSchemaNode, ToolContext, ToolResult } from './types.js';
 import { ToolRegistry } from './tool-registry.js';
 import { toolFailure, toolSuccess } from './tool-result.js';
+import { objectSchema } from './tool-schema.js';
 import { runVerification, selectVerificationPlan, type EditVerificationResult } from './verification.js';
 import { applyStructuredPatch } from './workspace-tools.js';
 import { previewPatch, type PatchPreview } from './structured-patch.js';
@@ -41,7 +42,7 @@ export function registerSandboxTools(
     description: '在高隔离 Sandbox 中执行单个 argv 命令；不经过宿主 Shell，默认禁止网络。',
     permission: 'process.exec',
     effect: 'process',
-    inputSchema: schema({
+    inputSchema: objectSchema({
       executable: { type: 'string', pattern: '^[A-Za-z0-9._+-]{1,128}$' },
       args: argvProperty,
       cwd: pathProperty,
@@ -56,7 +57,7 @@ export function registerSandboxTools(
     description: '按 Artifact Bundle ID 应用 Sandbox 生成的结构化 Patch；仍需写审批、Checkpoint 和后状态校验。',
     permission: 'workspace.write',
     effect: 'write',
-    inputSchema: schema({
+    inputSchema: objectSchema({
       bundleId: { type: 'string', pattern: '^[a-f0-9-]{36}$' },
     }, ['bundleId']),
     execute: applySandboxPatch,
@@ -82,7 +83,7 @@ export function registerSandboxTools(
     description: '请求在 Sandbox 中安装 npm 包；需要网络权限与域名策略，未配置时失败关闭。',
     permission: 'network.request',
     effect: 'network',
-    inputSchema: schema({
+    inputSchema: objectSchema({
       packages: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 256, pattern: '^(?!-)[A-Za-z0-9@._/~-]+$' } },
       dev: { type: 'boolean' },
       cwd: pathProperty,
@@ -96,7 +97,7 @@ export function registerSandboxTools(
     description: '根据改动文件在高隔离 Sandbox 中运行受控类型检查和测试。',
     permission: 'process.exec',
     effect: 'process',
-    inputSchema: schema({
+    inputSchema: objectSchema({
       changedFiles: { type: 'array', maxItems: 128, items: pathProperty },
     }, []),
     execute: (args, context) => executeVerification(sandbox, args, context, options),
@@ -330,7 +331,7 @@ function verificationResult(
 }
 
 function scriptSchema(): JsonSchema {
-  return schema({
+  return objectSchema({
     script: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9:_-]+$' },
     args: argvProperty,
     cwd: pathProperty,
@@ -345,8 +346,4 @@ function renderArtifacts(artifacts: SandboxExecuteResult['artifacts']): string {
     const change = artifact.change ? ` ${artifact.change}` : '';
     return `${artifact.kind}${change}: ${artifact.path} (${artifact.size ?? 0} bytes, ${artifact.sha256 ?? 'no-hash'})`;
   }).join('\n');
-}
-
-function schema(properties: Record<string, JsonSchemaNode>, required: string[]): JsonSchema {
-  return { type: 'object', properties, required, additionalProperties: false };
 }

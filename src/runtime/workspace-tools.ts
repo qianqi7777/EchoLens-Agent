@@ -1,7 +1,8 @@
 import * as path from 'node:path';
-import type { JsonSchema, JsonSchemaNode, ToolContext, ToolResult } from './types.js';
+import type { JsonSchemaNode, ToolContext, ToolResult } from './types.js';
 import { ToolRegistry } from './tool-registry.js';
 import { toolFailure, toolSuccess } from './tool-result.js';
+import { objectSchema } from './tool-schema.js';
 import { PathPolicy, PathPolicyError } from './path-policy.js';
 import { applyPatch, PatchError, saveEditCheckpoint } from './structured-patch.js';
 
@@ -36,7 +37,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     description: '读取工作区内文件的指定行范围。',
     permission: 'workspace.read',
     observation: { type: 'workspace.file', operation: 'read' },
-    inputSchema: schema({
+    inputSchema: objectSchema({
       path: pathProperty,
       start: { type: 'integer', minimum: 1, maximum: 1_000_000 },
       end: { type: 'integer', minimum: 1, maximum: 1_000_000 },
@@ -48,7 +49,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     description: '在工作区源码中搜索文本，跳过供应商和构建目录。',
     permission: 'workspace.read',
     observation: { type: 'workspace.file', operation: 'search' },
-    inputSchema: schema({
+    inputSchema: objectSchema({
       pattern: { type: 'string', minLength: 1, maxLength: 2000 },
       path: pathProperty,
     }, ['pattern']),
@@ -59,7 +60,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     description: '列出工作区内的源码文件，帮助 Agent 建立目录上下文。',
     permission: 'workspace.read',
     observation: { type: 'workspace.file', operation: 'list' },
-    inputSchema: schema({ path: pathProperty }, []),
+    inputSchema: objectSchema({ path: pathProperty }),
     execute: listFiles,
   });
   registry.register({
@@ -67,7 +68,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     description: '预览并应用 UTF-8 文本文件的结构化 Patch；每次写入都需要显式审批。',
     permission: 'workspace.write',
     effect: 'write',
-    inputSchema: schema({
+    inputSchema: objectSchema({
       patch: {
         type: 'object',
         properties: {
@@ -220,10 +221,6 @@ async function* walkSourceFiles(
     if (entry.isDirectory()) yield* walkSourceFiles(policy, child, signal);
     else if (entry.isFile() && sourceExtensions.has(path.extname(entry.name).toLowerCase())) yield child;
   }
-}
-
-function schema(properties: Record<string, JsonSchemaNode>, required: string[]): JsonSchema {
-  return { type: 'object', properties, required, additionalProperties: false };
 }
 
 function errorResult(content: string): ToolResult {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, stat, truncate, type FileHandle } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { redactValueWithReport } from '../providers/redaction.js';
+import { acquireFileLock, type FileLock } from '../runtime/file-lock.js';
 import {
   AGENT_EVENT_VERSION,
   type AgentEvent,
@@ -19,6 +20,7 @@ export interface JsonlEventStoreOptions {
   flushEachEvent?: boolean;
   now?: () => Date;
   eventId?: () => string;
+  lockTimeoutMs?: number;
 }
 
 export interface SessionDescriptor {
@@ -43,8 +45,10 @@ export class JsonlEventStore implements AgentEventSink {
   private readonly flushEachEvent: boolean;
   private readonly now: () => Date;
   private readonly createEventId: () => string;
+  private readonly lockTimeoutMs: number;
   private readonly ready: Promise<void>;
   private handle?: FileHandle;
+  private lock?: FileLock;
   private writeQueue: Promise<unknown> = Promise.resolve();
   private lastSeq = 0;
   private closed = false;
@@ -56,6 +60,7 @@ export class JsonlEventStore implements AgentEventSink {
     this.flushEachEvent = options.flushEachEvent ?? true;
     this.now = options.now ?? (() => new Date());
     this.createEventId = options.eventId ?? randomUUID;
+    this.lockTimeoutMs = options.lockTimeoutMs ?? 0;
     this.ready = this.initialize(rootDirectory);
   }
 
@@ -97,15 +102,33 @@ export class JsonlEventStore implements AgentEventSink {
   }
 
   async close(): Promise<void> {
+    let failure: unknown;
     try {
       await this.writeQueue;
       await this.ready;
+    } catch (error) {
+      failure = error;
     } finally {
       this.closed = true;
-      await this.handle?.datasync();
-      await this.handle?.close();
+      try {
+        await this.handle?.datasync();
+      } catch (error) {
+        failure ??= error;
+      }
+      try {
+        await this.handle?.close();
+      } catch (error) {
+        failure ??= error;
+      }
       this.handle = undefined;
+      try {
+        await this.lock?.release();
+      } catch (error) {
+        failure ??= error;
+      }
+      this.lock = undefined;
     }
+    if (failure) throw failure;
   }
 
   static async list(rootDirectory: string): Promise<SessionDescriptor[]> {
@@ -131,10 +154,18 @@ export class JsonlEventStore implements AgentEventSink {
   // 避免恢复与写入交错产生新的不完整行。
   private async initialize(rootDirectory: string): Promise<void> {
     await mkdir(rootDirectory, { recursive: true });
-    await recoverTail(this.filePath);
-    const events = await readCompleteEvents(this.filePath);
-    this.lastSeq = events.at(-1)?.seq ?? 0;
-    this.handle = await open(this.filePath, 'a+');
+    const lock = await acquireFileLock(`${this.filePath}.lock`, { timeoutMs: this.lockTimeoutMs });
+    this.lock = lock;
+    try {
+      await recoverTail(this.filePath);
+      const events = await readCompleteEvents(this.filePath);
+      this.lastSeq = events.at(-1)?.seq ?? 0;
+      this.handle = await open(this.filePath, 'a+');
+    } catch (error) {
+      this.lock = undefined;
+      await lock.release().catch(() => undefined);
+      throw error;
+    }
   }
 }
 

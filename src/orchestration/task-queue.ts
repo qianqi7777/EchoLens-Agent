@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { redactValueWithReport } from '../providers/redaction.js';
+import { withFileLock, type FileLockOptions } from '../runtime/file-lock.js';
 
 export type BackgroundTaskState =
   | 'pending'
@@ -59,13 +60,17 @@ export interface EnqueueTaskInput {
 }
 
 export class PersistentTaskQueue {
-  // 队列文件是唯一持久化状态，所有变更必须经 serial() 串行化，保证单写者、不丢失更新。
+  // 实例内队列与文件锁共同保证单写者：前者处理同对象并发，后者覆盖多实例和多进程。
   private writeQueue: Promise<unknown> = Promise.resolve();
+  private readonly lockOptions: FileLockOptions;
 
   constructor(
     readonly filePath: string,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+    lockOptions: FileLockOptions = {},
+  ) {
+    this.lockOptions = { timeoutMs: 10_000, ...lockOptions };
+  }
 
   // 崩溃恢复：认领会写入 leaseExpiresAt，进程崩溃后任务停留在 running 且租约过期。
   // 这里把过期任务重新置为 pending（除非已请求取消），等待下一个 Worker 认领。
@@ -197,15 +202,16 @@ export class PersistentTaskQueue {
   }
 
   async get(taskId: string): Promise<BackgroundTaskRecord | undefined> {
-    await this.writeQueue;
-    const task = (await this.readUnlocked()).tasks.find((item) => item.id === taskId);
-    return task ? structuredClone(task) : undefined;
+    return this.serial(async () => {
+      const task = (await this.readUnlocked()).tasks.find((item) => item.id === taskId);
+      return task ? structuredClone(task) : undefined;
+    });
   }
 
   async list(): Promise<BackgroundTaskRecord[]> {
-    await this.writeQueue;
-    return (await this.readUnlocked()).tasks.map((task) => structuredClone(task))
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return this.serial(async () => (await this.readUnlocked()).tasks
+      .map((task) => structuredClone(task))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
   }
 
   private async transition(
@@ -223,10 +229,12 @@ export class PersistentTaskQueue {
     });
   }
 
-  // serial() 把本次读改写排到上一次写之后执行，claim/complete/… 不会交错覆盖。
-  // 读方法(get/list)同样等待 writeQueue，保证不会读到写了一半的队列；写失败不阻塞后续任务。
+  // 所有读写先进入实例队列，再取得跨进程文件锁；失败只终止当前操作，不堵塞后续调用。
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.writeQueue.then(operation);
+    const next = this.writeQueue.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      return withFileLock(`${this.filePath}.lock`, operation, this.lockOptions);
+    });
     this.writeQueue = next.catch(() => undefined);
     return next;
   }
@@ -249,11 +257,14 @@ export class PersistentTaskQueue {
   // 落盘用同目录临时文件 + rename：进程写一半崩溃也不会留下半截队列文件。
   // 写入前先脱敏并以 0o600 权限保存，避免队列携带的 evidence 泄漏给其他进程。
   private async write(file: QueueFile): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.${process.pid}.tmp`;
+    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     const sanitized = redactValueWithReport(file).value;
-    await writeFile(temporary, `${JSON.stringify(sanitized)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await rename(temporary, this.filePath);
+    try {
+      await writeFile(temporary, `${JSON.stringify(sanitized)}\n`, { encoding: 'utf8', mode: 0o600 });
+      await rename(temporary, this.filePath);
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }
 

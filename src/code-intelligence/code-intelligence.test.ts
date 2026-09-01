@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ToolRegistry } from '../runtime/tool-registry.js';
 import { CodeIntelligenceService, type LanguageServiceBackend } from './code-intelligence-service.js';
-import { CodeIntelligenceError, type CodeDiagnostic, type CodeLocation } from './types.js';
+import { CodeIntelligenceError } from './types.js';
 import { registerCodeIntelligenceTools } from './tools.js';
 import { TreeSitterIndex } from './tree-sitter-index.js';
 import { TypeScriptLspClient } from './typescript-lsp-client.js';

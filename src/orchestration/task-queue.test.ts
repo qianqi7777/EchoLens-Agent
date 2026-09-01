@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -140,6 +140,21 @@ test('队列写入端拒绝无效 metadata 并规范化 Evidence ID', async (t) 
   assert.equal((await queue.get(task.id))?.state, 'completed');
 });
 
+test('多个队列实例并发写入时不丢任务且不残留临时文件', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-task-multi-writer-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const filePath = join(root, 'tasks.json');
+  const queues = [new PersistentTaskQueue(filePath), new PersistentTaskQueue(filePath)];
+
+  await Promise.all(Array.from({ length: 40 }, (_, index) => queues[index % 2]!.enqueue({
+    isolation: 'sandbox',
+    payload: { profile: 'explore', objective: `task-${index}` },
+  })));
+
+  assert.equal((await queues[0]!.list()).length, 40);
+  assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.tmp')), []);
+});
+
 test('Worktree 分配使用独立 checkout，修改不影响原工作区并可清理', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-worktree-source-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -147,15 +162,25 @@ test('Worktree 分配使用独立 checkout，修改不影响原工作区并可�
   await execute('git', ['-C', root, 'config', 'user.email', 'test@example.invalid']);
   await execute('git', ['-C', root, 'config', 'user.name', 'EchoLens Test']);
   await writeFile(join(root, 'file.txt'), 'source\n');
-  await execute('git', ['-C', root, 'add', 'file.txt']);
+  await writeFile(join(root, 'deleted.txt'), 'delete me\n');
+  await execute('git', ['-C', root, 'add', 'file.txt', 'deleted.txt']);
   await execute('git', ['-C', root, 'commit', '-m', 'initial']);
+  await writeFile(join(root, 'file.txt'), 'working tree\n');
+  await writeFile(join(root, 'draft.txt'), 'untracked\n');
+  await rm(join(root, 'deleted.txt'));
 
   const lease = await new DefaultTaskWorkspaceAllocator().allocate(root, 'worktree');
   const worktreeRoot = lease.root;
-  await rename(join(worktreeRoot, 'file.txt'), join(worktreeRoot, 'moved.txt'));
-  await execute('git', ['-C', worktreeRoot, 'add', '-A']);
-  assert.deepEqual(await lease.changedFiles(), ['moved.txt']);
-  assert.equal(await readFile(join(root, 'file.txt'), 'utf8'), 'source\n');
+  assert.equal(await readFile(join(worktreeRoot, 'file.txt'), 'utf8'), 'working tree\n');
+  assert.equal(await readFile(join(worktreeRoot, 'draft.txt'), 'utf8'), 'untracked\n');
+  await assert.rejects(readFile(join(worktreeRoot, 'deleted.txt')));
+  assert.deepEqual(await lease.changedFiles(), []);
+
+  await writeFile(join(worktreeRoot, 'file.txt'), 'agent change\n');
+  await rename(join(worktreeRoot, 'draft.txt'), join(worktreeRoot, 'moved.txt'));
+  assert.deepEqual(await lease.changedFiles(), ['draft.txt', 'file.txt', 'moved.txt']);
+  assert.equal(await readFile(join(root, 'file.txt'), 'utf8'), 'working tree\n');
+  assert.equal(await readFile(join(root, 'draft.txt'), 'utf8'), 'untracked\n');
   await lease.cleanup();
   await assert.rejects(readFile(join(worktreeRoot, 'file.txt')));
 });

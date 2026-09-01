@@ -1,6 +1,6 @@
 {
   "name": "echolens-agent",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -21,7 +21,7 @@
     "eval": "tsx src/eval-cli.ts",
     "eval:smoke": "tsx src/eval-cli.ts --task examples/evals/answer-smoke.task.json --candidate examples/evals/answer-smoke.candidate.json --results .echolens/evals/smoke-results.jsonl --suite smoke",
     "test:classification": "tsx scripts/check-test-classification.ts",
-    "test:unit": "tsx --test src/config/startup-config.test.ts src/context/context-manager.test.ts src/credentials/gateway-token-store.test.ts src/evals/dynamic-metrics.test.ts src/orchestration/task-command.test.ts src/orchestration/task-queue.test.ts src/runtime/approval.test.ts src/runtime/edit-loop.test.ts src/runtime/runtime.test.ts src/runtime/sandbox-tools.test.ts src/runtime/structured-output.test.ts src/runtime/structured-patch.test.ts src/runtime/tool-errors.test.ts src/runtime/tool-scheduler.test.ts src/runtime/tool-schema.test.ts src/runtime/verification.test.ts src/sandbox/artifact-store.test.ts src/sandbox/process-runner.test.ts src/tui.test.ts",
+    "test:unit": "tsx --test src/config/startup-config.test.ts src/context/context-manager.test.ts src/credentials/gateway-token-store.test.ts src/evals/dynamic-metrics.test.ts src/orchestration/task-command.test.ts src/orchestration/task-queue.test.ts src/runtime/approval.test.ts src/runtime/edit-loop.test.ts src/runtime/file-lock.test.ts src/runtime/runtime.test.ts src/runtime/sandbox-tools.test.ts src/runtime/structured-output.test.ts src/runtime/structured-patch.test.ts src/runtime/tool-errors.test.ts src/runtime/tool-scheduler.test.ts src/runtime/tool-schema.test.ts src/runtime/verification.test.ts src/sandbox/artifact-store.test.ts src/sandbox/process-runner.test.ts src/tui.test.ts",
     "test:contract": "tsx --test src/code-intelligence/code-intelligence.test.ts src/context/instruction-contract.test.ts src/evals/eval-harness.test.ts src/evals/file-runner.test.ts src/mcp/mcp-client.test.ts src/orchestration/subagent.test.ts src/providers/gateway/gateway-client.test.ts src/providers/openai-compatible/openai-compatible.test.ts src/providers/openai-compatible/provider-hardening.test.ts src/providers/openai-compatible/provider-streaming.test.ts src/runtime/model-router.test.ts src/sandbox/docker-sandbox.test.ts src/session/jsonl-event-store.test.ts src/session/session-runtime.test.ts server/model-gateway/src/server.test.ts",
     "test:security": "tsx --test src/runtime/guardrail.test.ts src/runtime/path-policy.test.ts src/runtime/tool-output.test.ts",
     "test:performance": "tsx --test src/runtime/workspace-tools.performance.test.ts",

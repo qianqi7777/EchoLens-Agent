@@ -12,6 +12,7 @@ export * from '../session/index.js';
 export * from './types.js';
 export * from './tool-registry.js';
 export * from './tool-schema.js';
+export * from './file-lock.js';
 export * from './tool-result.js';
 export * from './path-policy.js';
 export * from './tool-output.js';

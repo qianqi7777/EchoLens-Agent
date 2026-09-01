@@ -526,7 +526,7 @@ function toolStatusLabel(status: ToolExecutionStatus): { label: string; color: s
   }
 }
 
-function compactToolDetail(toolName: string, result?: { summary?: string; output?: { content?: string } }): string {
+function compactToolDetail(result?: { summary?: string; output?: { content?: string } }): string {
   const summary = result?.summary?.trim();
   if (summary) return truncateDisplayText(summary.replace(/\n/g, ' '), 200);
   const content = result?.output?.content;
@@ -569,26 +569,31 @@ export class TerminalUi {
     if (!stdin.isTTY || !stdout.isTTY || !stdin.setRawMode) {
       throw new Error('当前终端不支持 TUI，请使用交互式终端运行');
     }
-    // 进入备用屏幕缓冲区并隐藏光标；退出时必须在 finally 前的出口恢复（见下方 ?25h/?1049l）。
+    // 进入备用屏幕缓冲区并隐藏光标；渲染或事件处理抛错时 finally 仍会恢复终端。
     stdout.write('\u001b[?1049h\u001b[?25l');
-    for (const [prefix, value] of [
-      ['workspace ', this.options.workspaceRoot],
-      ['session ', this.options.sessionId],
-    ] as const) {
-      this.pushNotice(`${prefix}${value}`, 'dim');
+    try {
+      for (const [prefix, value] of [
+        ['workspace ', this.options.workspaceRoot],
+        ['session ', this.options.sessionId],
+      ] as const) {
+        this.pushNotice(`${prefix}${value}`, 'dim');
+      }
+      for (const message of this.options.startupMessages ?? []) this.pushNotice(message, 'info');
+      this.store.update((s) => ({ ...s, status: '就绪' }));
+      // exitOnCtrlC: false——Ctrl+C 由 handleKey 自行解释（有活动 Turn 时只取消 Turn）。
+      this.inkInstance = render(<App store={this.store} controller={this} />, { exitOnCtrlC: false });
+      await new Promise<void>((resolve) => {
+        this.exitResolver = resolve;
+      });
+    } finally {
+      this.exitResolver = undefined;
+      try {
+        this.inkInstance?.unmount();
+      } finally {
+        this.inkInstance = undefined;
+        stdout.write('\u001b[?25h\u001b[?1049l\n');
+      }
     }
-    for (const message of this.options.startupMessages ?? []) this.pushNotice(message, 'info');
-    this.store.update((s) => ({ ...s, status: '就绪' }));
-    // exitOnCtrlC: false——Ctrl+C 由 handleKey 自行解释（有活动 Turn 时只取消 Turn）。
-    this.inkInstance = render(<App store={this.store} controller={this} />, { exitOnCtrlC: false });
-    // start 挂起直到 quit() 被调用，期间事件循环持续为 TUI 服务。
-    await new Promise<void>((resolve) => {
-      this.exitResolver = resolve;
-    });
-    this.inkInstance?.unmount();
-    this.inkInstance = undefined;
-    // 恢复光标并离开备用屏幕，回到调用前的终端状态。
-    stdout.write('\u001b[?25h\u001b[?1049l\n');
   }
 
   async requestApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
@@ -727,7 +732,7 @@ export class TerminalUi {
     if (state.history.length === 0) return;
     let index = state.historyIndex < 0 ? state.history.length : state.historyIndex;
     index = Math.min(Math.max(0, index + direction), state.history.length);
-    const value = index === state.history.length ? '' : state.history[index];
+    const value = index === state.history.length ? '' : state.history[index] ?? '';
     this.store.update((s) => ({
       ...s,
       historyIndex: index === state.history.length ? -1 : index,
@@ -868,11 +873,13 @@ export class TerminalUi {
       // notice in the same turn) so we don't append a duplicate assistant block.
       let index = -1;
       for (let i = transcript.length - 1; i >= 0; i -= 1) {
-        if (transcript[i].kind === 'assistant') {
+        const item = transcript[i];
+        if (!item) continue;
+        if (item.kind === 'assistant') {
           index = i;
           break;
         }
-        if (transcript[i].kind === 'tool' || transcript[i].kind === 'user' || transcript[i].kind === 'patch') break;
+        if (item.kind === 'tool' || item.kind === 'user' || item.kind === 'patch') break;
       }
       const last = index >= 0 ? transcript[index] : undefined;
       if (last?.kind === 'assistant') {
@@ -932,7 +939,7 @@ export class TerminalUi {
       case 'tool.completed': {
         const { callId, toolName, status, elapsedMs, result } = payload;
         const { label, color } = toolStatusLabel(status);
-        const detail = compactToolDetail(toolName, result);
+        const detail = compactToolDetail(result);
         this.store.update((s) => {
           const transcript = [...s.transcript];
           const index = transcript.findIndex((item) => item.kind === 'tool' && item.callId === callId);

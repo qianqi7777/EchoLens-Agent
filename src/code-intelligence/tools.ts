@@ -1,6 +1,7 @@
-import type { JsonSchema, JsonSchemaNode, ToolContext, ToolResult } from '../runtime/types.js';
+import type { JsonSchemaNode, ToolResult } from '../runtime/types.js';
 import { ToolRegistry } from '../runtime/tool-registry.js';
 import { toolFailure, toolSuccess } from '../runtime/tool-result.js';
+import { objectSchema } from '../runtime/tool-schema.js';
 import type { CodeDiagnostic, CodeLocation, CodeSymbol } from './types.js';
 import { CodeIntelligenceError } from './types.js';
 import { CodeIntelligenceService, type CodeIntelligenceResult } from './code-intelligence-service.js';
@@ -37,7 +38,7 @@ export function registerCodeIntelligenceTools(
     permission: 'workspace.read',
     effect: 'read',
     observation: { type: 'workspace.file', operation: 'read' },
-    inputSchema: schema({ path: pathProperty }, ['path']),
+    inputSchema: objectSchema({ path: pathProperty }, ['path']),
     execute: (args) => run(() => service.outlineFile(String(args.path)), formatSymbols, '读取文件符号失败'),
   });
   registry.register({
@@ -46,7 +47,7 @@ export function registerCodeIntelligenceTools(
     permission: 'workspace.read',
     effect: 'read',
     observation: { type: 'workspace.file', operation: 'search' },
-    inputSchema: schema({
+    inputSchema: objectSchema({
       query: { type: 'string', minLength: 1, maxLength: 512 },
       path: pathProperty,
     }, ['query']),
@@ -62,7 +63,7 @@ export function registerCodeIntelligenceTools(
     permission: 'workspace.read',
     effect: 'read',
     observation: { type: 'workspace.file', operation: 'search' },
-    inputSchema: schema(positionProperties, ['path', 'line', 'column']),
+    inputSchema: objectSchema(positionProperties, ['path', 'line', 'column']),
     execute: (args, context) => run(
       () => service.goToDefinition(String(args.path), Number(args.line), Number(args.column), context.signal),
       formatLocations,
@@ -75,7 +76,7 @@ export function registerCodeIntelligenceTools(
     permission: 'workspace.read',
     effect: 'read',
     observation: { type: 'workspace.file', operation: 'search' },
-    inputSchema: schema(positionProperties, ['path', 'line', 'column']),
+    inputSchema: objectSchema(positionProperties, ['path', 'line', 'column']),
     execute: (args, context) => run(
       () => service.findReferences(String(args.path), Number(args.line), Number(args.column), context.signal),
       formatLocations,
@@ -88,7 +89,7 @@ export function registerCodeIntelligenceTools(
     permission: 'workspace.read',
     effect: 'read',
     observation: { type: 'workspace.file', operation: 'read' },
-    inputSchema: schema({ path: pathProperty }, ['path']),
+    inputSchema: objectSchema({ path: pathProperty }, ['path']),
     execute: (args, context) => run(
       () => service.getDiagnostics(String(args.path), context.signal),
       formatDiagnostics,
@@ -142,8 +143,4 @@ function evidenceIds(items: CodeLocation[]): string[] {
       ? item.evidenceId
       : `code:${item.path}:${item.startLine}:${item.startColumn}`
   ));
-}
-
-function schema(properties: Record<string, JsonSchemaNode>, required: string[]): JsonSchema {
-  return { type: 'object', properties, required, additionalProperties: false };
 }

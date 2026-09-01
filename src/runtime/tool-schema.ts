@@ -1,6 +1,6 @@
 import Ajv, { type ErrorObject, type ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
-import type { JsonSchema } from './types.js';
+import type { JsonSchema, JsonSchemaNode } from './types.js';
 
 export type ToolArgumentErrorCode =
   | 'missing_required'
@@ -22,6 +22,13 @@ export interface ToolArgumentIssue {
 export type ToolArgumentValidation =
   | { valid: true; issues: [] }
   | { valid: false; issues: ToolArgumentIssue[] };
+
+export function objectSchema(
+  properties: Record<string, JsonSchemaNode>,
+  required: string[] = [],
+): JsonSchema {
+  return { type: 'object', properties, required, additionalProperties: false };
+}
 
 // 工具参数视为不可信输入：关闭类型强转、默认值注入与额外字段剥离，只做严格校验。
 // 未知字段依赖 schema 的 additionalProperties=false 报错而非静默剪除，防止参数漂移或原型污染。

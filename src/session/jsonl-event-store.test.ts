@@ -3,6 +3,7 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { FileLockError } from '../runtime/file-lock.js';
 import { EventStoreCorruptionError, JsonlEventStore } from './jsonl-event-store.js';
 
 test('并行 append 由单写者分配连续 seq 且每行完整', async (context) => {
@@ -82,6 +83,21 @@ test('支持 afterSeq、Session 列表并在写入前脱敏', async (context) =>
   assert.doesNotMatch(JSON.stringify(events), /secret-value/u);
   await store.close();
   assert.deepEqual((await JsonlEventStore.list(root)).map((item) => item.sessionId), ['session-query']);
+});
+
+test('同一 Session 拒绝第二个写者，关闭后可以重新打开', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-lock-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const first = new JsonlEventStore(root, 'session-exclusive', { flushEachEvent: false });
+  await first.append({ payload: { type: 'session.created', workspaceRoot: 'D:\\repo' } });
+
+  const competing = new JsonlEventStore(root, 'session-exclusive', { lockTimeoutMs: 10 });
+  await assert.rejects(competing.read(), FileLockError);
+  await first.close();
+
+  const reopened = new JsonlEventStore(root, 'session-exclusive', { flushEachEvent: false });
+  assert.equal((await reopened.read()).length, 1);
+  await reopened.close();
 });
 
 function event(seq: number) {
