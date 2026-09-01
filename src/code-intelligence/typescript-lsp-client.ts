@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -37,6 +38,7 @@ export class TypeScriptLspClient {
   private readonly documents = new Map<string, OpenDocument>();
   private readonly diagnosticsByUri = new Map<string, CodeDiagnostic[]>();
   private readonly diagnosticWaiters = new Map<string, Array<() => void>>();
+  private workspaceCanonicalRoot?: string;
   private closed = false;
 
   constructor(
@@ -121,6 +123,7 @@ export class TypeScriptLspClient {
   private async openDocument(relativePath: string): Promise<OpenDocument> {
     await this.ensureStarted();
     const policy = await PathPolicy.create(this.workspaceRoot);
+    this.workspaceCanonicalRoot ??= policy.workspaceRoot;
     const file = await policy.readTextFile(relativePath, 2 * 1024 * 1024);
     const normalized = path.relative(policy.workspaceRoot, file.canonicalPath).replaceAll('\\', '/');
     const uri = pathToFileURL(file.canonicalPath).href;
@@ -273,7 +276,9 @@ export class TypeScriptLspClient {
   private locationFromUri(uri: string, range: LspRange): CodeLocation | undefined {
     try {
       const absolute = fileURLToPath(uri);
-      const relative = path.relative(path.resolve(this.workspaceRoot), path.resolve(absolute));
+      const workspaceRoot = this.workspaceCanonicalRoot ?? canonicalPath(this.workspaceRoot);
+      const targetPath = canonicalPath(absolute);
+      const relative = path.relative(workspaceRoot, targetPath);
       // LSP 返回的位置是不可信证据：工作区外的 URI 直接丢弃，只保留工作区内相对路径。
       if (relative.startsWith('..') || path.isAbsolute(relative)) return undefined;
       return {
@@ -431,4 +436,9 @@ async function waitForDiagnostics(
     waiters.set(uri, current);
     signal?.addEventListener('abort', complete, { once: true });
   });
+}
+
+function canonicalPath(value: string): string {
+  try { return realpathSync.native(value); }
+  catch { return path.resolve(value); }
 }

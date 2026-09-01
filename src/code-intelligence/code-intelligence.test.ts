@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { ToolRegistry } from '../runtime/tool-registry.js';
 import { CodeIntelligenceService, type LanguageServiceBackend } from './code-intelligence-service.js';
@@ -107,3 +108,30 @@ function unavailableLsp(): LanguageServiceBackend {
     close: async () => undefined,
   } as LanguageServiceBackend;
 }
+
+test('TypeScript LSP URI 规范化兼容工作区别名路径', async (t) => {
+  const root = await fixture();
+  const aliasParent = await mkdtemp(join(tmpdir(), 'echolens-code-intelligence-alias-'));
+  const aliasRoot = join(aliasParent, 'workspace-root-alias');
+  await symlink(root, aliasRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  const client = new TypeScriptLspClient(aliasRoot);
+  t.after(async () => {
+    await client.close();
+    await rm(aliasParent, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const locationFromUri = (client as unknown as {
+    locationFromUri(uri: string, range: {
+      start: { line: number; character: number };
+      end: { line: number; character: number };
+    }): CodeLocation | undefined;
+  }).locationFromUri.bind(client);
+
+  const normalized = locationFromUri(pathToFileURL(join(root, 'src', 'source.ts')).href, {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 5 },
+  });
+
+  assert.equal(normalized?.path, 'src/source.ts');
+});
