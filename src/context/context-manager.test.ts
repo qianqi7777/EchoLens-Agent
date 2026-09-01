@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -59,6 +59,20 @@ test('按用户、根目录到目标目录加载规则且每层只选一个文�
   assert.deepEqual(loaded.documents.at(-1)?.permissionDirectives.map((item) => item.permission), [
     'network.request',
   ]);
+});
+
+test('Instruction Loader 以规范路径校验工作区别名', async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), 'echolens-context-alias-'));
+  context.after(() => rm(parent, { recursive: true, force: true }));
+  const actualRoot = join(parent, 'actual-workspace');
+  const aliasRoot = join(parent, 'workspace-alias');
+  await mkdir(actualRoot);
+  await writeFile(join(actualRoot, 'AGENTS.md'), 'alias workspace rules');
+  await symlink(actualRoot, aliasRoot, process.platform === 'win32' ? 'junction' : 'dir');
+
+  const loaded = await new InstructionLoader({ workspaceRoot: aliasRoot }).load('.');
+
+  assert.deepEqual(loaded.documents.map((item) => item.content), ['alias workspace rules']);
 });
 
 test('Context Manager 保持稳定前缀并用仓库规则收紧权限', async (context) => {

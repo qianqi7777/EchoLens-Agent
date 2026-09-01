@@ -203,7 +203,7 @@ export class PathPolicy {
   async createFile(input: string): Promise<VerifiedCreateFile> {
     validateRelativePath(input);
     await this.assertRootIdentity();
-    const candidatePath = path.resolve(this.workspaceRoot, input);
+    const candidatePath = path.resolve(this.workspaceRoot, platformPath(input));
     this.assertInside(candidatePath);
     this.assertForbiddenSegments(candidatePath);
     const parentPath = path.dirname(candidatePath);
@@ -277,7 +277,7 @@ export class PathPolicy {
   async resolveExisting(input: string, kind: 'file' | 'directory' | 'any' = 'any'): Promise<ResolvedPath> {
     validateRelativePath(input);
     await this.assertRootIdentity();
-    const candidatePath = path.resolve(this.workspaceRoot, input);
+    const candidatePath = path.resolve(this.workspaceRoot, platformPath(input));
     this.assertInside(candidatePath);
     this.assertForbiddenSegments(candidatePath);
     await this.assertNoLinkComponents(candidatePath);
@@ -407,6 +407,10 @@ export class PathPolicy {
       throw new PathPolicyError('private_metadata_denied', '拒绝访问 .echolens 私有运行目录');
     }
   }
+}
+
+function platformPath(input: string): string {
+  return input.replace(/[\\/]/gu, path.sep);
 }
 
 export function validateRelativePath(input: string): void {

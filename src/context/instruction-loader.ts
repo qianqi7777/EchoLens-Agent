@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath } from 'node:fs/promises';
-import { dirname, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Permission } from '../core/permissions.js';
 import {
   DEFAULT_INSTRUCTION_DISCOVERY_POLICY,
@@ -51,6 +51,9 @@ export class InstructionLoader {
   }
 
   async load(targetPath = '.'): Promise<InstructionLoadResult> {
+    // 整次发现统一使用规范根路径，避免 Windows 8.3 短路径、大小写别名或 Junction
+    // 让同一目录在 lstat/realpath 前后呈现为不同字符串。
+    const workspaceRoot = await realpath(this.workspaceRoot);
     const warnings: string[] = [];
     const candidates: Array<{
       path: string;
@@ -75,12 +78,12 @@ export class InstructionLoader {
         fileKind: selected.fileKind,
         trust: 'user',
         depth: -1,
-        appliesTo: this.workspaceRoot,
+        appliesTo: workspaceRoot,
       });
     }
 
-    const targetDirectory = await this.resolveTargetDirectory(targetPath);
-    const directories = directoriesFromRoot(this.workspaceRoot, targetDirectory);
+    const targetDirectory = await this.resolveTargetDirectory(workspaceRoot, targetPath);
+    const directories = directoriesFromRoot(workspaceRoot, targetDirectory);
     for (const [depth, directory] of directories.entries()) {
       const selected = await selectInstructionFile(
         directory,
@@ -108,7 +111,7 @@ export class InstructionLoader {
         continue;
       }
       const bytes = await readSafeInstruction(candidate.path, candidate.trust === 'repository'
-        ? this.workspaceRoot : undefined);
+        ? workspaceRoot : undefined);
       if (!bytes) {
         warnings.push(`规则文件不是安全的普通文件，已跳过 ${candidate.path}`);
         continue;
@@ -123,7 +126,7 @@ export class InstructionLoader {
         trust: candidate.trust,
         uri: candidate.path,
         scope: {
-          workspaceRoot: this.workspaceRoot,
+          workspaceRoot,
           directory: candidate.appliesTo,
           appliesTo: candidate.appliesTo,
           depth: candidate.depth,
@@ -145,9 +148,9 @@ export class InstructionLoader {
     return { documents, warnings, totalBytes };
   }
 
-  private async resolveTargetDirectory(targetPath: string): Promise<string> {
-    const target = resolve(this.workspaceRoot, targetPath);
-    assertWithin(this.workspaceRoot, target);
+  private async resolveTargetDirectory(workspaceRoot: string, targetPath: string): Promise<string> {
+    const target = resolve(workspaceRoot, targetPath);
+    assertWithin(workspaceRoot, target);
     try {
       const info = await lstat(target);
       return info.isDirectory() ? target : dirname(target);
@@ -200,8 +203,8 @@ async function selectInstructionFile(
   return undefined;
 }
 
-// 仓库规则来自不可信工作区：拒绝符号链接，并对 repository 来源做 realpath 后
-// 校验必须落在 workspaceRoot 内，防止规则文件通过符号链接逃逸到工作区之外。
+// 仓库规则来自不可信工作区：拒绝符号链接，并把规则文件 realpath 与 load() 已规范化的
+// workspaceRoot 校验包含关系，防止规则文件通过符号链接逃逸到工作区之外。
 async function readSafeInstruction(path: string, workspaceRoot?: string): Promise<Buffer | undefined> {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink()) return undefined;
@@ -227,7 +230,7 @@ function directoriesFromRoot(root: string, target: string): string[] {
 // 防止规则发现与读取逃逸出工作区。
 function assertWithin(root: string, target: string): void {
   const suffix = relative(resolve(root), resolve(target));
-  if (suffix === '..' || suffix.startsWith(`..${sep}`) || resolve(target) === '') {
+  if (isAbsolute(suffix) || suffix === '..' || suffix.startsWith(`..${sep}`)) {
     throw new Error('规则目标路径位于工作区之外');
   }
 }
