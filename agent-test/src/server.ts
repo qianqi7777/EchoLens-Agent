@@ -86,8 +86,12 @@ function resolveProviders(requested: Array<Pick<ProviderConfig, 'id' | 'enabled'
 function runQuality(): Promise<{ passed: boolean; durationMs: number; output: string }> {
   const started = Date.now();
   return new Promise((resolve) => {
-    const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const child = spawn(command, ['run', 'check:ci'], { cwd: repoRoot, shell: false, windowsHide: true });
+    const command = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : 'npm';
+    const args = process.platform === 'win32'
+      ? ['/d', '/s', '/c', 'npm.cmd run check:ci']
+      : ['run', 'check:ci'];
+    // The command and arguments are fixed; no request data is interpolated.
+    const child = spawn(command, args, { cwd: repoRoot, shell: false, windowsHide: true });
     let output = '';
     const append = (chunk: unknown) => { output = `${output}${String(chunk)}`.slice(-64 * 1024); };
     child.stdout.on('data', append);
