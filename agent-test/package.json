@@ -1,0 +1,9 @@
+{
+  "name": "echolens-agent-test-lab",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "web": "tsx src/server.ts",
+    "test": "tsx --test tests/agent-test/engine.test.ts"
+  }
+}

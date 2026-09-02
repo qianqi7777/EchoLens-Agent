@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Test Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div><p class="eyebrow">EchoLens Agent</p><h1>Agent Test Lab</h1></div>
+      <span id="health" class="status">连接中</span>
+    </header>
+    <section class="toolbar">
+      <label>本地仓库路径<input id="repoRoot" value="."></label>
+      <label>GitHub 仓库（可选）<input id="githubRepo" placeholder="owner/repo"></label>
+      <button id="loadGithub" class="secondary">读取 Issues</button>
+      <label class="switch"><input id="execute" type="checkbox">执行真实 CLI</label>
+      <button id="run">运行对比</button>
+      <button id="quality" class="secondary">完整质量测试</button>
+    </section>
+    <section class="grid">
+      <article class="panel"><div class="panel-head"><h2>Provider</h2><span>本地命令适配</span></div><div id="providers"></div></article>
+      <article class="panel"><div class="panel-head"><h2>Issues</h2><span id="issueCount">0 条</span></div><textarea id="issues" spellcheck="false"></textarea></article>
+    </section>
+    <section class="panel results"><div class="panel-head"><h2>横向结果</h2><span id="runState">等待运行</span></div><div id="cards" class="cards"></div></section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -86,6 +86,7 @@ Eval CLI 只读取本地任务和 Candidate JSON。默认结果写入 Git 忽略
 npm run eval:smoke
 npm run eval -- --task <task.json> --candidate <candidate.json>
 npm run eval -- --template <template.json> --seed <seed> --candidate <candidate.json>
+npm run agent-test:web
 ```
 
 后台 Worker 不会在应用启动时自动运行待处理任务。创建或执行 `/task resume <id>` 才会启动；
@@ -139,7 +140,6 @@ src/
   core/                  模型中立的消息、权限与 System Policy
   context/               项目指令来源和权限收紧契约
   code-intelligence/     tree-sitter 索引、TypeScript LSP 和代码工具
-  evals/                 Eval Harness、动态任务、结果存储和指标
   orchestration/         后台队列、独立工作区、受限子 Agent 和只读 Hook
   credentials/           凭据引用与异步解析接口
   mcp/                   MCP 配置、Client 生命周期与工具桥接
@@ -164,7 +164,7 @@ src/
     egress-proxy.ts      域名 allowlist 出站代理
     process-runner.ts    shell=false、超时、取消和输出限制
   session/               Event Store、检查点和 Session Runtime
-  testing/               契约测试支持工具
+agent-test/              独立 Eval、测试支持、全部测试文件和 Issue 对比网页
 contracts/
   gateway.openapi.json   Gateway 客户端 OpenAPI 契约
 ```
