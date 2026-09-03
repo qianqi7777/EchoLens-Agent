@@ -118,6 +118,12 @@ Server 全部禁用且不包含真实地址。敏感 Header 和环境变量只�
 tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、引用和诊断结果只保留工作区内
 的相对路径；LSP 不可用时定义、引用和语法诊断自动降级到 tree-sitter。
 
+## 文档
+
+- [公开文档中心](doc/README.md)
+- [功能链路总览与数据字典](doc/功能链路/README.md)
+- [代码注释规范](doc/代码注释规范.md)
+
 ## 验证
 
 ```bash
