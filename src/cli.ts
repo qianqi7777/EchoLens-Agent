@@ -33,7 +33,17 @@ import {
   formatBackgroundTask,
   isBackgroundTaskCommand,
   registerSubagentTool,
+  executeWorkspaceCommand,
+  isWorkspaceCommand,
+  resolveWorkspaceDirectory,
+  WorkspaceRuntimeManager,
+  type BackgroundTaskCommands,
+  type ManagedWorkspaceRuntime,
+  type ModelProvider,
+  type PrivacyLevel,
+  type WorkspaceCommandService,
 } from './runtime/index.js';
+import { formatCommandHelp } from './commands/command-catalog.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -48,19 +58,18 @@ setupTerminal.close();
 
 // 只有两端都是 TTY 且支持原始模式才启用 TUI；管道/重定向场景退化为纯行交互，
 // 避免 TUI 在非交互环境里刷屏或阻塞。
-const workspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
+const configuredWorkspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
 const useTui = Boolean(input.isTTY && output.isTTY && input.setRawMode);
 const lineTerminal = useTui ? undefined : readline.createInterface({ input, output });
-const registry = new ToolRegistry();
-registerWorkspaceTools(registry);
+let sandbox: DockerSandboxAdapter;
 try {
   // 沙箱适配器在注册时即校验配置（镜像/可执行文件是否存在），配置无效直接退出，
   // 而不是让后续每一次沙箱调用都失败。
-  registerSandboxTools(registry, new DockerSandboxAdapter({
+  sandbox = new DockerSandboxAdapter({
     image: process.env.AGENT_SANDBOX_IMAGE,
     executable: process.env.AGENT_DOCKER_EXECUTABLE,
     user: process.env.AGENT_SANDBOX_USER,
-  }));
+  });
 } catch (error) {
   console.error(`Sandbox 配置无效：${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
@@ -74,182 +83,314 @@ if (!model) {
   process.exitCode = 1;
   lineTerminal?.close();
 } else {
-  const extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
-  const startupMessages = [
-    `代码智能已启用：tree-sitter + TypeScript LSP（按需启动）`,
-    `MCP 已连接 ${extensions.connectedMcpServers.length} 个 Server`,
-    ...extensions.notices,
-  ];
-  let backgroundTasks: SubagentBackgroundService | undefined;
-  try {
-  const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
   let tui: TerminalUi | undefined;
-  const subagents = new SubagentOrchestrator(model, registry, workspaceRoot);
-  registerSubagentTool(registry, subagents);
-  backgroundTasks = new SubagentBackgroundService(
-    new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
-    subagents,
-    (task) => {
-      const message = `后台任务：${formatBackgroundTask(task)}`;
-      if (tui) tui.notify(message);
-      else output.write(`\n${message}\n`);
-    },
-    (error) => {
-      const message = `后台任务通知异常：${error instanceof Error ? error.message : String(error)}`;
-      if (tui) tui.notify(message);
-      else console.error(message);
-    },
-  );
-  const executor = new ToolExecutor(registry, {
-    approvalStore,
-    approvalDecider: async (request) => tui
-      ? tui.requestApproval(request)
-      : lineTerminal
-        ? interactiveApproval(request, lineTerminal)
-        : { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '没有可用审批终端' },
-    timeoutMs: 120_000,
-  });
-  const agent = new ReactAgent(model, registry, executor, {
-    workspaceRoot,
-    permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
-    privacy: status.privacy,
-  });
-  const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
-  const requestedSession = await resolveRequestedSession(sessionRoot, process.argv);
-  const session = await SessionRuntime.open(agent, {
-    rootDirectory: sessionRoot,
-    workspaceRoot,
-    sessionId: requestedSession,
-    storeOptions: { flushEachEvent: false },
-  });
-  if (useTui) {
-    tui = new TerminalUi({
-      model: status.model ?? 'unknown',
-      route: status.route ?? 'unknown',
-      privacy: status.privacy,
-      maxContextTokens: model.capabilities.maxContextTokens,
-      sessionId: session.sessionId,
-      workspaceRoot,
-      run: (prompt, signal, onEvent) => session.run(prompt, signal, onEvent),
-      resume: (signal, onEvent) => session.resume(signal, onEvent),
-      steer: (message) => session.steer(message),
-      listSessions: () => JsonlEventStore.list(sessionRoot),
-      verify: async () => runVerification(await selectVerificationPlan(workspaceRoot, [])),
-      rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
-      loadCheckpoint: (id) => loadEditCheckpoint(workspaceRoot, id),
-      backgroundTasks,
-      startupMessages,
-    });
-    try {
-      await tui.start();
-    } finally {
-      await session.close();
-    }
-    process.exitCode = 0;
-  } else {
-  // 行模式下的单轮执行封装：统一处理取消信号、流式渲染与结果打印。
-  let activeTurn: AbortController | undefined;
-  const executeTurn = async (
-    operation: (
-      signal: AbortSignal,
-      onEvent: ReturnType<typeof createEventRenderer>['onEvent'],
-    ) => Promise<AgentRunResult>,
-    errorLabel = '运行失败',
-  ): Promise<void> => {
-    activeTurn = new AbortController();
-    const renderer = createEventRenderer();
-    try {
-      const result = await operation(activeTurn.signal, renderer.onEvent);
-      renderer.finish();
-      // 模型已流式输出过文本、或 Provider 支持结构化输出时，answer 已在事件流里呈现，
-      // 不再重复打印，避免同一份内容出现两次。
-      if (!renderer.renderedText || model.capabilities.supportsStructuredOutput) {
-        console.log(`\n${result.answer}`);
-      }
-      console.log(`[${result.state}] turn=${result.turnId}`);
-      // completed 但未通过校验时明确标注 raw：不能让用户把未验证输出当成已确认结果。
-      if (!result.finalSummary.verified && result.state === 'completed') {
-        console.error('结构化结果校验失败：以上内容作为未验证 raw 输出显示。');
-      }
-    } catch (error) {
-      renderer.finish();
-      console.error(`${errorLabel}：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      activeTurn = undefined;
-    }
-  };
-  lineTerminal!.on('SIGINT', () => {
-    // 有活动 Turn 时第一次 Ctrl-C 只取消该 Turn，不退出进程，避免误触丢失整个会话。
-    if (activeTurn && !activeTurn.signal.aborted) {
-      output.write('\n正在取消当前 Turn...\n');
-      activeTurn.abort('user_cancelled');
-    } else {
-      output.write('\n输入 /exit 退出。\n> ');
-    }
-  });
-
-  console.log(
-    `Agent 已启动 | model=${status.model} | route=${status.route} | session=${session.sessionId}`,
-  );
-  console.log(`workspace=${workspaceRoot}`);
-  for (const message of startupMessages) console.log(message);
-  console.log('输入问题开始分析；/sessions 查看会话，/tasks 查看后台任务，/task help 查看委托命令，/exit 退出。');
+  let workspaceManager: WorkspaceRuntimeManager<CliWorkspaceRuntime> | undefined;
   try {
-    while (true) {
-      const prompt = (await lineTerminal!.question('\n> ')).trim();
-      if (!prompt) continue;
-      if (prompt === '/exit' || prompt === '/quit') break;
-      if (prompt === '/sessions') {
-        const sessions = await JsonlEventStore.list(sessionRoot);
-        for (const item of sessions.slice(0, 20)) {
-          console.log(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`);
-        }
-        if (sessions.length === 0) console.log('暂无 Session。');
-        continue;
-      }
-      if (isBackgroundTaskCommand(prompt)) {
+    const initialWorkspaceRoot = await resolveWorkspaceDirectory(configuredWorkspaceRoot, process.cwd());
+    const requestedSession = await resolveRequestedSession(
+      resolve(initialWorkspaceRoot, '.echolens', 'sessions'),
+      process.argv,
+    );
+    const createRuntime = (workspaceRoot: string, sessionId?: string) => createCliWorkspaceRuntime(
+      workspaceRoot,
+      {
+        model,
+        privacy: status.privacy ?? 'metadata',
+        sandbox,
+        lineTerminal,
+        getTui: () => tui,
+        sessionId,
+      },
+    );
+    const initialRuntime = await createRuntime(initialWorkspaceRoot, requestedSession);
+    const manager = new WorkspaceRuntimeManager(
+      initialRuntime,
+      (workspaceRoot) => createRuntime(workspaceRoot),
+    );
+    workspaceManager = manager;
+    const workspaceCommands = workspaceCommandProxy(manager);
+    const backgroundTasks = backgroundTaskProxy(manager);
+
+    if (useTui) {
+      const current = manager.currentRuntime();
+      tui = new TerminalUi({
+        model: status.model ?? 'unknown',
+        route: status.route ?? 'unknown',
+        privacy: status.privacy,
+        maxContextTokens: model.capabilities.maxContextTokens,
+        sessionId: current.sessionId,
+        workspaceRoot: current.workspaceRoot,
+        run: (prompt, signal, onEvent) => manager.currentRuntime().session.run(prompt, signal, onEvent),
+        resume: (signal, onEvent) => manager.currentRuntime().session.resume(signal, onEvent),
+        steer: (message) => manager.currentRuntime().session.steer(message),
+        listSessions: () => JsonlEventStore.list(manager.currentRuntime().sessionRoot),
+        verify: async () => {
+          const active = manager.currentRuntime();
+          return runVerification(await selectVerificationPlan(active.workspaceRoot, []));
+        },
+        rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
+        loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
+        backgroundTasks,
+        workspaceCommands,
+        startupMessages: current.startupMessages,
+      });
+      await tui.start();
+      process.exitCode = 0;
+    } else {
+      // 行模式下的单轮执行封装：统一处理取消信号、流式渲染与结果打印。
+      let activeTurn: AbortController | undefined;
+      const executeTurn = async (
+        operation: (
+          signal: AbortSignal,
+          onEvent: ReturnType<typeof createEventRenderer>['onEvent'],
+        ) => Promise<AgentRunResult>,
+        errorLabel = '运行失败',
+      ): Promise<void> => {
+        activeTurn = new AbortController();
+        const renderer = createEventRenderer();
         try {
-          const result = await executeBackgroundTaskCommand(prompt, backgroundTasks);
-          for (const line of result.lines) console.log(line);
+          const result = await operation(activeTurn.signal, renderer.onEvent);
+          renderer.finish();
+          if (!renderer.renderedText || model.capabilities.supportsStructuredOutput) {
+            console.log(`\n${result.answer}`);
+          }
+          console.log(`[${result.state}] turn=${result.turnId}`);
+          if (!result.finalSummary.verified && result.state === 'completed') {
+            console.error('结构化结果校验失败：以上内容作为未验证 raw 输出显示。');
+          }
         } catch (error) {
-          console.error(`后台任务命令失败：${error instanceof Error ? error.message : String(error)}`);
+          renderer.finish();
+          console.error(`${errorLabel}：${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          activeTurn = undefined;
         }
-        continue;
+      };
+      lineTerminal!.on('SIGINT', () => {
+        if (activeTurn && !activeTurn.signal.aborted) {
+          output.write('\n正在取消当前 Turn...\n');
+          activeTurn.abort('user_cancelled');
+        } else {
+          output.write('\n输入 /exit 退出。\n> ');
+        }
+      });
+
+      const current = manager.currentRuntime();
+      console.log(
+        `Agent 已启动 | model=${status.model} | route=${status.route} | session=${current.sessionId}`,
+      );
+      console.log(`workspace=${current.workspaceRoot}`);
+      for (const message of current.startupMessages) console.log(message);
+      console.log('输入问题开始分析；/pwd 查看目录，/cd <path> 切换目录，/sessions 查看会话，/tasks 查看后台任务，/exit 退出。');
+      while (true) {
+        const prompt = (await lineTerminal!.question('\n> ')).trim();
+        if (!prompt) continue;
+        if (prompt === '/exit' || prompt === '/quit') break;
+        if (prompt === '/help') {
+          for (const line of formatCommandHelp({ workspaceAvailable: true, backgroundTasksAvailable: true })) {
+            console.log(line);
+          }
+          continue;
+        }
+        if (isWorkspaceCommand(prompt)) {
+          try {
+            const result = await executeWorkspaceCommand(prompt, workspaceCommands);
+            for (const line of result.lines) console.log(line);
+          } catch (error) {
+            console.error(`工作目录命令失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+          continue;
+        }
+        if (prompt === '/sessions') {
+          const sessions = await JsonlEventStore.list(manager.currentRuntime().sessionRoot);
+          for (const item of sessions.slice(0, 20)) {
+            console.log(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`);
+          }
+          if (sessions.length === 0) console.log('暂无 Session。');
+          continue;
+        }
+        if (isBackgroundTaskCommand(prompt)) {
+          try {
+            const result = await executeBackgroundTaskCommand(prompt, backgroundTasks);
+            for (const line of result.lines) console.log(line);
+          } catch (error) {
+            console.error(`后台任务命令失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+          continue;
+        }
+        if (prompt === '/verify') {
+          const active = manager.currentRuntime();
+          const plan = await selectVerificationPlan(active.workspaceRoot, []);
+          const results = await runVerification(plan);
+          for (const result of results) console.log(`${result.id}: ${result.status} - ${result.summary}`);
+          continue;
+        }
+        if (prompt.startsWith('/rollback')) {
+          const requested = prompt.split(/\s+/u)[1];
+          if (!requested) { console.log('用法：/rollback <checkpoint-id>'); continue; }
+          const active = manager.currentRuntime();
+          const rollback = await rollbackCheckpoint(await loadEditCheckpoint(active.workspaceRoot, requested));
+          console.log(`已回滚 checkpoint=${requested}，恢复 ${rollback.restoredPaths.length} 个文件`);
+          if (rollback.skippedPaths.length) console.log(`检测到后续用户修改，跳过：${rollback.skippedPaths.join(', ')}`);
+          continue;
+        }
+        if (prompt.startsWith('/steer ')) {
+          await executeTurn(async (signal, onEvent) => {
+            const active = manager.currentRuntime();
+            await active.session.steer(prompt.slice('/steer '.length));
+            return active.session.resume(signal, onEvent);
+          }, 'Steering 失败');
+          continue;
+        }
+        await executeTurn((signal, onEvent) => {
+          const active = manager.currentRuntime();
+          return prompt === '/resume'
+            ? active.session.resume(signal, onEvent)
+            : active.session.run(prompt, signal, onEvent);
+        });
       }
-      if (prompt === '/verify') {
-        const plan = await selectVerificationPlan(workspaceRoot, []);
-        const results = await runVerification(plan);
-        for (const result of results) console.log(`${result.id}: ${result.status} - ${result.summary}`);
-        continue;
-      }
-      if (prompt.startsWith('/rollback')) {
-        const requested = prompt.split(/\s+/u)[1];
-        if (!requested) { console.log('用法：/rollback <checkpoint-id>'); continue; }
-        const rollback = await rollbackCheckpoint(await loadEditCheckpoint(workspaceRoot, requested));
-        console.log(`已回滚 checkpoint=${requested}，恢复 ${rollback.restoredPaths.length} 个文件`);
-        if (rollback.skippedPaths.length) console.log(`检测到后续用户修改，跳过：${rollback.skippedPaths.join(', ')}`);
-        continue;
-      }
-      if (prompt.startsWith('/steer ')) {
-        await executeTurn(async (signal, onEvent) => {
-          await session.steer(prompt.slice('/steer '.length));
-          return session.resume(signal, onEvent);
-        }, 'Steering 失败');
-        continue;
-      }
-      await executeTurn((signal, onEvent) => prompt === '/resume'
-        ? session.resume(signal, onEvent)
-        : session.run(prompt, signal, onEvent));
     }
+  } catch (error) {
+    console.error(`运行时初始化失败：${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
   } finally {
-    await session.close();
+    try {
+      await workspaceManager?.close();
+    } catch (error) {
+      console.error(`运行时清理失败：${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
     lineTerminal?.close();
   }
+}
+
+interface CliWorkspaceRuntime extends ManagedWorkspaceRuntime {
+  sessionRoot: string;
+  session: SessionRuntime;
+  backgroundTasks: SubagentBackgroundService;
+  startupMessages: string[];
+}
+
+interface CreateCliWorkspaceRuntimeOptions {
+  model: ModelProvider;
+  privacy: PrivacyLevel;
+  sandbox: DockerSandboxAdapter;
+  lineTerminal?: readline.Interface;
+  getTui(): TerminalUi | undefined;
+  sessionId?: string;
+}
+
+async function createCliWorkspaceRuntime(
+  workspaceRoot: string,
+  options: CreateCliWorkspaceRuntimeOptions,
+): Promise<CliWorkspaceRuntime> {
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  registerSandboxTools(registry, options.sandbox);
+  let extensions: Awaited<ReturnType<typeof initializeRuntimeExtensions>> | undefined;
+  let backgroundTasks: SubagentBackgroundService | undefined;
+  let session: SessionRuntime | undefined;
+  try {
+    extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
+    const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
+    const subagents = new SubagentOrchestrator(options.model, registry, workspaceRoot);
+    registerSubagentTool(registry, subagents);
+    backgroundTasks = new SubagentBackgroundService(
+      new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
+      subagents,
+      (task) => {
+        const message = `后台任务：${formatBackgroundTask(task)}`;
+        const tui = options.getTui();
+        if (tui) tui.notify(message);
+        else output.write(`\n${message}\n`);
+      },
+      (error) => {
+        const message = `后台任务通知异常：${error instanceof Error ? error.message : String(error)}`;
+        const tui = options.getTui();
+        if (tui) tui.notify(message);
+        else console.error(message);
+      },
+    );
+    const executor = new ToolExecutor(registry, {
+      approvalStore,
+      approvalDecider: async (request) => {
+        const tui = options.getTui();
+        return tui
+          ? tui.requestApproval(request)
+          : options.lineTerminal
+            ? interactiveApproval(request, options.lineTerminal)
+            : { decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '没有可用审批终端' };
+      },
+      timeoutMs: 120_000,
+    });
+    const agent = new ReactAgent(options.model, registry, executor, {
+      workspaceRoot,
+      permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
+      privacy: options.privacy,
+    });
+    const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
+    session = await SessionRuntime.open(agent, {
+      rootDirectory: sessionRoot,
+      workspaceRoot,
+      sessionId: options.sessionId,
+      storeOptions: { flushEachEvent: false },
+    });
+    const startupMessages = [
+      '代码智能已启用：tree-sitter + TypeScript LSP（按需启动）',
+      `MCP 已连接 ${extensions.connectedMcpServers.length} 个 Server`,
+      ...extensions.notices,
+    ];
+    return {
+      workspaceRoot,
+      sessionId: session.sessionId,
+      sessionRoot,
+      session,
+      backgroundTasks,
+      startupMessages,
+      close: () => closeWorkspaceResources(session, backgroundTasks!, extensions!),
+    };
+  } catch (error) {
+    await closeWorkspaceResources(session, backgroundTasks, extensions).catch(() => undefined);
+    throw error;
   }
-  } finally {
-    await backgroundTasks?.close();
-    await extensions.close();
-  }
+}
+
+function workspaceCommandProxy(
+  manager: WorkspaceRuntimeManager<CliWorkspaceRuntime>,
+): WorkspaceCommandService {
+  return {
+    current: () => manager.current(),
+    switchWorkspace: async (requestedPath) => {
+      const result = await manager.switchWorkspace(requestedPath);
+      return result.changed
+        ? { ...result, notices: manager.currentRuntime().startupMessages }
+        : result;
+    },
+  };
+}
+
+function backgroundTaskProxy(
+  manager: WorkspaceRuntimeManager<CliWorkspaceRuntime>,
+): BackgroundTaskCommands {
+  return {
+    enqueue: (profile, objective, isolation) => manager.currentRuntime().backgroundTasks.enqueue(profile, objective, isolation),
+    list: () => manager.currentRuntime().backgroundTasks.list(),
+    cancel: (taskId) => manager.currentRuntime().backgroundTasks.cancel(taskId),
+    resume: (taskId) => manager.currentRuntime().backgroundTasks.resume(taskId),
+  };
+}
+
+async function closeWorkspaceResources(
+  session?: SessionRuntime,
+  backgroundTasks?: SubagentBackgroundService,
+  extensions?: Awaited<ReturnType<typeof initializeRuntimeExtensions>>,
+): Promise<void> {
+  const results = await Promise.allSettled([
+    session?.close() ?? Promise.resolve(),
+    backgroundTasks?.close() ?? Promise.resolve(),
+    extensions?.close() ?? Promise.resolve(),
+  ]);
+  const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+  if (failures.length) throw new AggregateError(failures, '工作区资源清理失败');
 }
 
 async function interactiveApproval(

@@ -14,6 +14,8 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 执行 `list_files`、`read_file`、`grep` 只读工具
 - 使用带跨进程锁的单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
+- 支持在 TUI/行模式中查看和切换工作目录，并为目标目录重建隔离的 Session 与运行时资源
+- TUI 支持输入 `/` 打开命令候选菜单，按说明过滤并用方向键、Tab、Enter、Esc 操作
 - 分层加载 `AGENTS.md`，项目规则只能收紧权限，不能提升到 System
 - 支持 `full-context`、`evidence`、`metadata` 三种上下文隐私模式
 - 限制工具权限、调用次数、执行时间、输出长度和 Windows 工作区路径
@@ -64,6 +66,9 @@ npm run dev -- --resume latest
 ```
 
 - `/sessions`：列出最近 Session
+- `/pwd` 或 `/workspace`：显示当前工作目录和 Session
+- `/cd <path>` 或 `/workspace <path>`：切换工作目录；相对路径以当前目录为基准
+- 在 TUI 中输入 `/`：打开带说明的命令候选菜单；`↑/↓` 选择、`Tab` 补全、`Enter` 确认、`Esc` 关闭
 - `/resume`：恢复当前 Session 的未完成 Turn
 - `/steer 新要求`：持久化新要求并从当前检查点继续
 - `/tasks`：列出最近后台任务
@@ -160,6 +165,9 @@ src/
     tool-executor.ts     权限、预算、超时和输出限制
     tool-registry.ts     工具注册表
     file-lock.ts         Session 与后台队列共用的跨进程文件锁
+    workspace-manager.ts 工作目录命令、路径校验和运行时原子切换
+    commands/command-catalog.ts
+                         内置命令目录、别名、说明、参数提示和候选过滤
     workspace-tools.ts   安全的只读代码工具
     sandbox-tools.ts     Sandbox Shell、测试、构建与安装工具
     verifier.ts          声明验证基础

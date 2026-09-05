@@ -27,6 +27,17 @@ import {
   isBackgroundTaskCommand,
   type BackgroundTaskCommands,
 } from './orchestration/task-command.js';
+import {
+  executeWorkspaceCommand,
+  isWorkspaceCommand,
+  type WorkspaceCommandService,
+} from './runtime/workspace-manager.js';
+import {
+  completeCommand,
+  filterCommandCandidates,
+  formatCommandHelp,
+  type CommandDescriptor,
+} from './commands/command-catalog.js';
 
 const DEFAULT_HEIGHT = 24;
 // 主题色集中在此：TUI 所有组件共享同一套色板，调整外观只改这里。
@@ -58,6 +69,7 @@ export interface TuiOptions {
   rollback: (checkpoint: EditCheckpoint) => Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   loadCheckpoint: (id: string) => Promise<EditCheckpoint>;
   backgroundTasks?: BackgroundTaskCommands;
+  workspaceCommands?: WorkspaceCommandService;
   startupMessages?: readonly string[];
 }
 
@@ -108,6 +120,8 @@ interface TuiState {
   privacy?: string;
   workspaceRoot: string;
   sessionId: string;
+  commandMenuSelection: number;
+  commandMenuDismissed: boolean;
 }
 
 interface Segment {
@@ -420,6 +434,37 @@ function PromptLine({ state }: { state: TuiState }): React.JSX.Element {
   );
 }
 
+function CommandMenu({
+  items,
+  selected,
+  width,
+}: {
+  items: readonly CommandDescriptor[];
+  selected: number;
+  width: number;
+}): React.JSX.Element | null {
+  if (items.length === 0) return null;
+  const visible = items.slice(0, 8);
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text color={DIM}>命令 · ↑↓ 选择 · Tab 补全 · Enter 确认 · Esc 关闭</Text>
+      {visible.map((command, index) => {
+        const marker = index === selected ? '›' : ' ';
+        const usage = command.usage ?? command.name;
+        const aliases = command.aliases?.length ? `  别名 ${command.aliases.join('、')}` : '';
+        const detail = `${usage}  ${command.description}${aliases}`;
+        return (
+          <Text key={command.name} wrap="truncate">
+            <Text color={index === selected ? BRAND : DIM} bold={index === selected}>{marker} </Text>
+            <Text color={index === selected ? ACCENT : BODY} bold={index === selected}>{truncateDisplayText(detail, Math.max(1, width - 2))}</Text>
+          </Text>
+        );
+      })}
+      {items.length > visible.length ? <Text color={DIM}>  还有 {items.length - visible.length} 个候选...</Text> : null}
+    </Box>
+  );
+}
+
 function StatusBar({ state, compact }: { state: TuiState; compact: boolean }): React.JSX.Element {
   const pct = state.maxContext && state.maxContext > 0
     ? Math.min(999, Math.round((state.tokens / state.maxContext) * 100))
@@ -458,9 +503,13 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
   const approvalBlock = state.approval
     ? approvalLines(state.approval, contentWidth, Math.max(3, maxRows - 5))
     : [];
+  const commandMenu = controller.commandMenu(state.input);
   const reserve = 3; // header + input + status
+  const commandSpace = commandMenu.visible
+    ? 1 + Math.min(8, commandMenu.items.length) + (commandMenu.items.length > 8 ? 1 : 0)
+    : 0;
   const approvalSpace = approvalBlock.length > 0 ? approvalBlock.length + 1 : 0;
-  const viewport = Math.max(2, maxRows - reserve - approvalSpace);
+  const viewport = Math.max(2, maxRows - reserve - approvalSpace - commandSpace);
 
   // 视口计算：从底部向上取 viewport 行；scrollFromBottom 大于 0 时向上偏移，
   // 并把“上方还有内容”的提示行挤掉一行，避免提示行把正文顶出屏幕。
@@ -497,6 +546,7 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
             </Box>
           )
         : null}
+      {commandMenu.visible ? <CommandMenu items={commandMenu.items} selected={commandMenu.selected} width={contentWidth} /> : null}
       <PromptLine state={state} />
       <StatusBar state={state} compact={cols < 110} />
     </Box>
@@ -562,7 +612,28 @@ export class TerminalUi {
       privacy: options.privacy,
       workspaceRoot: options.workspaceRoot,
       sessionId: options.sessionId,
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
     });
+  }
+
+  commandMenu(input: string): {
+    visible: boolean;
+    items: readonly CommandDescriptor[];
+    selected: number;
+  } {
+    const state = this.store.get();
+    const items = filterCommandCandidates(input, {
+      workspaceAvailable: Boolean(this.options.workspaceCommands),
+      backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
+      busy: state.busy,
+    });
+    const selected = Math.min(state.commandMenuSelection, Math.max(0, items.length - 1));
+    return {
+      visible: !state.commandMenuDismissed && !state.busy && !state.approval && items.length > 0,
+      items,
+      selected,
+    };
   }
 
   async start(): Promise<void> {
@@ -666,7 +737,31 @@ export class TerminalUi {
       this.quit();
       return;
     }
+    const menu = this.commandMenu(state.input);
+    if (menu.visible && key.escape) {
+      this.store.update((s) => ({ ...s, commandMenuDismissed: true }));
+      return;
+    }
+    if (menu.visible && key.upArrow) {
+      this.store.update((s) => ({
+        ...s,
+        commandMenuSelection: Math.max(0, Math.min(menu.items.length - 1, s.commandMenuSelection - 1)),
+      }));
+      return;
+    }
+    if (menu.visible && key.downArrow) {
+      this.store.update((s) => ({
+        ...s,
+        commandMenuSelection: Math.min(menu.items.length - 1, s.commandMenuSelection + 1),
+      }));
+      return;
+    }
+    if (menu.visible && key.tab) {
+      this.completeSelectedCommand(menu);
+      return;
+    }
     if (key.return) {
+      if (menu.visible && this.confirmSelectedCommand(menu)) return;
       void this.submit();
       return;
     }
@@ -679,7 +774,7 @@ export class TerminalUi {
       return;
     }
     if (key.backspace || key.delete) {
-      this.store.update((s) => ({ ...s, input: s.input.slice(0, -1) }));
+      this.setInput(state.input.slice(0, -1));
       return;
     }
     // 过滤控制字符：raw mode 下组合键会产生转义序列，只有可打印字符才进输入框。
@@ -687,9 +782,38 @@ export class TerminalUi {
       const printable = [...input].every((character) => character >= ' ' && character !== '');
       if (printable) {
         // 20_000 字符上限：防止粘贴超长内容把 TUI 渲染拖垮。
-        this.store.update((s) => ({ ...s, input: (s.input + input).slice(0, 20000) }));
+        this.setInput((state.input + input).slice(0, 20000));
       }
     }
+  }
+
+  private setInput(input: string): void {
+    this.store.update((s) => ({
+      ...s,
+      input,
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
+    }));
+  }
+
+  private completeSelectedCommand(menu: { items: readonly CommandDescriptor[]; selected: number }): void {
+    const command = menu.items[menu.selected];
+    if (!command) return;
+    this.setInput(completeCommand(this.store.get().input, command));
+  }
+
+  private confirmSelectedCommand(menu: { items: readonly CommandDescriptor[]; selected: number }): boolean {
+    const command = menu.items[menu.selected];
+    if (!command) return false;
+    const currentInput = this.store.get().input;
+    const completed = completeCommand(currentInput, command);
+    const exact = currentInput.trim().toLowerCase() === command.name
+      || command.aliases?.some((alias) => currentInput.trim().toLowerCase() === alias);
+    if (!exact || command.acceptsArguments) {
+      this.setInput(completed);
+      return true;
+    }
+    return false;
   }
 
   private handleApprovalKey(input: string, key: Key): void {
@@ -737,6 +861,8 @@ export class TerminalUi {
       ...s,
       historyIndex: index === state.history.length ? -1 : index,
       input: value,
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
     }));
   }
 
@@ -746,7 +872,14 @@ export class TerminalUi {
     // busy 时忽略提交：活动 Turn 期间不允许再发起新输入，避免并发运行。
     if (!prompt || state.busy) return;
     // 历史只保留最近 100 条，防止长会话里历史列表无限增长。
-    this.store.update((s) => ({ ...s, input: '', history: [...s.history, prompt].slice(-100), historyIndex: -1 }));
+    this.store.update((s) => ({
+      ...s,
+      input: '',
+      history: [...s.history, prompt].slice(-100),
+      historyIndex: -1,
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
+    }));
     this.pushUser(prompt);
 
     if (prompt === '/exit' || prompt === '/quit') {
@@ -754,10 +887,36 @@ export class TerminalUi {
       return;
     }
     if (prompt === '/help') {
-      this.pushNotice(
-        '/resume 继续 | /sessions 会话 | /tasks 后台任务 | /task help 委托 | /verify 验证 | /rollback <id> 回滚 | /steer <要求> | /clear 清屏 | /exit 退出',
-        'info',
-      );
+      for (const line of formatCommandHelp({
+        workspaceAvailable: Boolean(this.options.workspaceCommands),
+        backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
+      })) this.pushNotice(line, 'info');
+      return;
+    }
+    if (isWorkspaceCommand(prompt)) {
+      if (!this.options.workspaceCommands) {
+        this.pushNotice('工作目录切换服务不可用。', 'warn');
+        return;
+      }
+      await this.runTask('正在处理工作目录...', async () => {
+        const result = await executeWorkspaceCommand(prompt, this.options.workspaceCommands!);
+        if (result.workspace) {
+          this.store.update((s) => ({
+            ...s,
+            workspaceRoot: result.workspace!.workspaceRoot,
+            sessionId: result.workspace!.sessionId,
+            tokens: 0,
+          }));
+        }
+        for (const line of result.lines) {
+          const tone: Tone = line.startsWith('警告：')
+            ? 'warn'
+            : result.workspace?.changed && line.startsWith('工作目录已切换：')
+              ? 'success'
+              : 'info';
+          this.pushNotice(line, tone);
+        }
+      });
       return;
     }
     if (isBackgroundTaskCommand(prompt)) {

@@ -15,13 +15,16 @@
 | [子 Agent、后台任务与隔离工作区](./05-子Agent后台任务与隔离工作区.md) | 委派 Explore/Test/Review、后台排队、取消和恢复 | background-tasks、租约、临时 Worktree |
 | [Model Gateway 认证、代理与用量](./06-Model-Gateway认证代理与用量.md) | 登录、刷新、注销、模型发现、推理代理、限流和配额 | SQLite 三张表、客户端 Token Store |
 | [Eval 评测与动态任务](./07-Eval评测与动态任务.md) | 运行本地评测、隐藏评分、动态题目轮换 | results.jsonl、catalog.json |
+| [工作目录切换](./08-工作目录切换.md) | 查看目录、切换目录、命令候选、隔离 Session 和运行时资源 | 当前运行时引用；每个目录独立 `.echolens/` |
 
 ## 2. 总体数据流
 
 ```mermaid
 flowchart LR
   U[用户 / CLI / TUI] --> C[cli.ts 装配根]
-  C --> SR[SessionRuntime]
+  C --> CC[Command Catalog / Slash 菜单]
+  C --> WM[WorkspaceRuntimeManager]
+  WM --> SR[SessionRuntime]
   SR --> RA[ReactAgent]
   RA --> CM[ContextManager]
   RA --> MR[ModelRouter / ModelProvider]
@@ -86,6 +89,7 @@ flowchart LR
 4. Sandbox 修改未回写时检查 bundle manifest、Patch 预览和 Checkpoint。
 5. 后台任务卡住时看 `state/workerId/leaseExpiresAt/cancellationRequested/attempts`。
 6. Gateway 问题按 Request ID 对齐审计事件，再查 Token/Usage 表；不要输出令牌明文或数据库秘密。
+7. 目录切换失败时先看 `workspace_*` 错误码；新目录初始化失败不会关闭旧工作区。
 
 
 ## 7. 文档维护约定
