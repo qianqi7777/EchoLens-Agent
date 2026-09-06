@@ -9,12 +9,17 @@ export interface CommandDescriptor {
   acceptsArguments: boolean;
   availableDuringTask: boolean;
   source: 'builtin';
+  interfaces?: readonly ('tui' | 'line')[];
 }
 
 export interface CommandCatalogContext {
   workspaceAvailable: boolean;
   backgroundTasksAvailable: boolean;
   busy?: boolean;
+  interface?: 'tui' | 'line';
+  sessionDeletionAvailable?: boolean;
+  verificationAvailable?: boolean;
+  rollbackAvailable?: boolean;
 }
 
 export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
@@ -49,6 +54,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     description: '列出当前工作目录的历史 Session',
     category: 'session',
     acceptsArguments: false,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
+    name: '/session',
+    description: '删除指定历史会话（需再次确认）',
+    usage: '/session delete <session-id>',
+    category: 'session',
+    acceptsArguments: true,
     availableDuringTask: false,
     source: 'builtin',
   },
@@ -92,11 +106,12 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     usage: '/steer <要求>',
     category: 'session',
     acceptsArguments: true,
-    availableDuringTask: false,
+    availableDuringTask: true,
     source: 'builtin',
   },
   {
     name: '/clear',
+    interfaces: ['tui'],
     description: '清空当前 TUI 的显示记录',
     category: 'system',
     acceptsArguments: false,
@@ -124,7 +139,11 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
 
 export function getCommandCatalog(context: CommandCatalogContext): CommandDescriptor[] {
   return BUILTIN_COMMANDS.filter((command) => {
-    if (!context.workspaceAvailable && command.category === 'workspace') return false;
+    if (!context.workspaceAvailable && ['/pwd', '/cd'].includes(command.name)) return false;
+    if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
+    if (command.name === '/verify' && context.verificationAvailable === false) return false;
+    if (command.name === '/rollback' && context.rollbackAvailable === false) return false;
+    if (command.interfaces && !command.interfaces.includes(context.interface ?? 'tui')) return false;
     if (!context.backgroundTasksAvailable && command.category === 'task') return false;
     if (context.busy && !command.availableDuringTask) return false;
     return true;
@@ -156,8 +175,40 @@ export function filterCommandCandidates(
 export function completeCommand(input: string, command: CommandDescriptor): string {
   const leading = input.match(/^\s*/u)?.[0] ?? '';
   const token = commandToken(input);
-  const selectedName = command.aliases?.find((alias) => token !== undefined && alias.startsWith(token)) ?? command.name;
+  const selectedName = token && !command.name.startsWith(token)
+    ? command.aliases?.find((alias) => alias.startsWith(token)) ?? command.name
+    : command.name;
   return `${leading}${selectedName}${command.acceptsArguments ? ' ' : ''}`;
+}
+
+/** Canonicalize only the command token; preserve argument case, spaces and quotes. */
+export function parseCommandInput(input: string, context: CommandCatalogContext): {
+  input: string;
+  command?: CommandDescriptor;
+  error?: string;
+} {
+  const normalized = input.trim();
+  if (!normalized.startsWith('/')) return { input: normalized };
+  const [token = ''] = normalized.split(/\s/u);
+  const command = BUILTIN_COMMANDS.find((item) => item.name === token.toLowerCase()
+    || item.aliases?.includes(token.toLowerCase()));
+  if (!command) return { input: normalized, error: `未知命令：${token}。输入 /help 查看命令。` };
+  if (!getCommandCatalog(context).includes(command)) {
+    return { input: normalized, command, error: `当前状态不支持命令：${command.name}` };
+  }
+  const args = normalized.slice(token.length).trim();
+  if (args && !command.acceptsArguments) {
+    return { input: normalized, command, error: `用法：${command.usage ?? command.name}` };
+  }
+  // /workspace without arguments has historically displayed the current directory.
+  const name = token.toLowerCase() === '/workspace' && !args ? '/pwd' : command.name;
+  return { input: `${name}${args ? ` ${args}` : ''}`, command };
+}
+
+export function commandMenuWindow(total: number, selected: number, capacity: number): { start: number; end: number } {
+  const count = Math.max(0, Math.min(total, capacity));
+  const start = Math.max(0, Math.min(selected - count + 1, total - count));
+  return { start, end: start + count };
 }
 
 export function formatCommandHelp(context: CommandCatalogContext): string[] {

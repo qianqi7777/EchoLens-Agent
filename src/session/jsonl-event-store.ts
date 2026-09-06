@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, stat, truncate, type FileHandle } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, stat, truncate, unlink, type FileHandle } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { redactValueWithReport } from '../providers/redaction.js';
 import { acquireFileLock, type FileLock } from '../runtime/file-lock.js';
@@ -139,14 +139,48 @@ export class JsonlEventStore implements AgentEventSink {
         .map(async (entry) => {
           const sessionId = entry.name.slice(0, -'.jsonl'.length);
           if (!SESSION_ID_PATTERN.test(sessionId)) return undefined;
-          const info = await stat(resolve(rootDirectory, entry.name));
-          return { sessionId, bytes: info.size, modifiedAt: info.mtime.toISOString() };
+          try {
+            const info = await lstat(resolve(rootDirectory, entry.name));
+            if (!info.isFile() || info.isSymbolicLink()) return undefined;
+            return { sessionId, bytes: info.size, modifiedAt: info.mtime.toISOString() };
+          } catch (error) {
+            if (isNodeError(error, 'ENOENT')) return undefined;
+            throw error;
+          }
         }));
       return sessions.filter((item): item is SessionDescriptor => Boolean(item))
         .sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
     } catch (error) {
       if (isNodeError(error, 'ENOENT')) return [];
       throw error;
+    }
+  }
+
+  static async delete(
+    rootDirectory: string,
+    sessionId: string,
+    currentSessionId: string,
+    expected: SessionDescriptor,
+  ): Promise<void> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) throw new Error('Session ID 格式无效');
+    if (sessionId === currentSessionId) throw new Error('不能删除当前会话，请先退出或切换工作目录');
+    if (expected.sessionId !== sessionId) throw new Error('会话确认信息不匹配');
+    const root = resolve(rootDirectory);
+    const canonical = await realpath(root);
+    const same = process.platform === 'win32' ? canonical.toLowerCase() === root.toLowerCase() : canonical === root;
+    if (!same) throw new Error('拒绝通过符号链接目录删除会话');
+    const target = resolve(root, `${sessionId}.jsonl`);
+    const lock = await acquireFileLock(`${target}.lock`, { timeoutMs: 0 });
+    try {
+      const info = await lstat(target);
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error('会话目标不是普通文件');
+      if (info.size !== expected.bytes || info.mtime.toISOString() !== expected.modifiedAt) {
+        throw new Error('会话在确认期间发生变化，请重新执行删除命令');
+      }
+      // Only this validated log is removed. Checkpoints, artifacts and workspace files are retained.
+      await unlink(target);
+    } finally {
+      await lock.release();
     }
   }
 

@@ -36,8 +36,16 @@ import {
   completeCommand,
   filterCommandCandidates,
   formatCommandHelp,
+  getCommandCatalog,
+  parseCommandInput,
+  commandMenuWindow,
   type CommandDescriptor,
 } from './commands/command-catalog.js';
+import { completeArguments } from './commands/argument-completion.js';
+import { executeSessionCommand } from './commands/session-command.js';
+import type { SessionDescriptor } from './session/jsonl-event-store.js';
+
+type MenuCandidate = CommandDescriptor & { replacement?: string };
 
 const DEFAULT_HEIGHT = 24;
 // 主题色集中在此：TUI 所有组件共享同一套色板，调整外观只改这里。
@@ -65,6 +73,7 @@ export interface TuiOptions {
   resume: (signal: AbortSignal, onEvent: (event: AgentEvent) => void) => Promise<AgentRunResult>;
   steer: (message: string) => Promise<void>;
   listSessions: () => Promise<readonly { sessionId: string; modifiedAt: string; bytes: number }[]>;
+  deleteSession?: (session: SessionDescriptor) => Promise<void>;
   verify: () => Promise<readonly EditVerificationResult[]>;
   rollback: (checkpoint: EditCheckpoint) => Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   loadCheckpoint: (id: string) => Promise<EditCheckpoint>;
@@ -109,6 +118,11 @@ interface TuiState {
   status: string;
   statusTone: Tone;
   input: string;
+  inputCursor: number;
+  historyDraft: string;
+  argumentInput: string;
+  argumentCandidates: MenuCandidate[];
+  confirmation?: { message: string; resolve: (confirmed: boolean) => void };
   history: string[];
   historyIndex: number;
   scrollFromBottom: number;
@@ -407,29 +421,23 @@ function Header({ state }: { state: TuiState }): React.JSX.Element {
     <Box justifyContent="space-between">
       <Text>
         <Text color={BRAND} bold>◆ EchoLens Agent</Text>
-        <Text color={DIM}>  v0.6  ·  {state.route}{state.privacy ? `  ·  ${state.privacy}` : ''}</Text>
+        <Text color={DIM}>  ·  {state.route}{state.privacy ? `  ·  ${state.privacy}` : ''}</Text>
       </Text>
       <Text color={DIM}>{truncateDisplayText(state.workspaceRoot, 40)}</Text>
     </Box>
   );
 }
 
-function PromptLine({ state }: { state: TuiState }): React.JSX.Element {
-  if (state.busy) {
-    return (
-      <Text>
-        <Text color={BRAND} bold>❯ </Text>
-        <Text color={DIM} dimColor>··· {state.status} · Ctrl+C 取消</Text>
-      </Text>
-    );
-  }
+function PromptLine({ state, width }: { state: TuiState; width: number }): React.JSX.Element {
+  const before = state.input.slice(0, state.inputCursor).replace(/\n/gu, '↵');
+  const after = state.input.slice(state.inputCursor).replace(/\n/gu, '↵');
+  const visible = inputViewport(before, after, Math.max(1, width - 3));
   return (
-    <Box justifyContent="space-between">
-      <Text>
+    <Box height={1} overflow="hidden">
+      <Text wrap="truncate">
         <Text color={BRAND} bold>❯ </Text>
-        <Text color={BODY}>{state.input}<Text color={BRAND}>▌</Text></Text>
+        <Text color={BODY}>{visible.before}<Text color={BRAND}>▌</Text>{visible.after}</Text>
       </Text>
-      <Text color={DIM} dimColor>↑↓ 历史 · /help</Text>
     </Box>
   );
 }
@@ -438,17 +446,21 @@ function CommandMenu({
   items,
   selected,
   width,
+  capacity,
 }: {
   items: readonly CommandDescriptor[];
   selected: number;
   width: number;
+  capacity: number;
 }): React.JSX.Element | null {
   if (items.length === 0) return null;
-  const visible = items.slice(0, 8);
+  const window = commandMenuWindow(items.length, selected, capacity);
+  const visible = items.slice(window.start, window.end);
+  if (visible.length === 0) return null;
   return (
     <Box flexDirection="column" width={width}>
-      <Text color={DIM}>命令 · ↑↓ 选择 · Tab 补全 · Enter 确认 · Esc 关闭</Text>
       {visible.map((command, index) => {
+        index += window.start;
         const marker = index === selected ? '›' : ' ';
         const usage = command.usage ?? command.name;
         const aliases = command.aliases?.length ? `  别名 ${command.aliases.join('、')}` : '';
@@ -460,7 +472,6 @@ function CommandMenu({
           </Text>
         );
       })}
-      {items.length > visible.length ? <Text color={DIM}>  还有 {items.length - visible.length} 个候选...</Text> : null}
     </Box>
   );
 }
@@ -473,6 +484,7 @@ function StatusBar({ state, compact }: { state: TuiState; compact: boolean }): R
   return (
     <Box justifyContent="space-between">
       <Text wrap="truncate">
+        {state.busy ? <Text color={WARN}>{state.status}  ·  </Text> : null}
         <Text color={BRAND} bold>model {state.model}</Text>
         <Text color={MUTED}>  ·  route {state.route}</Text>
         {pct != null ? <Text color={pct > 70 ? WARN : MUTED}>  ·  ctx {pct}%</Text> : null}
@@ -491,9 +503,9 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
   const { columns, rows } = useWindowSize();
   useInput((input, key) => controller.handleKey(input, key));
 
-  const cols = Math.max(30, columns || DEFAULT_HEIGHT);
-  const maxRows = Math.max(10, rows || DEFAULT_HEIGHT);
-  const contentWidth = Math.max(24, cols - 2);
+  const cols = Math.max(1, columns || 80);
+  const maxRows = Math.max(3, rows || DEFAULT_HEIGHT);
+  const contentWidth = Math.max(1, cols - 2);
 
   const allLines = useMemo(
     () => transcriptLines(state.transcript, contentWidth),
@@ -501,15 +513,16 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
   );
 
   const approvalBlock = state.approval
-    ? approvalLines(state.approval, contentWidth, Math.max(3, maxRows - 5))
+    ? approvalLines(state.approval, contentWidth, Math.max(1, maxRows - 3)).slice(-(maxRows - 3))
     : [];
   const commandMenu = controller.commandMenu(state.input);
   const reserve = 3; // header + input + status
+  const menuCapacity = Math.max(0, Math.min(8, maxRows - reserve - 1));
   const commandSpace = commandMenu.visible
-    ? 1 + Math.min(8, commandMenu.items.length) + (commandMenu.items.length > 8 ? 1 : 0)
+    ? Math.min(menuCapacity, commandMenu.items.length)
     : 0;
-  const approvalSpace = approvalBlock.length > 0 ? approvalBlock.length + 1 : 0;
-  const viewport = Math.max(2, maxRows - reserve - approvalSpace - commandSpace);
+  const approvalSpace = approvalBlock.length;
+  const viewport = Math.max(0, maxRows - reserve - approvalSpace - commandSpace);
 
   // 视口计算：从底部向上取 viewport 行；scrollFromBottom 大于 0 时向上偏移，
   // 并把“上方还有内容”的提示行挤掉一行，避免提示行把正文顶出屏幕。
@@ -532,10 +545,19 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
     </Text>
   );
 
+  if (state.confirmation) {
+    return (
+      <Box flexDirection="column" width={cols}>
+        <Text color={WARN}>{state.confirmation.message}</Text>
+        <Text color={WARN}>确认删除？y / N</Text>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" width={cols} height={maxRows}>
-      <Header state={state} />
-      <Box flexGrow={1} flexDirection="column" overflow="hidden">
+      <Box height={1} overflow="hidden"><Header state={state} /></Box>
+      <Box height={viewport} flexDirection="column" overflow="hidden">
         {banner.map(renderLine)}
         {slice.map(renderLine)}
       </Box>
@@ -546,9 +568,9 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
             </Box>
           )
         : null}
-      {commandMenu.visible ? <CommandMenu items={commandMenu.items} selected={commandMenu.selected} width={contentWidth} /> : null}
-      <PromptLine state={state} />
-      <StatusBar state={state} compact={cols < 110} />
+      {commandMenu.visible ? <CommandMenu items={commandMenu.items} selected={commandMenu.selected} width={contentWidth} capacity={menuCapacity} /> : null}
+      <PromptLine state={state} width={cols} />
+      <Box height={1} overflow="hidden"><StatusBar state={state} compact={cols < 110} /></Box>
     </Box>
   );
 }
@@ -559,6 +581,24 @@ function cleanDisplayText(value: string): string {
   return value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '');
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+export function inputViewport(before: string, after: string, width: number): { before: string; after: string } {
+  const segments = [...graphemes.segment(before)].map((item) => item.segment);
+  let used = 0;
+  let start = segments.length;
+  while (start > 0 && used + stringWidth(segments[start - 1]!) <= width - 1) {
+    used += stringWidth(segments[--start]!);
+  }
+  return { before: segments.slice(start).join(''), after: width - used > 1 ? truncateDisplayText(after, width - used - 1) : '' };
+}
+
+function adjacentCursor(input: string, cursor: number, direction: -1 | 1): number {
+  const boundaries = [...graphemes.segment(input)].map((item) => item.index).concat(input.length);
+  return direction < 0 ? boundaries.findLast((index) => index < cursor) ?? 0
+    : boundaries.find((index) => index > cursor) ?? input.length;
 }
 
 function message(error: unknown): string {
@@ -594,6 +634,8 @@ export class TerminalUi {
   private deltaBuffer = '';
   private deltaTimer?: ReturnType<typeof setTimeout>;
   private stopped = false;
+  private completionGeneration = 0;
+  private completionTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly options: TuiOptions) {
     this.store = new UiStore({
@@ -602,6 +644,10 @@ export class TerminalUi {
       status: '就绪',
       statusTone: 'info',
       input: '',
+      inputCursor: 0,
+      historyDraft: '',
+      argumentInput: '',
+      argumentCandidates: [],
       history: [],
       historyIndex: -1,
       scrollFromBottom: 0,
@@ -619,21 +665,32 @@ export class TerminalUi {
 
   commandMenu(input: string): {
     visible: boolean;
-    items: readonly CommandDescriptor[];
+    items: readonly MenuCandidate[];
     selected: number;
   } {
     const state = this.store.get();
-    const items = filterCommandCandidates(input, {
-      workspaceAvailable: Boolean(this.options.workspaceCommands),
-      backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
-      busy: state.busy,
-    });
+    const items: MenuCandidate[] = filterCommandCandidates(input, this.catalogContext());
+    if (items.length === 0 && state.argumentInput === input && !state.busy) items.push(...state.argumentCandidates);
     const selected = Math.min(state.commandMenuSelection, Math.max(0, items.length - 1));
     return {
-      visible: !state.commandMenuDismissed && !state.busy && !state.approval && items.length > 0,
+      visible: !state.commandMenuDismissed && !state.approval && !state.confirmation && items.length > 0,
       items,
       selected,
     };
+  }
+
+  private catalogContext() {
+    return {
+      workspaceAvailable: Boolean(this.options.workspaceCommands),
+      backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
+      sessionDeletionAvailable: Boolean(this.options.deleteSession),
+      busy: this.store.get().busy,
+      interface: 'tui' as const,
+    };
+  }
+
+  view(): React.JSX.Element {
+    return <App store={this.store} controller={this} />;
   }
 
   async start(): Promise<void> {
@@ -652,7 +709,7 @@ export class TerminalUi {
       for (const message of this.options.startupMessages ?? []) this.pushNotice(message, 'info');
       this.store.update((s) => ({ ...s, status: '就绪' }));
       // exitOnCtrlC: false——Ctrl+C 由 handleKey 自行解释（有活动 Turn 时只取消 Turn）。
-      this.inkInstance = render(<App store={this.store} controller={this} />, { exitOnCtrlC: false });
+      this.inkInstance = render(this.view(), { exitOnCtrlC: false });
       await new Promise<void>((resolve) => {
         this.exitResolver = resolve;
       });
@@ -704,6 +761,14 @@ export class TerminalUi {
   // 按键分发：审批界面优先于一切普通输入；滚动键独立于输入框；其余才落到输入编辑。
   handleKey(input: string, key: Key): void {
     const state = this.store.get();
+    if (state.confirmation) {
+      const confirmed = !key.ctrl && !key.meta && input.toLowerCase() === 'y';
+      if (confirmed || input.toLowerCase() === 'n' || key.escape || key.return || (key.ctrl && ['c', 'd'].includes(input))) {
+        this.store.update((s) => ({ ...s, confirmation: undefined }));
+        state.confirmation.resolve(confirmed);
+      }
+      return;
+    }
     if (state.approval) {
       this.handleApprovalKey(input, key);
       return;
@@ -756,8 +821,9 @@ export class TerminalUi {
       }));
       return;
     }
-    if (menu.visible && key.tab) {
-      this.completeSelectedCommand(menu);
+    if (key.tab && menu.items.length > 0) {
+      if (menu.visible) this.completeSelectedCommand(menu);
+      else this.store.update((s) => ({ ...s, commandMenuDismissed: false }));
       return;
     }
     if (key.return) {
@@ -773,52 +839,91 @@ export class TerminalUi {
       this.history(1);
       return;
     }
+    if (key.leftArrow || key.rightArrow || key.home || key.end || (key.ctrl && (input === 'a' || input === 'e'))) {
+      const cursor = key.ctrl || key.home || key.end ? (key.home || input === 'a' ? 0 : state.input.length)
+        : adjacentCursor(state.input, state.inputCursor, key.leftArrow ? -1 : 1);
+      this.store.update((s) => ({ ...s, inputCursor: cursor, commandMenuDismissed: true }));
+      return;
+    }
     if (key.backspace || key.delete) {
-      this.setInput(state.input.slice(0, -1));
+      const start = key.backspace ? adjacentCursor(state.input, state.inputCursor, -1) : state.inputCursor;
+      const end = key.backspace ? state.inputCursor : adjacentCursor(state.input, state.inputCursor, 1);
+      this.setInput(state.input.slice(0, start) + state.input.slice(end), start);
       return;
     }
     // 过滤控制字符：raw mode 下组合键会产生转义序列，只有可打印字符才进输入框。
-    if (input && !key.meta) {
-      const printable = [...input].every((character) => character >= ' ' && character !== '');
+    if (input && !key.meta && !key.ctrl) {
+      input = input.replace(/\r\n?/gu, '\n');
+      const printable = [...input].every((character) => (character >= ' ' && character !== '') || character === '\n' || character === '\t');
       if (printable) {
         // 20_000 字符上限：防止粘贴超长内容把 TUI 渲染拖垮。
-        this.setInput((state.input + input).slice(0, 20000));
+        const inserted = input.slice(0, Math.max(0, 20000 - state.input.length));
+        this.setInput(state.input.slice(0, state.inputCursor) + inserted + state.input.slice(state.inputCursor), state.inputCursor + inserted.length);
       }
     }
   }
 
-  private setInput(input: string): void {
+  private setInput(input: string, cursor = input.length): void {
     this.store.update((s) => ({
       ...s,
       input,
+      inputCursor: cursor,
+      argumentInput: '',
+      argumentCandidates: [],
       commandMenuSelection: 0,
       commandMenuDismissed: false,
     }));
+    this.refreshArguments(input);
   }
 
-  private completeSelectedCommand(menu: { items: readonly CommandDescriptor[]; selected: number }): void {
+  private refreshArguments(input: string): void {
+    const generation = ++this.completionGeneration;
+    clearTimeout(this.completionTimer);
+    const token = input.trimStart().split(/\s/u)[0]?.toLowerCase();
+    const descriptor = getCommandCatalog(this.catalogContext()).find((item) => item.name === token || item.aliases?.includes(token ?? ''));
+    if (!descriptor?.acceptsArguments || !/\s/u.test(input.trimStart())) return;
+    const state = this.store.get();
+    this.completionTimer = setTimeout(() => {
+      void completeArguments(input, {
+        workspaceRoot: state.workspaceRoot,
+        currentSessionId: state.sessionId,
+        listSessions: this.options.listSessions,
+        listTasks: this.options.backgroundTasks ? () => this.options.backgroundTasks!.list() : undefined,
+      }).then((candidates) => {
+        if (this.stopped || generation !== this.completionGeneration || this.store.get().input !== input) return;
+        this.store.update((s) => ({ ...s, argumentInput: input,
+          argumentCandidates: candidates.map((candidate) => ({ ...descriptor, ...candidate, usage: candidate.name })),
+        }));
+      }).catch(() => undefined);
+    }, 60);
+    this.completionTimer.unref();
+  }
+
+  private completeSelectedCommand(menu: { items: readonly MenuCandidate[]; selected: number }): void {
     const command = menu.items[menu.selected];
     if (!command) return;
-    this.setInput(completeCommand(this.store.get().input, command));
+    this.setInput(command.replacement ?? completeCommand(this.store.get().input, command));
+    if (command.replacement) this.store.update((s) => ({ ...s, commandMenuDismissed: true }));
   }
 
-  private confirmSelectedCommand(menu: { items: readonly CommandDescriptor[]; selected: number }): boolean {
+  private confirmSelectedCommand(menu: { items: readonly MenuCandidate[]; selected: number }): boolean {
     const command = menu.items[menu.selected];
     if (!command) return false;
     const currentInput = this.store.get().input;
-    const completed = completeCommand(currentInput, command);
-    const exact = currentInput.trim().toLowerCase() === command.name
-      || command.aliases?.some((alias) => currentInput.trim().toLowerCase() === alias);
-    if (!exact || command.acceptsArguments) {
-      this.setInput(completed);
-      return true;
-    }
-    return false;
+    this.setInput(command.replacement ?? completeCommand(currentInput, command));
+    if (command.replacement) this.store.update((s) => ({ ...s, commandMenuDismissed: true }));
+    if (!command.acceptsArguments && !command.replacement) void this.submit();
+    return true;
   }
 
   private handleApprovalKey(input: string, key: Key): void {
     const approval = this.store.get().approval;
     if (!approval) return;
+    if (key.escape || (key.ctrl && ['c', 'd'].includes(input))) {
+      this.resolveApproval({ decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '用户取消审批' });
+      if (key.ctrl) this.activeAbort?.abort('user_cancelled');
+      return;
+    }
     const char = input.toLowerCase();
     if (approval.stage === 'decision') {
       if (char === 'n' || key.escape || input === '\u001b') {
@@ -856,11 +961,14 @@ export class TerminalUi {
     if (state.history.length === 0) return;
     let index = state.historyIndex < 0 ? state.history.length : state.historyIndex;
     index = Math.min(Math.max(0, index + direction), state.history.length);
-    const value = index === state.history.length ? '' : state.history[index] ?? '';
+    const draft = state.historyIndex < 0 ? state.input : state.historyDraft;
+    const value = index === state.history.length ? draft : state.history[index] ?? '';
+    this.setInput(value);
     this.store.update((s) => ({
       ...s,
       historyIndex: index === state.history.length ? -1 : index,
       input: value,
+      historyDraft: draft,
       commandMenuSelection: 0,
       commandMenuDismissed: false,
     }));
@@ -868,13 +976,23 @@ export class TerminalUi {
 
   private async submit(): Promise<void> {
     const state = this.store.get();
-    const prompt = state.input.trim();
-    // busy 时忽略提交：活动 Turn 期间不允许再发起新输入，避免并发运行。
-    if (!prompt || state.busy) return;
+    if (!state.input.trim()) return;
+    const parsed = parseCommandInput(state.input, this.catalogContext());
+    if (parsed.error) { this.pushNotice(parsed.error, 'warn'); return; }
+    const prompt = parsed.input;
+    if (state.busy && (!this.activeAbort || !prompt.startsWith('/steer '))) {
+      this.pushNotice('当前操作尚未结束；运行中的补充要求请使用 /steer <要求>。', 'warn');
+      return;
+    }
+    this.setInput('');
     // 历史只保留最近 100 条，防止长会话里历史列表无限增长。
     this.store.update((s) => ({
       ...s,
       input: '',
+      inputCursor: 0,
+      historyDraft: '',
+      argumentInput: '',
+      argumentCandidates: [],
       history: [...s.history, prompt].slice(-100),
       historyIndex: -1,
       commandMenuSelection: 0,
@@ -882,15 +1000,20 @@ export class TerminalUi {
     }));
     this.pushUser(prompt);
 
+    if (state.busy) {
+      try {
+        await this.options.steer(prompt.slice('/steer '.length));
+        this.pushNotice('补充要求已排队，将在下一模型步骤消费；若本轮已结束可用 /resume 继续。', 'info');
+      } catch (error) { this.pushNotice(message(error), 'error'); }
+      return;
+    }
+
     if (prompt === '/exit' || prompt === '/quit') {
       this.quit();
       return;
     }
     if (prompt === '/help') {
-      for (const line of formatCommandHelp({
-        workspaceAvailable: Boolean(this.options.workspaceCommands),
-        backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
-      })) this.pushNotice(line, 'info');
+      for (const line of formatCommandHelp(this.catalogContext())) this.pushNotice(line, 'info');
       return;
     }
     if (isWorkspaceCommand(prompt)) {
@@ -934,16 +1057,18 @@ export class TerminalUi {
       this.store.update((s) => ({ ...s, transcript: [], scrollFromBottom: 0 }));
       return;
     }
-    if (prompt === '/sessions') {
+    if (prompt === '/sessions' || prompt === '/session' || prompt.startsWith('/session ')) {
       await this.runTask('正在读取会话...', async () => {
-        const sessions = await this.options.listSessions();
-        if (sessions.length === 0) {
-          this.pushNotice('暂无 Session。', 'info');
-          return;
-        }
-        for (const item of sessions.slice(0, 20)) {
-          this.pushNotice(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`, 'info');
-        }
+        const lines = await executeSessionCommand(prompt, {
+          currentSessionId: state.sessionId,
+          list: this.options.listSessions,
+          delete: async (session) => {
+            if (!this.options.deleteSession) throw new Error('会话删除服务不可用');
+            await this.options.deleteSession(session);
+          },
+          confirm: (text) => this.confirmDeletion(text),
+        });
+        for (const line of lines) this.pushNotice(line, 'info');
       });
       return;
     }
@@ -954,9 +1079,9 @@ export class TerminalUi {
       });
       return;
     }
-    if (prompt.startsWith('/rollback')) {
+    if (prompt === '/rollback' || prompt.startsWith('/rollback ')) {
       const id = prompt.split(/\s+/u)[1];
-      if (!id) {
+      if (!id || prompt.split(/\s+/u).length !== 2) {
         this.pushNotice('用法：/rollback <checkpoint-id>', 'warn');
         return;
       }
@@ -967,17 +1092,26 @@ export class TerminalUi {
       });
       return;
     }
+    if (prompt === '/steer') {
+      this.pushNotice('用法：/steer <要求>', 'warn');
+      return;
+    }
     if (prompt.startsWith('/steer ')) {
-      await this.runTask('正在写入 steering...', async () => {
-        await this.options.steer(prompt.slice('/steer '.length));
-        this.pushNotice('steering 已写入', 'success');
-      });
+      await this.runAgent(prompt, true, prompt.slice('/steer '.length));
       return;
     }
     await this.runAgent(prompt, prompt === '/resume');
   }
 
-  private async runAgent(prompt: string, resume: boolean): Promise<void> {
+  private confirmDeletion(text: string): Promise<boolean> {
+    if (this.stopped) return Promise.resolve(false);
+    this.pushNotice(text, 'warn');
+    return new Promise((resolve) => this.store.update((s) => ({
+      ...s, scrollFromBottom: 0, confirmation: { message: text, resolve },
+    })));
+  }
+
+  private async runAgent(prompt: string, resume: boolean, steering?: string): Promise<void> {
     if (this.store.get().busy) return;
     this.store.update((s) => ({
       ...s,
@@ -987,6 +1121,7 @@ export class TerminalUi {
     }));
     this.activeAbort = new AbortController();
     try {
+      if (steering) await this.options.steer(steering);
       const result = resume
         ? await this.options.resume(this.activeAbort.signal, (event) => this.onEvent(event))
         : await this.options.run(prompt, this.activeAbort.signal, (event) => this.onEvent(event));
@@ -1209,9 +1344,12 @@ export class TerminalUi {
   private quit(): void {
     if (this.stopped) return;
     this.stopped = true;
+    clearTimeout(this.completionTimer);
+    this.completionGeneration += 1;
     // 退出即取消活动 Turn；挂起的审批按拒绝结算，避免调用方永远等不到决定。
     this.activeAbort?.abort('user_exit');
     const state = this.store.get();
+    state.confirmation?.resolve(false);
     if (state.approval) {
       this.store.update((s) => ({ ...s, approval: undefined }));
       state.approval.resolve({

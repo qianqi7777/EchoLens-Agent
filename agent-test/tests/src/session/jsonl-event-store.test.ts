@@ -1,10 +1,57 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { FileLockError } from '../../../../src/runtime/file-lock.js';
 import { EventStoreCorruptionError, JsonlEventStore } from '../../../../src/session/jsonl-event-store.js';
+
+test('删除仅移除确认的历史日志，保留相邻数据并释放文件锁', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'old.jsonl'), 'old log\n');
+  await writeFile(join(root, 'other.jsonl'), 'other log\n');
+  await writeFile(join(root, 'checkpoint.json'), '{}');
+  const expected = (await JsonlEventStore.list(root)).find((item) => item.sessionId === 'old')!;
+  await JsonlEventStore.delete(root, 'old', 'current', expected);
+  await assert.rejects(lstat(join(root, 'old.jsonl')), { code: 'ENOENT' });
+  await assert.rejects(lstat(join(root, 'old.jsonl.lock')), { code: 'ENOENT' });
+  assert.equal(await readFile(join(root, 'other.jsonl'), 'utf8'), 'other log\n');
+  assert.equal(await readFile(join(root, 'checkpoint.json'), 'utf8'), '{}');
+  await assert.rejects(JsonlEventStore.delete(root, 'old', 'current', expected), { code: 'ENOENT' });
+});
+
+test('删除拒绝当前会话、活跃写者、路径穿越和确认后变化', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-guard-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const active = new JsonlEventStore(root, 'active');
+  await active.read();
+  const expected = (await JsonlEventStore.list(root))[0]!;
+  await assert.rejects(JsonlEventStore.delete(root, 'active', 'active', expected), /当前/u);
+  await assert.rejects(JsonlEventStore.delete(root, 'active', 'different', expected), FileLockError);
+  for (const id of ['../escape', '..\\escape', '/absolute', 'C:\\escape', '']) {
+    await assert.rejects(JsonlEventStore.delete(root, id, 'current', expected), /格式/u);
+  }
+  await active.close();
+  await appendFile(join(root, 'active.jsonl'), 'changed\n');
+  await assert.rejects(JsonlEventStore.delete(root, 'active', 'different', expected), /变化/u);
+  assert.equal(await readFile(join(root, 'active.jsonl'), 'utf8'), 'changed\n');
+  await assert.rejects(lstat(join(root, 'active.jsonl.lock')), { code: 'ENOENT' });
+});
+
+test('删除拒绝符号链接会话目录和非普通文件', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-link-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const actual = join(root, 'actual');
+  await mkdir(actual);
+  await writeFile(join(actual, 'old.jsonl'), 'retained');
+  const expected = (await JsonlEventStore.list(actual))[0]!;
+  await symlink(actual, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(JsonlEventStore.delete(join(root, 'linked'), 'old', 'current', expected), /符号链接/u);
+  await mkdir(join(actual, 'directory.jsonl'));
+  await assert.rejects(JsonlEventStore.delete(actual, 'directory', 'current', { ...expected, sessionId: 'directory' }), /普通文件/u);
+  assert.equal(await readFile(join(actual, 'old.jsonl'), 'utf8'), 'retained');
+});
 
 test('并行 append 由单写者分配连续 seq 且每行完整', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-events-'));

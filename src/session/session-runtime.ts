@@ -35,24 +35,29 @@ export class SessionRuntime {
       options.storeOptions,
     );
     const runtime = new SessionRuntime(agent, store);
-    const events = await store.read();
-    if (events.length === 0) {
-      // 新 Session 首次落盘 session.created，把正式工作区根目录写入事件，供后续 open 校验。
-      const event = await store.append({ payload: { type: 'session.created', workspaceRoot: options.workspaceRoot } });
-      await options.hooks?.observe(event);
-    } else {
-      const created = events.find((event) => event.payload.type === 'session.created');
-      if (!created || created.payload.type !== 'session.created') {
-        throw new Error('Session 缺少创建事件');
+    try {
+      const events = await store.read();
+      if (events.length === 0) {
+        // 新 Session 首次落盘 session.created，把正式工作区根目录写入事件，供后续 open 校验。
+        const event = await store.append({ payload: { type: 'session.created', workspaceRoot: options.workspaceRoot } });
+        await options.hooks?.observe(event);
+      } else {
+        const created = events.find((event) => event.payload.type === 'session.created');
+        if (!created || created.payload.type !== 'session.created') {
+          throw new Error('Session 缺少创建事件');
+        }
+        // 拒绝跨工作区恢复：检查点与已恢复的工具结果绑定原工作区路径，套用到新工作区会指向错误文件。
+        if (created.payload.workspaceRoot !== options.workspaceRoot) {
+          throw new Error('Session 工作区与当前工作区不一致');
+        }
+        runtime.history = recoverCheckpoint(events)?.items ?? [];
+        runtime.steeringQueue = pendingSteering(events);
       }
-      // 拒绝跨工作区恢复：检查点与已恢复的工具结果绑定原工作区路径，套用到新工作区会指向错误文件。
-      if (created.payload.workspaceRoot !== options.workspaceRoot) {
-        throw new Error('Session 工作区与当前工作区不一致');
-      }
-      runtime.history = recoverCheckpoint(events)?.items ?? [];
-      runtime.steeringQueue = pendingSteering(events);
+      return runtime;
+    } catch (error) {
+      await store.close().catch(() => undefined);
+      throw error;
     }
-    return runtime;
   }
 
   async run(
@@ -107,12 +112,13 @@ export class SessionRuntime {
     const checkpoint = recoverCheckpoint(await this.store.read());
     const turnId = this.activeTurnId ?? checkpoint?.turnId;
     if (!turnId) throw new Error('当前 Session 没有可 steering 的 Turn');
-    this.steeringQueue.push(normalized);
+    if (!this.activeTurnId && checkpoint?.state === 'completed') throw new Error('最近一个 Turn 已完成，请直接提交新问题');
     await this.store.append({
       turnId,
       runId: checkpoint?.runId,
       payload: { type: 'turn.steered', message: normalized },
     });
+    this.steeringQueue.push(normalized);
   }
 
   conversation(): ConversationItem[] {

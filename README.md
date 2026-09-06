@@ -66,11 +66,12 @@ npm run dev -- --resume latest
 ```
 
 - `/sessions`：列出最近 Session
+- `/session delete <session-id>`：确认后删除指定历史 Session 日志（当前 Session 不可删除）
 - `/pwd` 或 `/workspace`：显示当前工作目录和 Session
 - `/cd <path>` 或 `/workspace <path>`：切换工作目录；相对路径以当前目录为基准
 - 在 TUI 中输入 `/`：打开带说明的命令候选菜单；`↑/↓` 选择、`Tab` 补全、`Enter` 确认、`Esc` 关闭
 - `/resume`：恢复当前 Session 的未完成 Turn
-- `/steer 新要求`：持久化新要求并从当前检查点继续
+- `/steer 新要求`：运行中排队补充要求；暂停后写入并从当前检查点继续
 - `/tasks`：列出最近后台任务
 - `/task <explore|test|review> [sandbox|worktree] <目标>`：创建并启动受限后台任务
 - `/task cancel <id>`：取消后台任务

@@ -12,5 +12,6 @@ coverage/
 .DS_Store
 Thumbs.db
 studydocs/
+studydoc/
 AGENTS.md
 .workbuddy/

@@ -42,7 +42,7 @@ export async function executeBackgroundTaskCommand(
   if (!action || action === 'help') return { handled: true, lines: taskHelp() };
   if (action === 'cancel' || action === 'resume') {
     const taskId = parts[2];
-    if (!taskId) return { handled: true, lines: [`用法：/task ${action} <task-id>`] };
+    if (!taskId || parts.length !== 3) return { handled: true, lines: [`用法：/task ${action} <task-id>`] };
     const task = action === 'cancel' ? await service.cancel(taskId) : await service.resume(taskId);
     return { handled: true, lines: [formatBackgroundTask(task)] };
   }

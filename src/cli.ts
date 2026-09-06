@@ -43,7 +43,8 @@ import {
   type PrivacyLevel,
   type WorkspaceCommandService,
 } from './runtime/index.js';
-import { formatCommandHelp } from './commands/command-catalog.js';
+import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
+import { executeSessionCommand } from './commands/session-command.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -124,6 +125,10 @@ if (!model) {
         resume: (signal, onEvent) => manager.currentRuntime().session.resume(signal, onEvent),
         steer: (message) => manager.currentRuntime().session.steer(message),
         listSessions: () => JsonlEventStore.list(manager.currentRuntime().sessionRoot),
+        deleteSession: (session) => {
+          const active = manager.currentRuntime();
+          return JsonlEventStore.delete(active.sessionRoot, session.sessionId, active.sessionId, session);
+        },
         verify: async () => {
           const active = manager.currentRuntime();
           return runVerification(await selectVerificationPlan(active.workspaceRoot, []));
@@ -182,11 +187,17 @@ if (!model) {
       for (const message of current.startupMessages) console.log(message);
       console.log('输入问题开始分析；/pwd 查看目录，/cd <path> 切换目录，/sessions 查看会话，/tasks 查看后台任务，/exit 退出。');
       while (true) {
-        const prompt = (await lineTerminal!.question('\n> ')).trim();
+        let prompt = (await lineTerminal!.question('\n> ')).trim();
         if (!prompt) continue;
+        const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
+          sessionDeletionAvailable: true, interface: 'line' as const };
+        const parsed = parseCommandInput(prompt, commandContext);
+        if (parsed.error) { console.error(parsed.error); continue; }
+        prompt = parsed.input;
+        try {
         if (prompt === '/exit' || prompt === '/quit') break;
         if (prompt === '/help') {
-          for (const line of formatCommandHelp({ workspaceAvailable: true, backgroundTasksAvailable: true })) {
+          for (const line of formatCommandHelp(commandContext)) {
             console.log(line);
           }
           continue;
@@ -200,12 +211,18 @@ if (!model) {
           }
           continue;
         }
-        if (prompt === '/sessions') {
-          const sessions = await JsonlEventStore.list(manager.currentRuntime().sessionRoot);
-          for (const item of sessions.slice(0, 20)) {
-            console.log(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`);
-          }
-          if (sessions.length === 0) console.log('暂无 Session。');
+        if (prompt === '/sessions' || prompt === '/session' || prompt.startsWith('/session ')) {
+          const active = manager.currentRuntime();
+          const lines = await executeSessionCommand(prompt, {
+            currentSessionId: active.sessionId,
+            list: () => JsonlEventStore.list(active.sessionRoot),
+            delete: (session) => JsonlEventStore.delete(active.sessionRoot, session.sessionId, active.sessionId, session),
+            confirm: async (message) => {
+              if (!input.isTTY) throw new Error('历史会话删除需要交互式终端确认，不接受管道确认');
+              return (await lineTerminal!.question(`${message}\n输入 y 确认，其他输入取消 [y/N]：`)).trim().toLowerCase() === 'y';
+            },
+          });
+          for (const line of lines) console.log(line);
           continue;
         }
         if (isBackgroundTaskCommand(prompt)) {
@@ -224,15 +241,16 @@ if (!model) {
           for (const result of results) console.log(`${result.id}: ${result.status} - ${result.summary}`);
           continue;
         }
-        if (prompt.startsWith('/rollback')) {
+        if (prompt === '/rollback' || prompt.startsWith('/rollback ')) {
           const requested = prompt.split(/\s+/u)[1];
-          if (!requested) { console.log('用法：/rollback <checkpoint-id>'); continue; }
+          if (!requested || prompt.split(/\s+/u).length !== 2) { console.log('用法：/rollback <checkpoint-id>'); continue; }
           const active = manager.currentRuntime();
           const rollback = await rollbackCheckpoint(await loadEditCheckpoint(active.workspaceRoot, requested));
           console.log(`已回滚 checkpoint=${requested}，恢复 ${rollback.restoredPaths.length} 个文件`);
           if (rollback.skippedPaths.length) console.log(`检测到后续用户修改，跳过：${rollback.skippedPaths.join(', ')}`);
           continue;
         }
+        if (prompt === '/steer') { console.log('用法：/steer <要求>'); continue; }
         if (prompt.startsWith('/steer ')) {
           await executeTurn(async (signal, onEvent) => {
             const active = manager.currentRuntime();
@@ -247,6 +265,9 @@ if (!model) {
             ? active.session.resume(signal, onEvent)
             : active.session.run(prompt, signal, onEvent);
         });
+        } catch (error) {
+          console.error(`命令执行失败：${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
   } catch (error) {

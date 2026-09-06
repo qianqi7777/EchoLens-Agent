@@ -323,6 +323,22 @@ test('运行中的 steering 在同一 Turn 下一模型步骤生效并持久化'
   assert.equal(steering?.turnId, result.turnId);
 });
 
+test('Session 打开失败释放锁，已完成 Turn 拒绝追加无法恢复的 steering', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-session-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const registry = new ToolRegistry();
+  const agent = new ReactAgent(finalProvider([]), registry, new ToolExecutor(registry), { workspaceRoot: root });
+  const options = { rootDirectory: join(root, 'sessions'), workspaceRoot: root, sessionId: 'history' };
+  const first = await SessionRuntime.open(agent, options);
+  await first.run('hello');
+  await assert.rejects(first.steer('too late'), /已完成/u);
+  assert.ok(!(await first.store.read()).some((event) => event.payload.type === 'turn.steered'));
+  await first.close();
+  await assert.rejects(SessionRuntime.open(agent, { ...options, workspaceRoot: join(root, 'wrong') }), /不一致/u);
+  const reopened = await SessionRuntime.open(agent, options);
+  await reopened.close();
+});
+
 function toolCallingProvider(): ModelProvider {
   return {
     model: 'tool-caller',
