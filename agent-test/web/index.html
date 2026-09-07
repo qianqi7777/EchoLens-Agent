@@ -3,29 +3,54 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent Test Lab</title>
+  <title>EchoLens Test Lab</title>
   <link rel="stylesheet" href="/styles.css">
+  <script src="/icons.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div><p class="eyebrow">EchoLens Agent</p><h1>Agent Test Lab</h1></div>
-      <span id="health" class="status">连接中</span>
-    </header>
-    <section class="toolbar">
-      <label>本地仓库路径<input id="repoRoot" value="."></label>
-      <label>GitHub 仓库（可选）<input id="githubRepo" placeholder="owner/repo"></label>
-      <button id="loadGithub" class="secondary">读取 Issues</button>
-      <label class="switch"><input id="execute" type="checkbox">执行真实 CLI</label>
-      <button id="run">运行对比</button>
-      <button id="quality" class="secondary">完整质量测试</button>
-    </section>
-    <section class="grid">
-      <article class="panel"><div class="panel-head"><h2>Provider</h2><span>本地命令适配</span></div><div id="providers"></div></article>
-      <article class="panel"><div class="panel-head"><h2>Issues</h2><span id="issueCount">0 条</span></div><textarea id="issues" spellcheck="false"></textarea></article>
-    </section>
-    <section class="panel results"><div class="panel-head"><h2>横向结果</h2><span id="runState">等待运行</span></div><div id="cards" class="cards"></div></section>
+  <header class="topbar">
+    <div class="brand"><i data-lucide="flask-conical" aria-hidden="true"></i><div><h1>EchoLens Test Lab</h1><span>本地评测工作台</span></div></div>
+    <div class="header-actions"><span id="health" class="badge" role="status">连接中</span><button id="quality" class="secondary"><i data-lucide="shield-check"></i>质量检查</button></div>
+  </header>
+  <main class="workspace">
+    <aside class="configuration" aria-label="评测配置">
+      <h2>运行配置</h2>
+      <label for="repoRoot">本地仓库路径</label><input id="repoRoot" value="." autocomplete="off" spellcheck="false">
+      <fieldset class="mode"><legend>执行模式</legend><label><input type="radio" name="mode" value="simulated" checked>本地模拟</label><label><input id="execute" type="radio" name="mode" value="executed" disabled>真实 CLI</label></fieldset>
+      <span id="executionState" class="meta">真实执行已锁定</span>
+      <div class="section-heading"><h2>Provider</h2><span id="providerCount" class="meta">1 已选</span></div>
+      <div id="providers"></div>
+      <div class="section-heading"><h2>GitHub Issues</h2></div>
+      <label for="githubRepo">公开仓库</label><input id="githubRepo" placeholder="owner/repo" spellcheck="false" autocomplete="off">
+      <div class="github-actions"><label for="githubLimit">数量</label><input id="githubLimit" type="number" min="1" max="100" value="20"><button id="loadGithub" class="secondary"><i data-lucide="cloud-download"></i>读取</button></div>
+    </aside>
+    <div class="main-content">
+      <div class="runbar"><div><span id="issueCount" class="count">0</span><span class="meta"> 条任务</span><span id="runMode" class="badge">模拟</span></div><div class="actions"><button id="cancel" class="danger" hidden><i data-lucide="square"></i>取消</button><button id="run"><i data-lucide="play"></i>运行对比</button></div></div>
+      <div class="activity" aria-live="polite"><span id="runState">等待运行</span><span id="elapsed" class="meta"></span></div>
+      <div class="tabs" role="tablist" aria-label="工作区视图">
+        <button id="tab-dataset" role="tab" aria-controls="dataset" aria-selected="true" data-tab="dataset">任务集</button>
+        <button id="tab-results" role="tab" aria-controls="results" aria-selected="false" data-tab="results" tabindex="-1">对比结果</button>
+        <button id="tab-qualityLog" role="tab" aria-controls="qualityLog" aria-selected="false" data-tab="qualityLog" tabindex="-1">质量日志</button>
+      </div>
+      <section id="dataset" role="tabpanel" aria-labelledby="tab-dataset">
+        <div class="section-heading"><h2>Issue JSON</h2><div class="actions"><button id="sample" class="text-button">加载示例</button><button id="import" class="icon-button" title="导入任务 JSON" aria-label="导入任务 JSON"><i data-lucide="upload"></i></button><button id="format" class="icon-button" title="格式化 JSON" aria-label="格式化 JSON"><i data-lucide="braces"></i></button><button id="exportIssues" class="icon-button" title="导出任务 JSON" aria-label="导出任务 JSON"><i data-lucide="download"></i></button></div></div>
+        <input id="file" type="file" accept="application/json,.json" hidden>
+        <textarea id="issues" aria-label="Issue JSON" aria-describedby="validation" spellcheck="false"></textarea>
+        <div id="validation" class="meta" role="status"></div>
+        <div class="section-heading"><h2>任务清单</h2><span id="checkCount" class="meta"></span></div>
+        <div id="issuePreview" class="issue-list"></div>
+      </section>
+      <section id="results" role="tabpanel" aria-labelledby="tab-results" hidden>
+        <div class="section-heading"><h2>运行结果</h2><button id="exportResults" class="icon-button" title="导出结果 JSON" aria-label="导出结果 JSON" disabled><i data-lucide="download"></i></button></div>
+        <p id="resultMeta" class="meta">暂无运行记录</p><div id="cards" class="cards"></div><div id="resultDetails"></div>
+      </section>
+      <section id="qualityLog" role="tabpanel" aria-labelledby="tab-qualityLog" hidden>
+        <div class="section-heading"><h2>check:ci</h2><button id="exportQuality" class="icon-button" title="下载质量日志" aria-label="下载质量日志" disabled><i data-lucide="download"></i></button></div>
+        <p id="qualityMeta" class="meta">尚未运行</p><pre id="qualityOutput" tabindex="0">暂无日志</pre>
+      </section>
+    </div>
   </main>
-  <script type="module" src="/app.js"></script>
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle"><form method="dialog"><h2 id="confirmTitle">确认真实执行</h2><p>将启动所选 CLI，可能使用模型额度；验证命令也会在本机执行。临时副本不是操作系统沙箱，请仅运行可信任务和仓库。</p><div class="actions"><button value="cancel" class="secondary">取消</button><button value="confirm">确认执行</button></div></form></dialog>
 </body>
 </html>
