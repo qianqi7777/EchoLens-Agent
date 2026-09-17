@@ -7,7 +7,7 @@ import test from 'node:test';
 import { textMessage, type ToolCallItem } from '../../../../src/core/messages.js';
 import type { ModelProvider, ProviderRequest, ProviderResult, ProviderCapabilities } from '../../../../src/providers/types.js';
 import { MemoryApprovalStore } from '../../../../src/runtime/approval.js';
-import { ReactAgent } from '../../../../src/runtime/react-loop.js';
+import { ReactAgent } from '../../../../src/runtime/resumable-react-agent.js';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
 import { registerWorkspaceTools } from '../../../../src/runtime/workspace-tools.js';

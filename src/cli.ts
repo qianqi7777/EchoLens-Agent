@@ -7,44 +7,28 @@ import { createEventRenderer } from './cli-event-renderer.js';
 import { previewApprovalRequest } from './approval-preview.js';
 import { ensureStartupConfiguration } from './config/startup-config.js';
 import { TerminalUi } from './tui.js';
-import {
-  JsonlEventStore,
-  ModelRouter,
-  ReactAgent,
-  SessionRuntime,
-  ToolExecutor,
-  ToolRegistry,
-  registerWorkspaceTools,
-  registerSandboxTools,
-  DockerSandboxAdapter,
-  JsonApprovalStore,
-  loadEditCheckpoint,
-  rollbackCheckpoint,
-  runVerification,
-  selectVerificationPlan,
-  type ApprovalDecision,
-  type ApprovalRequest,
-  type AgentRunResult,
-  initializeRuntimeExtensions,
-  PersistentTaskQueue,
-  SubagentBackgroundService,
-  SubagentOrchestrator,
-  executeBackgroundTaskCommand,
-  formatBackgroundTask,
-  isBackgroundTaskCommand,
-  registerSubagentTool,
-  executeWorkspaceCommand,
-  isWorkspaceCommand,
-  resolveWorkspaceDirectory,
-  WorkspaceRuntimeManager,
-  type BackgroundTaskCommands,
-  type ManagedWorkspaceRuntime,
-  type ModelProvider,
-  type PrivacyLevel,
-  type WorkspaceCommandService,
-} from './runtime/index.js';
+import { JsonlEventStore } from './session/jsonl-event-store.js';
+import { ModelRouter, type PrivacyLevel } from './runtime/model-router.js';
+import { ReactAgent, type AgentRunResult } from './runtime/resumable-react-agent.js';
+import { SessionRuntime } from './session/session-runtime.js';
+import { ToolExecutor } from './runtime/tool-executor.js';
+import { ToolRegistry } from './runtime/tool-registry.js';
+import { registerWorkspaceTools } from './runtime/workspace-tools.js';
+import { registerSandboxTools } from './runtime/sandbox-tools.js';
+import { DockerSandboxAdapter } from './sandbox/docker-sandbox.js';
+import { JsonApprovalStore, type ApprovalDecision, type ApprovalRequest } from './runtime/approval.js';
+import { loadEditCheckpoint, rollbackCheckpoint } from './runtime/structured-patch.js';
+import { runVerification, selectVerificationPlan } from './runtime/verification.js';
+import { initializeRuntimeExtensions } from './runtime/runtime-extensions.js';
+import { PersistentTaskQueue } from './orchestration/task-queue.js';
+import { SubagentBackgroundService } from './orchestration/subagent-background.js';
+import { SubagentOrchestrator, registerSubagentTool } from './orchestration/subagent.js';
+import { formatBackgroundTask, type BackgroundTaskCommands } from './orchestration/task-command.js';
+import { resolveWorkspaceDirectory, WorkspaceRuntimeManager, type ManagedWorkspaceRuntime, type WorkspaceCommandService } from './runtime/workspace-manager.js';
+import { type ModelProvider } from './providers/types.js';
+import { SkillManager } from './skills/skill-manager.js';
 import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
-import { executeSessionCommand } from './commands/session-command.js';
+import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -111,6 +95,22 @@ if (!model) {
     workspaceManager = manager;
     const workspaceCommands = workspaceCommandProxy(manager);
     const backgroundTasks = backgroundTaskProxy(manager);
+    const commandServices: CommandServices = {
+    listSessions: () => JsonlEventStore.list(manager.currentRuntime().sessionRoot),
+    deleteSession: (session) => {
+      const active = manager.currentRuntime();
+      return JsonlEventStore.delete(active.sessionRoot, session.sessionId, active.sessionId, session);
+    },
+    verify: async () => {
+      const active = manager.currentRuntime();
+      return runVerification(await selectVerificationPlan(active.workspaceRoot, []));
+    },
+    rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
+    loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
+    backgroundTasks,
+    workspaceCommands,
+      importSkill: (source) => new SkillManager({ workspaceRoot: manager.currentRuntime().workspaceRoot }).import(source),
+    };
 
     if (useTui) {
       const current = manager.currentRuntime();
@@ -124,19 +124,7 @@ if (!model) {
         run: (prompt, signal, onEvent) => manager.currentRuntime().session.run(prompt, signal, onEvent),
         resume: (signal, onEvent) => manager.currentRuntime().session.resume(signal, onEvent),
         steer: (message) => manager.currentRuntime().session.steer(message),
-        listSessions: () => JsonlEventStore.list(manager.currentRuntime().sessionRoot),
-        deleteSession: (session) => {
-          const active = manager.currentRuntime();
-          return JsonlEventStore.delete(active.sessionRoot, session.sessionId, active.sessionId, session);
-        },
-        verify: async () => {
-          const active = manager.currentRuntime();
-          return runVerification(await selectVerificationPlan(active.workspaceRoot, []));
-        },
-        rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
-        loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
-        backgroundTasks,
-        workspaceCommands,
+        ...commandServices,
         startupMessages: current.startupMessages,
       });
       await tui.start();
@@ -190,7 +178,7 @@ if (!model) {
         let prompt = (await lineTerminal!.question('\n> ')).trim();
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
-          sessionDeletionAvailable: true, interface: 'line' as const };
+          sessionDeletionAvailable: true, skillImportAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }
         prompt = parsed.input;
@@ -202,52 +190,15 @@ if (!model) {
           }
           continue;
         }
-        if (isWorkspaceCommand(prompt)) {
-          try {
-            const result = await executeWorkspaceCommand(prompt, workspaceCommands);
-            for (const line of result.lines) console.log(line);
-          } catch (error) {
-            console.error(`工作目录命令失败：${error instanceof Error ? error.message : String(error)}`);
-          }
-          continue;
-        }
-        if (prompt === '/sessions' || prompt === '/session' || prompt.startsWith('/session ')) {
-          const active = manager.currentRuntime();
-          const lines = await executeSessionCommand(prompt, {
-            currentSessionId: active.sessionId,
-            list: () => JsonlEventStore.list(active.sessionRoot),
-            delete: (session) => JsonlEventStore.delete(active.sessionRoot, session.sessionId, active.sessionId, session),
+        if (isServiceCommand(prompt)) {
+          const result = await executeServiceCommand(prompt, commandServices, {
+            currentSessionId: manager.currentRuntime().sessionId,
             confirm: async (message) => {
               if (!input.isTTY) throw new Error('历史会话删除需要交互式终端确认，不接受管道确认');
               return (await lineTerminal!.question(`${message}\n输入 y 确认，其他输入取消 [y/N]：`)).trim().toLowerCase() === 'y';
             },
           });
-          for (const line of lines) console.log(line);
-          continue;
-        }
-        if (isBackgroundTaskCommand(prompt)) {
-          try {
-            const result = await executeBackgroundTaskCommand(prompt, backgroundTasks);
-            for (const line of result.lines) console.log(line);
-          } catch (error) {
-            console.error(`后台任务命令失败：${error instanceof Error ? error.message : String(error)}`);
-          }
-          continue;
-        }
-        if (prompt === '/verify') {
-          const active = manager.currentRuntime();
-          const plan = await selectVerificationPlan(active.workspaceRoot, []);
-          const results = await runVerification(plan);
-          for (const result of results) console.log(`${result.id}: ${result.status} - ${result.summary}`);
-          continue;
-        }
-        if (prompt === '/rollback' || prompt.startsWith('/rollback ')) {
-          const requested = prompt.split(/\s+/u)[1];
-          if (!requested || prompt.split(/\s+/u).length !== 2) { console.log('用法：/rollback <checkpoint-id>'); continue; }
-          const active = manager.currentRuntime();
-          const rollback = await rollbackCheckpoint(await loadEditCheckpoint(active.workspaceRoot, requested));
-          console.log(`已回滚 checkpoint=${requested}，恢复 ${rollback.restoredPaths.length} 个文件`);
-          if (rollback.skippedPaths.length) console.log(`检测到后续用户修改，跳过：${rollback.skippedPaths.join(', ')}`);
+          for (const line of result.lines) console.log(line);
           continue;
         }
         if (prompt === '/steer') { console.log('用法：/steer <要求>'); continue; }

@@ -10,7 +10,7 @@ import {
   type ProposedActionDecision,
   type ProposedActionGuardrail,
 } from '../runtime/action-guardrail.js';
-import { ReactAgent } from '../runtime/react-loop.js';
+import { ReactAgent } from '../runtime/resumable-react-agent.js';
 import { toolSuccess } from '../runtime/tool-result.js';
 import { ToolExecutor } from '../runtime/tool-executor.js';
 import { ToolRegistry } from '../runtime/tool-registry.js';

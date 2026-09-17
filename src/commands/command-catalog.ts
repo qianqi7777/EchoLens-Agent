@@ -1,4 +1,4 @@
-export type CommandCategory = 'workspace' | 'session' | 'task' | 'system';
+export type CommandCategory = 'workspace' | 'session' | 'task' | 'skill' | 'system';
 
 export interface CommandDescriptor {
   name: string;
@@ -18,11 +18,21 @@ export interface CommandCatalogContext {
   busy?: boolean;
   interface?: 'tui' | 'line';
   sessionDeletionAvailable?: boolean;
+  skillImportAvailable?: boolean;
   verificationAvailable?: boolean;
   rollbackAvailable?: boolean;
 }
 
 export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
+  {
+    name: '/skill',
+    description: '导入本地 Skill 包',
+    usage: '/skill import <path>',
+    category: 'skill',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
   {
     name: '/pwd',
     description: '显示当前工作目录和 Session ID',
@@ -140,6 +150,7 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
 export function getCommandCatalog(context: CommandCatalogContext): CommandDescriptor[] {
   return BUILTIN_COMMANDS.filter((command) => {
     if (!context.workspaceAvailable && ['/pwd', '/cd'].includes(command.name)) return false;
+    if (command.name === '/skill' && !context.skillImportAvailable) return false;
     if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
     if (command.name === '/verify' && context.verificationAvailable === false) return false;
     if (command.name === '/rollback' && context.rollbackAvailable === false) return false;

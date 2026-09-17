@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ConversationItem } from '../core/messages.js';
-import type { AgentRunResult, ReactAgent } from '../runtime/react-loop.js';
+import type { AgentRunResult, ReactAgent } from '../runtime/resumable-react-agent.js';
 import type { AgentCheckpoint, AgentEvent } from './events.js';
 import { JsonlEventStore, type JsonlEventStoreOptions } from './jsonl-event-store.js';
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';

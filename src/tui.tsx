@@ -14,24 +14,10 @@ import {
 import type { AgentEvent } from './session/events.js';
 import type { AgentRunResult } from './runtime/resumable-react-agent.js';
 import { previewApprovalRequest, type ApprovalPreview } from './approval-preview.js';
-import type {
-  ApprovalDecision,
-  ApprovalRequest,
-  EditCheckpoint,
-  EditVerificationResult,
-  FinalSummary,
-  ToolExecutionStatus,
-} from './runtime/index.js';
-import {
-  executeBackgroundTaskCommand,
-  isBackgroundTaskCommand,
-  type BackgroundTaskCommands,
-} from './orchestration/task-command.js';
-import {
-  executeWorkspaceCommand,
-  isWorkspaceCommand,
-  type WorkspaceCommandService,
-} from './runtime/workspace-manager.js';
+import { type ApprovalDecision, type ApprovalRequest } from './runtime/approval.js';
+import { type FinalSummary } from './runtime/structured-output.js';
+import { type ToolExecutionStatus } from './core/messages.js';
+import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 import {
   completeCommand,
   filterCommandCandidates,
@@ -42,8 +28,6 @@ import {
   type CommandDescriptor,
 } from './commands/command-catalog.js';
 import { completeArguments } from './commands/argument-completion.js';
-import { executeSessionCommand } from './commands/session-command.js';
-import type { SessionDescriptor } from './session/jsonl-event-store.js';
 
 type MenuCandidate = CommandDescriptor & { replacement?: string };
 
@@ -62,7 +46,7 @@ const BODY = '#e6e6e6';
  * TUI 的装配参数。所有能力都以回调注入，TerminalUi 不直接依赖 Session/Runtime 实现，
  * 这样既能复用现有协议，也便于测试时替换成假实现。
  */
-export interface TuiOptions {
+export interface TuiOptions extends CommandServices {
   model: string;
   route: string;
   privacy?: string;
@@ -72,13 +56,6 @@ export interface TuiOptions {
   run: (prompt: string, signal: AbortSignal, onEvent: (event: AgentEvent) => void) => Promise<AgentRunResult>;
   resume: (signal: AbortSignal, onEvent: (event: AgentEvent) => void) => Promise<AgentRunResult>;
   steer: (message: string) => Promise<void>;
-  listSessions: () => Promise<readonly { sessionId: string; modifiedAt: string; bytes: number }[]>;
-  deleteSession?: (session: SessionDescriptor) => Promise<void>;
-  verify: () => Promise<readonly EditVerificationResult[]>;
-  rollback: (checkpoint: EditCheckpoint) => Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
-  loadCheckpoint: (id: string) => Promise<EditCheckpoint>;
-  backgroundTasks?: BackgroundTaskCommands;
-  workspaceCommands?: WorkspaceCommandService;
   startupMessages?: readonly string[];
 }
 
@@ -684,6 +661,7 @@ export class TerminalUi {
       workspaceAvailable: Boolean(this.options.workspaceCommands),
       backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
       sessionDeletionAvailable: Boolean(this.options.deleteSession),
+      skillImportAvailable: Boolean(this.options.importSkill),
       busy: this.store.get().busy,
       interface: 'tui' as const,
     };
@@ -1016,79 +994,21 @@ export class TerminalUi {
       for (const line of formatCommandHelp(this.catalogContext())) this.pushNotice(line, 'info');
       return;
     }
-    if (isWorkspaceCommand(prompt)) {
-      if (!this.options.workspaceCommands) {
-        this.pushNotice('工作目录切换服务不可用。', 'warn');
-        return;
-      }
-      await this.runTask('正在处理工作目录...', async () => {
-        const result = await executeWorkspaceCommand(prompt, this.options.workspaceCommands!);
-        if (result.workspace) {
-          this.store.update((s) => ({
-            ...s,
-            workspaceRoot: result.workspace!.workspaceRoot,
-            sessionId: result.workspace!.sessionId,
-            tokens: 0,
-          }));
-        }
-        for (const line of result.lines) {
-          const tone: Tone = line.startsWith('警告：')
-            ? 'warn'
-            : result.workspace?.changed && line.startsWith('工作目录已切换：')
-              ? 'success'
-              : 'info';
-          this.pushNotice(line, tone);
-        }
-      });
-      return;
-    }
-    if (isBackgroundTaskCommand(prompt)) {
-      if (!this.options.backgroundTasks) {
-        this.pushNotice('后台任务服务不可用。', 'warn');
-        return;
-      }
-      await this.runTask('正在处理后台任务...', async () => {
-        const result = await executeBackgroundTaskCommand(prompt, this.options.backgroundTasks!);
-        for (const line of result.lines) this.pushNotice(line, 'info');
-      });
-      return;
-    }
     if (prompt === '/clear') {
       this.store.update((s) => ({ ...s, transcript: [], scrollFromBottom: 0 }));
       return;
     }
-    if (prompt === '/sessions' || prompt === '/session' || prompt.startsWith('/session ')) {
-      await this.runTask('正在读取会话...', async () => {
-        const lines = await executeSessionCommand(prompt, {
+    if (isServiceCommand(prompt)) {
+      await this.runTask('正在处理命令...', async () => {
+        const result = await executeServiceCommand(prompt, this.options, {
           currentSessionId: state.sessionId,
-          list: this.options.listSessions,
-          delete: async (session) => {
-            if (!this.options.deleteSession) throw new Error('会话删除服务不可用');
-            await this.options.deleteSession(session);
-          },
           confirm: (text) => this.confirmDeletion(text),
         });
-        for (const line of lines) this.pushNotice(line, 'info');
-      });
-      return;
-    }
-    if (prompt === '/verify') {
-      await this.runTask('正在验证...', async () => {
-        const results = await this.options.verify();
-        for (const result of results) this.pushNotice(`${result.id}: ${result.status} - ${result.summary}`, 'info');
-      });
-      return;
-    }
-    if (prompt === '/rollback' || prompt.startsWith('/rollback ')) {
-      const id = prompt.split(/\s+/u)[1];
-      if (!id || prompt.split(/\s+/u).length !== 2) {
-        this.pushNotice('用法：/rollback <checkpoint-id>', 'warn');
-        return;
-      }
-      await this.runTask(`正在回滚 ${id}...`, async () => {
-        const result = await this.options.rollback(await this.options.loadCheckpoint(id));
-        this.pushNotice(`已恢复 ${result.restoredPaths.length} 个文件`, 'success');
-        for (const skipped of result.skippedPaths) this.pushNotice(`跳过后续修改：${skipped}`, 'warn');
+        if (result.workspace) {
+          const workspace = result.workspace;
+          this.store.update((s) => ({ ...s, workspaceRoot: workspace.workspaceRoot, sessionId: workspace.sessionId, tokens: 0 }));
+        }
+        for (const line of result.lines) this.pushNotice(line, line.startsWith('警告：') ? 'warn' : 'info');
       });
       return;
     }

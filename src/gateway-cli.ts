@@ -3,7 +3,8 @@
 import { existsSync } from 'node:fs';
 import { loadEnvFile } from 'node:process';
 import { resolve } from 'node:path';
-import { createDefaultGatewayTokenStore, GatewayClient } from './runtime/index.js';
+import { createDefaultGatewayTokenStore } from './credentials/windows-protected-token-store.js';
+import { GatewayClient } from './providers/gateway/client.js';
 
 const command = process.argv[2] ?? 'status';
 // --token-file 只面向测试与隔离环境（纯 JSON 存储）；默认走系统保护的私有目录，

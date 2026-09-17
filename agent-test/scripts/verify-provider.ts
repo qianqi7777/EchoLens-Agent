@@ -1,15 +1,10 @@
 // Provider 连通性验证脚本：用真实模型跑一次“强制工具调用 → 回填结果 → 收尾”的两轮对话。
 // 只输出结构化 JSON 摘要（协议、停止原因、是否含 requestId/usage），用于人工或 CI 确认
 // 某个 baseUrl/apiKey/model/protocol 组合可用。需要 AGENT_VERIFY_* 环境变量。
-import {
-  OpenAICompatibleProvider,
-  textMessage,
-  type ConversationItem,
-  type ModelToolDefinition,
-  type OpenAICompatibleProtocol,
-  type ToolCallItem,
-  type ToolResultItem,
-} from '../../src/runtime/index.js';
+import { OpenAICompatibleProvider } from '../../src/providers/openai-compatible/client.js';
+import { textMessage, type ConversationItem, type ToolCallItem, type ToolResultItem } from '../../src/core/messages.js';
+import { type ModelToolDefinition } from '../../src/providers/types.js';
+import { type OpenAICompatibleProtocol } from '../../src/providers/openai-compatible/types.js';
 
 // 凭据只从环境变量读取，脚本本身不接受命令行参数，避免凭据进 shell 历史。
 const baseUrl = required('AGENT_VERIFY_BASE_URL');

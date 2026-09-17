@@ -10,7 +10,7 @@ import type {
   ProviderRequest,
   ProviderResult,
 } from '../../../../src/providers/types.js';
-import { ReactAgent } from '../../../../src/runtime/react-loop.js';
+import { ReactAgent } from '../../../../src/runtime/resumable-react-agent.js';
 import {
   FINAL_SUMMARY_FORMAT,
   parseAgentPlan,
