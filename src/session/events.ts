@@ -4,7 +4,7 @@ import type {
   ToolResultItem,
 } from '../core/messages.js';
 import type { Permission } from '../core/permissions.js';
-import type { ProviderStopReason, TokenUsage } from '../providers/types.js';
+import type { ProviderStopReason, TokenUsage, ModelRoutingSnapshot } from '../providers/types.js';
 import type { ApprovalDecision, ApprovalRequest } from '../runtime/approval.js';
 
 // 事件 schema 版本，仅在不兼容变更时递增；读取端以该值校验事件结构。
@@ -23,6 +23,7 @@ export interface AgentCheckpoint {
   toolCallsUsed: number;
   state: RunState;
   items: ConversationItem[];
+  routing?: ModelRoutingSnapshot;
 }
 
 export type AgentEventPayload =
@@ -30,6 +31,20 @@ export type AgentEventPayload =
   | { type: 'turn.started'; userMessage: string }
   | { type: 'turn.steered'; message: string }
   | { type: 'run.started'; model: string; resumed: boolean }
+  | { type: 'route.configured'; routing: ModelRoutingSnapshot }
+  | {
+      type: 'route.selected';
+      model: string;
+      mode: string;
+      tier: number;
+      reason: string;
+      candidates: string[];
+      actualModel?: string;
+      phase?: string;
+      suggestedModel?: string;
+    }
+  | { type: 'route.fallback'; fromModel: string; toModel: string; reason: string }
+  | { type: 'route.fallback_rejected'; model: string; reason: string }
   | { type: 'model.started'; step: number }
   | { type: 'model.output.delta'; step: number; delta: string }
   | { type: 'model.retry'; step: number; attempt: number; delayMs: number; code: string }

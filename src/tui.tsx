@@ -662,6 +662,7 @@ export class TerminalUi {
       backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
       sessionDeletionAvailable: Boolean(this.options.deleteSession),
       skillImportAvailable: Boolean(this.options.importSkill),
+      modelRoutingAvailable: Boolean(this.options.modelRouting),
       busy: this.store.get().busy,
       interface: 'tui' as const,
     };
@@ -1117,6 +1118,23 @@ export class TerminalUi {
       case 'turn.started':
         break;
       case 'run.started':
+        break;
+      case 'route.configured':
+        this.pushNotice(`模型路由已更新：${payload.routing.mode} / ${payload.routing.phase}`, 'info');
+        break;
+      case 'route.selected':
+        this.store.update((s) => ({
+          ...s,
+          model: payload.actualModel ?? payload.model,
+          status: `模型 ${payload.model}：${payload.reason}`,
+          statusTone: 'info',
+        }));
+        break;
+      case 'route.fallback':
+        this.pushNotice(`模型切换：${payload.fromModel} -> ${payload.toModel}（${payload.reason}）`, 'warn');
+        break;
+      case 'route.fallback_rejected':
+        this.pushNotice(`未切换模型：${payload.reason}`, 'warn');
         break;
       case 'model.started':
         this.store.update((s) => ({ ...s, status: `模型步骤 ${payload.step + 1}`, statusTone: 'info' }));

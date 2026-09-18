@@ -83,6 +83,19 @@ TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚和 ste
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
 
+## 模型智能路由
+
+默认 `AGENT_ROUTING_MODE=off`，行为与单模型版本一致。将其设置为 `auto`、`fast`、
+`balanced`、`quality`、`privacy` 或 `pinned:<profileId>` 后，CLI 会从主模型和本地
+`AGENT_MODEL_PROFILES` 模型池中选择候选。模型池使用 JSON 数组，字段示例见 `.env.example`；
+凭据只允许经 `credentialRef` 引用环境变量或 Gateway Token Store。
+
+路由在 Turn 开始时锁定模型。网络、超时、限流和上游错误在模型未输出文本前默认可切换一次
+符合能力与同等隐私边界的备用模型（可用 `AGENT_ROUTING_MAX_FALLBACKS` 调整上限）；认证、内容策略、协议错误、用户取消，以及工具已执行后
+均不会自动切换或重放。`AGENT_ROUTING_ALLOW_TIER_DOWNGRADE=true` 时，故障 fallback 可使用
+低一档模型；主选仍只会选择满足任务等级的模型。终端会显示模型选择与 fallback 原因，Session
+事件保存模型选择元数据。
+
 ## Evals 与编排
 
 Eval CLI 只读取本地任务和 Candidate JSON。默认结果写入 Git 忽略的

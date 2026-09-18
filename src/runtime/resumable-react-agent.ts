@@ -13,6 +13,9 @@ import {
   ContextManager,
   type ContextPrivacyLevel,
 } from '../context/context-manager.js';
+import {
+  isModelProviderRunLifecycle,
+} from '../providers/types.js';
 import type {
   ModelProvider,
   ModelToolDefinition,
@@ -131,6 +134,7 @@ export class ReactAgent {
     signal?: AbortSignal,
     runtime: AgentRunRuntime = {},
   ): Promise<AgentRunResult> {
+    if (isModelProviderRunLifecycle(this.model)) await this.model.beginRun(userMessage);
     const sessionId = runtime.sessionId ?? randomUUID();
     const turnId = runtime.turnId ?? randomUUID();
     const runId = randomUUID();
@@ -159,6 +163,7 @@ export class ReactAgent {
     await emit(machine, runtime.eventSink, {
       payload: { type: 'run.started', model: this.model.model, resumed: false },
     });
+    await this.emitRouteEvents(machine, runtime.eventSink);
     await this.saveCheckpoint(machine, runtime.eventSink);
     return this.execute(machine, signal, runtime.eventSink);
   }
@@ -168,6 +173,7 @@ export class ReactAgent {
     signal?: AbortSignal,
     runtime: AgentRunRuntime = {},
   ): Promise<AgentRunResult> {
+    if (isModelProviderRunLifecycle(this.model)) await this.model.beginResume(checkpoint.routing);
     if (runtime.sessionId && runtime.sessionId !== checkpoint.sessionId) {
       throw new Error('Checkpoint 不属于当前 Session');
     }
@@ -190,6 +196,7 @@ export class ReactAgent {
     await emit(machine, runtime.eventSink, {
       payload: { type: 'run.started', model: this.model.model, resumed: true },
     });
+    await this.emitRouteEvents(machine, runtime.eventSink);
     return this.execute(machine, signal, runtime.eventSink);
   }
 
@@ -201,8 +208,10 @@ export class ReactAgent {
     // 本次 execute 全程复用同一个 itemId 工厂，计数器从已有 items 数量起步并持续递增，
     // 跨越 model/tools 多次循环及恢复后都不产生重复 ID。
     const itemId = itemIdFactory(machine.runId, machine.items.length);
-    const tools = providerTools(this.model, this.registry);
-    const runtimePermissions = this.options.permissions ?? new Set<Permission>(['workspace.read']);
+    const runtimePermissions = effectiveRuntimePermissions(
+      this.options.permissions ?? new Set<Permission>(['workspace.read']), this.model,
+    );
+    const tools = providerTools(this.model, this.registry, runtimePermissions);
 
     // stepLimit 从 checkpoint 步数起算而非从 0 计数：恢复后的每个新片段都只获得
     // 一份 maxSteps 预算，已耗步数不重复计，因此不会因多次恢复而无限延长执行。
@@ -212,6 +221,7 @@ export class ReactAgent {
 
       // tools 阶段先执行所有挂起工具；执行结果决定继续、暂停还是取消。
       if (machine.phase === 'tools') {
+        if (isModelProviderRunLifecycle(this.model)) this.model.markToolsStarted();
         const pending = pendingToolCalls(machine.items);
         const result = await this.executeTools(
           machine,
@@ -249,7 +259,9 @@ export class ReactAgent {
             : undefined,
           signal,
         });
+        await this.emitRouteEvents(machine, eventSink);
       } catch (error) {
+        await this.emitRouteEvents(machine, eventSink);
         // 请求失败后先判定中止：已中止则按取消处理而不是失败重试，
         // 避免中止的运行被恢复或触发重试并再次计费。
         if (signal?.aborted) return this.cancel(machine, eventSink, signal.reason);
@@ -351,6 +363,60 @@ export class ReactAgent {
     }
     if (!completed) throw new Error('Provider 流结束但没有最终结果');
     return completed;
+  }
+
+  restoreModelRouting(snapshot: import('../providers/types.js').ModelRoutingSnapshot): void {
+    if (isModelProviderRunLifecycle(this.model)) this.model.restore(snapshot);
+  }
+
+  configureModelRouting(mode?: string, phase?: string): string[] {
+    if (!isModelProviderRunLifecycle(this.model)) return ['当前模型不支持会话内路由配置'];
+    return this.model.configure(mode, phase);
+  }
+
+  modelRoutingStatus(): string[] {
+    return isModelProviderRunLifecycle(this.model) ? this.model.status() : [`model=${this.model.model}`];
+  }
+
+  modelRoutingSnapshot(): import('../providers/types.js').ModelRoutingSnapshot | undefined {
+    return isModelProviderRunLifecycle(this.model) ? this.model.snapshot() : undefined;
+  }
+
+  private async emitRouteEvents(
+    machine: RunMachine,
+    eventSink: AgentEventSink | undefined,
+  ): Promise<void> {
+    if (!isModelProviderRunLifecycle(this.model)) return;
+    for (const event of this.model.takeRouteEvents()) {
+      if (event.type === 'selected') {
+        await emit(machine, eventSink, {
+          payload: {
+            type: 'route.selected',
+            model: event.model,
+            mode: event.mode,
+            tier: event.tier,
+            reason: event.reason,
+            candidates: event.candidates,
+            actualModel: event.actualModel,
+            phase: event.phase,
+            suggestedModel: event.suggestedModel,
+          },
+        });
+      } else if (event.type === 'fallback') {
+        await emit(machine, eventSink, {
+          payload: {
+            type: 'route.fallback',
+            fromModel: event.fromModel,
+            toModel: event.toModel,
+            reason: event.reason,
+          },
+        });
+      } else {
+        await emit(machine, eventSink, {
+          payload: { type: 'route.fallback_rejected', model: event.model, reason: event.reason },
+        });
+      }
+    }
   }
 
   private async applySteering(
@@ -552,6 +618,7 @@ export class ReactAgent {
       toolCallsUsed: this.executor.callsUsed(),
       state,
       items: structuredClone(machine.items),
+      routing: isModelProviderRunLifecycle(this.model) ? this.model.snapshot() : undefined,
     };
     const event = await emit(machine, eventSink, {
       payload: { type: 'checkpoint.saved', checkpoint },
@@ -661,14 +728,28 @@ function pendingToolCalls(items: readonly ConversationItem[]): ToolCallItem[] {
     .filter((call) => !completed.has(call.callId));
 }
 
-function providerTools(model: ModelProvider, registry: ToolRegistry): ModelToolDefinition[] | undefined {
+function providerTools(
+  model: ModelProvider,
+  registry: ToolRegistry,
+  permissions: ReadonlySet<Permission>,
+): ModelToolDefinition[] | undefined {
   if (!model.capabilities.supportsToolCalls) return undefined;
-  const tools = registry.list().map((tool) => ({
+  const tools = registry.list().filter((tool) => permissions.has(tool.permission)).map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.inputSchema,
   }));
   return tools.length > 0 ? tools : undefined;
+}
+
+function effectiveRuntimePermissions(
+  configured: ReadonlySet<Permission>,
+  model: ModelProvider,
+): ReadonlySet<Permission> {
+  if (!isModelProviderRunLifecycle(model)) return configured;
+  const ceiling = model.allowedPermissions();
+  if (!ceiling) return configured;
+  return new Set([...configured].filter((permission) => ceiling.has(permission)));
 }
 
 function assistantText(items: readonly ConversationItem[]): string {

@@ -10,6 +10,7 @@ import {
 } from '../../../../src/commands/command-catalog.js';
 import { completeArguments } from '../../../../src/commands/argument-completion.js';
 import { executeSessionCommand } from '../../../../src/commands/session-command.js';
+import { executeServiceCommand } from '../../../../src/commands/service-command.js';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -19,7 +20,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/pwd', '/cd', '/resume', '/sessions', '/tasks', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
+    ['/model', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
@@ -105,4 +106,26 @@ test('会话删除必须确认，拒绝当前、未知和多余参数，列表�
   await assert.rejects(executeSessionCommand('/session delete missing', service), /未找到/u);
   assert.match((await executeSessionCommand('/session delete s1 extra', service))[0]!, /用法/u);
   assert.equal(calls, 1);
+});
+
+test('/model delegates session routing configuration and keeps invalid arguments bounded', async () => {
+  const calls: Array<[string | undefined, string | undefined]> = [];
+  const services = {
+    listSessions: async () => [],
+    verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    modelRouting: {
+      status: () => ['mode=auto'],
+      configure: async (mode?: string, phase?: string) => {
+        calls.push([mode, phase]);
+        return ['mode=quality', 'phase=plan'];
+      },
+    },
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/model', services, session)).lines, ['mode=auto']);
+  assert.deepEqual((await executeServiceCommand('/model quality plan', services, session)).lines, ['mode=quality', 'phase=plan']);
+  assert.deepEqual(calls, [['quality', 'plan']]);
+  assert.match((await executeServiceCommand('/model quality plan extra', services, session)).lines[0] ?? '', /用法/u);
 });

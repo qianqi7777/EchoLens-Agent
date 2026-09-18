@@ -9,6 +9,7 @@ import { ensureStartupConfiguration } from './config/startup-config.js';
 import { TerminalUi } from './tui.js';
 import { JsonlEventStore } from './session/jsonl-event-store.js';
 import { ModelRouter, type PrivacyLevel } from './runtime/model-router.js';
+import { connectRoutedModelProviderFromEnv } from './runtime/model-routing-config.js';
 import { ReactAgent, type AgentRunResult } from './runtime/resumable-react-agent.js';
 import { SessionRuntime } from './session/session-runtime.js';
 import { ToolExecutor } from './runtime/tool-executor.js';
@@ -25,7 +26,7 @@ import { SubagentBackgroundService } from './orchestration/subagent-background.j
 import { SubagentOrchestrator, registerSubagentTool } from './orchestration/subagent.js';
 import { formatBackgroundTask, type BackgroundTaskCommands } from './orchestration/task-command.js';
 import { resolveWorkspaceDirectory, WorkspaceRuntimeManager, type ManagedWorkspaceRuntime, type WorkspaceCommandService } from './runtime/workspace-manager.js';
-import { type ModelProvider } from './providers/types.js';
+import { isModelProviderRunLifecycle, type ModelProvider } from './providers/types.js';
 import { SkillManager } from './skills/skill-manager.js';
 import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
 import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
@@ -61,16 +62,19 @@ try {
 }
 
 const router = ModelRouter.fromEnv();
-const { status, provider: model } = await router.connect();
-if (!model) {
+const { status, provider: connectedModel } = await router.connect();
+if (!connectedModel) {
   console.error(`模型路由不可用 [${status.reasonCode}]：${status.reason}`);
   console.error('运行 npm run setup 可以重新配置。');
   process.exitCode = 1;
   lineTerminal?.close();
 } else {
+  let model: ModelProvider = connectedModel;
   let tui: TerminalUi | undefined;
   let workspaceManager: WorkspaceRuntimeManager<CliWorkspaceRuntime> | undefined;
   try {
+    const routed = await connectRoutedModelProviderFromEnv(model, status);
+    model = routed.provider;
     const initialWorkspaceRoot = await resolveWorkspaceDirectory(configuredWorkspaceRoot, process.cwd());
     const requestedSession = await resolveRequestedSession(
       resolve(initialWorkspaceRoot, '.echolens', 'sessions'),
@@ -110,6 +114,10 @@ if (!model) {
     backgroundTasks,
     workspaceCommands,
       importSkill: (source) => new SkillManager({ workspaceRoot: manager.currentRuntime().workspaceRoot }).import(source),
+      modelRouting: {
+        configure: (mode, phase) => manager.currentRuntime().session.configureModelRouting(mode, phase),
+        status: () => manager.currentRuntime().session.modelRoutingStatus(),
+      },
     };
 
     if (useTui) {
@@ -125,7 +133,7 @@ if (!model) {
         resume: (signal, onEvent) => manager.currentRuntime().session.resume(signal, onEvent),
         steer: (message) => manager.currentRuntime().session.steer(message),
         ...commandServices,
-        startupMessages: current.startupMessages,
+        startupMessages: [...current.startupMessages, ...routed.notices],
       });
       await tui.start();
       process.exitCode = 0;
@@ -172,13 +180,13 @@ if (!model) {
         `Agent 已启动 | model=${status.model} | route=${status.route} | session=${current.sessionId}`,
       );
       console.log(`workspace=${current.workspaceRoot}`);
-      for (const message of current.startupMessages) console.log(message);
+      for (const message of [...current.startupMessages, ...routed.notices]) console.log(message);
       console.log('输入问题开始分析；/pwd 查看目录，/cd <path> 切换目录，/sessions 查看会话，/tasks 查看后台任务，/exit 退出。');
       while (true) {
         let prompt = (await lineTerminal!.question('\n> ')).trim();
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
-          sessionDeletionAvailable: true, skillImportAvailable: true, interface: 'line' as const };
+          sessionDeletionAvailable: true, skillImportAvailable: true, modelRoutingAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }
         prompt = parsed.input;
@@ -255,6 +263,8 @@ async function createCliWorkspaceRuntime(
   workspaceRoot: string,
   options: CreateCliWorkspaceRuntimeOptions,
 ): Promise<CliWorkspaceRuntime> {
+  // Workspace 切换和新 Session 不能复用上一运行时的当前模型、熔断和成本状态。
+  const runtimeModel = isModelProviderRunLifecycle(options.model) ? options.model.fork() : options.model;
   const registry = new ToolRegistry();
   registerWorkspaceTools(registry);
   registerSandboxTools(registry, options.sandbox);
@@ -264,7 +274,7 @@ async function createCliWorkspaceRuntime(
   try {
     extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
     const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
-    const subagents = new SubagentOrchestrator(options.model, registry, workspaceRoot);
+    const subagents = new SubagentOrchestrator(runtimeModel, registry, workspaceRoot);
     registerSubagentTool(registry, subagents);
     backgroundTasks = new SubagentBackgroundService(
       new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
@@ -294,7 +304,7 @@ async function createCliWorkspaceRuntime(
       },
       timeoutMs: 120_000,
     });
-    const agent = new ReactAgent(options.model, registry, executor, {
+    const agent = new ReactAgent(runtimeModel, registry, executor, {
       workspaceRoot,
       permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
       privacy: options.privacy,

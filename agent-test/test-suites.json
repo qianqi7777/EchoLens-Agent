@@ -37,6 +37,7 @@
     "agent-test/tests/src/providers/openai-compatible/provider-hardening.test.ts",
     "agent-test/tests/src/providers/openai-compatible/provider-streaming.test.ts",
     "agent-test/tests/src/runtime/model-router.test.ts",
+    "agent-test/tests/src/runtime/model-routing.test.ts",
     "agent-test/tests/src/sandbox/docker-sandbox.test.ts",
     "agent-test/tests/src/session/jsonl-event-store.test.ts",
     "agent-test/tests/src/session/session-runtime.test.ts",

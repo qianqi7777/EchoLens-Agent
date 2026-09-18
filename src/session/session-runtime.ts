@@ -50,8 +50,16 @@ export class SessionRuntime {
         if (created.payload.workspaceRoot !== options.workspaceRoot) {
           throw new Error('Session 工作区与当前工作区不一致');
         }
-        runtime.history = recoverCheckpoint(events)?.items ?? [];
+        const checkpoint = recoverCheckpoint(events);
+        runtime.history = checkpoint?.items ?? [];
         runtime.steeringQueue = pendingSteering(events);
+        const latestRouting = events.findLast((event) => event.payload.type === 'route.configured'
+          || (event.payload.type === 'checkpoint.saved' && Boolean(event.payload.checkpoint.routing)));
+        if (latestRouting?.payload.type === 'route.configured') {
+          agent.restoreModelRouting(latestRouting.payload.routing);
+        } else if (latestRouting?.payload.type === 'checkpoint.saved' && latestRouting.payload.checkpoint.routing) {
+          agent.restoreModelRouting(latestRouting.payload.checkpoint.routing);
+        }
       }
       return runtime;
     } catch (error) {
@@ -123,6 +131,17 @@ export class SessionRuntime {
 
   conversation(): ConversationItem[] {
     return structuredClone(this.history);
+  }
+
+  async configureModelRouting(mode?: string, phase?: string): Promise<string[]> {
+    const lines = this.agent.configureModelRouting(mode, phase);
+    const routing = this.agent.modelRoutingSnapshot();
+    if (routing) await this.store.append({ payload: { type: 'route.configured', routing } });
+    return lines;
+  }
+
+  modelRoutingStatus(): string[] {
+    return this.agent.modelRoutingStatus();
   }
 
   close(): Promise<void> {

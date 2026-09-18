@@ -1,4 +1,4 @@
-import type { ModelProvider } from '../providers/types.js';
+import { isModelProviderRunLifecycle, type ModelProvider } from '../providers/types.js';
 import type { AgentEvent } from '../session/events.js';
 import {
   CODE_INTELLIGENCE_TOOL_NAMES,
@@ -123,7 +123,8 @@ export class SubagentOrchestrator {
         timeoutMs: 120_000,
         actionGuardrail: new DelegatedProfileGuardrail(profileDefinition),
       });
-      const agent = new ReactAgent(this.model, registry, executor, {
+      const taskModel = isModelProviderRunLifecycle(this.model) ? this.model.fork() : this.model;
+      const agent = new ReactAgent(taskModel, registry, executor, {
         workspaceRoot: lease.root,
         permissions: profileDefinition.permissions,
         maxSteps: profileDefinition.maxSteps,

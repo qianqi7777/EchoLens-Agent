@@ -280,6 +280,7 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 // datasync 落盘；其余事件仅在 flushEachEvent 开启时刷新，减少常规写入的 fsync 开销。
 function isDurableEvent(type: AgentEventPayload['type']): boolean {
   return type === 'checkpoint.saved'
+    || type === 'route.configured'
     || type === 'run.completed'
     || type === 'run.paused'
     || type === 'run.cancelled'

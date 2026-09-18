@@ -19,11 +19,21 @@ export interface CommandCatalogContext {
   interface?: 'tui' | 'line';
   sessionDeletionAvailable?: boolean;
   skillImportAvailable?: boolean;
+  modelRoutingAvailable?: boolean;
   verificationAvailable?: boolean;
   rollbackAvailable?: boolean;
 }
 
 export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
+  {
+    name: '/model',
+    description: '查看或设置当前 Session 的模型路由模式',
+    usage: '/model [auto|fast|balanced|quality|privacy|off|pinned:<profile-id>] [auto|plan|execute|verify]',
+    category: 'session',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
   {
     name: '/skill',
     description: '导入本地 Skill 包',
@@ -151,6 +161,7 @@ export function getCommandCatalog(context: CommandCatalogContext): CommandDescri
   return BUILTIN_COMMANDS.filter((command) => {
     if (!context.workspaceAvailable && ['/pwd', '/cd'].includes(command.name)) return false;
     if (command.name === '/skill' && !context.skillImportAvailable) return false;
+    if (command.name === '/model' && context.modelRoutingAvailable === false) return false;
     if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
     if (command.name === '/verify' && context.verificationAvailable === false) return false;
     if (command.name === '/rollback' && context.rollbackAvailable === false) return false;

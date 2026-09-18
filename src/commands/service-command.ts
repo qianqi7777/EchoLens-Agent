@@ -15,9 +15,13 @@ export interface CommandServices {
   backgroundTasks?: BackgroundTaskCommands;
   workspaceCommands?: WorkspaceCommandService;
   importSkill?(source: string): Promise<ImportedSkill>;
+  modelRouting?: {
+    configure(mode?: string, phase?: string): Promise<string[]>;
+    status(): string[];
+  };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -64,6 +68,12 @@ export async function executeServiceCommand(
       const source = /^(".*"|'.*')$/u.test(raw) ? raw.slice(1, -1) : raw;
       const result = await services.importSkill(source);
       lines = [`已导入 Skill：${result.name} -> ${result.destinationPath}`];
+      break;
+    }
+    case '/model': {
+      if (!services.modelRouting) throw new Error('模型路由服务不可用');
+      if (args.length > 2) return { handled: true, lines: ['用法：/model [模式] [auto|plan|execute|verify]'] };
+      lines = args.length === 0 ? services.modelRouting.status() : await services.modelRouting.configure(args[0], args[1]);
       break;
     }
     default: return { handled: false, lines: [] };
