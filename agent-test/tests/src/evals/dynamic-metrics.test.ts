@@ -33,13 +33,17 @@ test('动态任务按 seed 可复现，并轮换低泄漏且最少使用的模�
 
 test('质量指标覆盖成功、回归、工具效率、成本、审批和安全事件', () => {
   const current = run('task-a', false, [
-    event({ type: 'model.started', step: 0 }),
+    event({ type: 'navigation.resolved', mode: 'direct', confidence: 0.9, candidateCount: 2, matched: true }),
+    event({ type: 'model.started', step: 0, toolChoice: 'required', navigationMode: 'direct' }),
+    event({ type: 'model.completed', step: 0, stopReason: 'tool_calls', toolCallCount: 1 }),
     event({ type: 'usage.recorded', model: 'model-a', usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } }),
     event({ type: 'tool.completed', callId: '1', toolName: 'missing', callIndex: 0, status: 'invalid', elapsedMs: 3, evidenceIds: [], result: {
       type: 'tool_result', id: 'r1', callId: '1', toolName: 'missing', status: 'invalid', output: {
         id: 'o1', kind: 'tool_output', content: '', source: { type: 'tool', toolCallId: '1', toolName: 'missing' }, trust: 'untrusted', redactions: [],
       }, summary: '', evidenceIds: [], error: { code: 'unknown_tool', message: 'unknown', retryable: false },
     } }),
+    event({ type: 'model.completed', step: 1, stopReason: 'tool_calls', toolCallCount: 1 }),
+    event({ type: 'tool.completed', callId: '2', toolName: 'read_file', callIndex: 0, status: 'ok', elapsedMs: 2, evidenceIds: ['file:src/index.ts:1'] }),
     event({ type: 'approval.requested', approvalId: 'a', callId: '1', permission: 'process.exec', reasonCode: 'approval_required' }),
     event({ type: 'approval.decided', approvalId: 'a', decision: 'deny', scope: 'once' }),
     event({ type: 'model.retry', step: 0, attempt: 1, delayMs: 10, code: 'rate_limit' }),
@@ -51,11 +55,15 @@ test('质量指标覆盖成功、回归、工具效率、成本、审批和安�
   const baseline = run('task-a', true, []);
   const metric = calculateRunMetrics(current, { 'model-a': { inputPerMillion: 2, outputPerMillion: 4 } });
   const aggregate = aggregateMetrics([metric], [calculateRunMetrics(baseline)]);
-  assert.equal(metric.invalidToolCallRate, 1);
+  assert.equal(metric.invalidToolCallRate, 0.5);
   assert.equal(metric.approvalDenials, 1);
   assert.equal(metric.promptInjectionDetections, 1);
   assert.equal(metric.permissionBypassAttempts, 1);
   assert.equal(metric.estimatedCostUsd, 0.00028);
+  assert.equal(metric.navigationMatched, true);
+  assert.equal(metric.navigationConfidence, 0.9);
+  assert.equal(metric.firstEffectiveToolStep, 1);
+  assert.equal(aggregate.navigationMatchRate, 1);
   assert.equal(aggregate.regressionRate, 1);
 });
 

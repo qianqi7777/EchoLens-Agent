@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { textMessage } from '../../../../src/core/messages.js';
+import { textMessage, type ToolCallItem } from '../../../../src/core/messages.js';
 import type { ModelProvider, ProviderRequest } from '../../../../src/providers/types.js';
 import { toolSuccess } from '../../../../src/runtime/tool-result.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
@@ -120,6 +120,16 @@ class RecordingModel implements ModelProvider {
 
   async complete(request: ProviderRequest) {
     this.requests.push(request);
+    if (this.requests.length === 1) {
+      const call: ToolCallItem = {
+        type: 'tool_call', id: 'explore-call-item', callId: 'explore-call', name: 'list_files', arguments: {}, callIndex: 0,
+      };
+      return {
+        output: [call],
+        stopReason: 'tool_calls' as const,
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      };
+    }
     return {
       output: [textMessage('answer', 'assistant', JSON.stringify({
         answer: 'explored', changes: ['model-claimed.ts'], verification: [], unresolved: [], warnings: [],
@@ -139,7 +149,7 @@ function registryWithTools(names: string[]): ToolRegistry {
       permission: name === 'shell_exec' ? 'process.exec' : 'workspace.read',
       effect: name === 'shell_exec' ? 'process' : 'read',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      execute: async () => toolSuccess('ok', 'ok'),
+      execute: async () => toolSuccess('ok', 'ok', ['test:subagent-evidence']),
     });
   }
   return registry;

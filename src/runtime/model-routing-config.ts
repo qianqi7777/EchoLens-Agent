@@ -185,7 +185,7 @@ function capabilities(value: unknown, id: string): Partial<ProviderCapabilities>
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`模型 Profile ${id} 的 capabilities 必须是对象`);
   const input = value as Record<string, unknown>;
   const result: Partial<ProviderCapabilities> = {};
-  for (const key of ['supportsStreaming', 'supportsToolCalls', 'supportsParallelToolCalls', 'supportsStructuredOutput', 'supportsPromptCaching', 'supportsUsageReporting'] as const) {
+  for (const key of ['supportsStreaming', 'supportsToolCalls', 'supportsParallelToolCalls', 'supportsStructuredOutput', 'supportsPromptCaching', 'supportsUsageReporting', 'supportsToolChoice'] as const) {
     if (input[key] !== undefined) {
       if (typeof input[key] !== 'boolean') throw new Error(`模型 Profile ${id} 的 capabilities.${key} 必须是布尔值`);
       result[key] = input[key] as boolean;

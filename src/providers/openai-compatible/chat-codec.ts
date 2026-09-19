@@ -47,6 +47,7 @@ export class ChatCompletionsCodec implements ProtocolCodec {
         model,
         messages: encodeMessages(request.items),
         tools: request.tools?.map(encodeTool),
+        tool_choice: encodeToolChoice(request.toolChoice),
         response_format: request.responseFormat ? {
           type: 'json_schema',
           json_schema: {
@@ -93,6 +94,11 @@ export class ChatCompletionsCodec implements ProtocolCodec {
       cache: cachedInputTokens === undefined ? undefined : { readTokens: cachedInputTokens },
     };
   }
+}
+
+function encodeToolChoice(choice: ProviderRequest['toolChoice']): unknown {
+  if (!choice || choice === 'auto' || choice === 'required') return choice;
+  return { type: 'function', function: { name: choice.name } };
 }
 
 // 网络响应不可信：先校验 choices / message / tool_calls 结构，非法即抛错，避免污染内部结果。

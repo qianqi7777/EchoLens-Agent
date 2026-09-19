@@ -25,6 +25,10 @@ export interface EvalRunMetrics {
   humanTakeovers: number;
   promptInjectionDetections: number;
   permissionBypassAttempts: number;
+  navigationMatched: boolean;
+  navigationConfidence: number;
+  firstEffectiveToolStep?: number;
+  explorationToolCallsBeforeEvidence: number;
 }
 
 export interface EvalAggregateMetrics {
@@ -45,6 +49,9 @@ export interface EvalAggregateMetrics {
   humanTakeovers: number;
   promptInjectionDetections: number;
   permissionBypassAttempts: number;
+  navigationMatchRate: number;
+  averageFirstEffectiveToolStep?: number;
+  averageExplorationToolCallsBeforeEvidence: number;
 }
 
 export function calculateRunMetrics(
@@ -77,6 +84,21 @@ export function calculateRunMetrics(
     }
   }
   const guardrails = events.filter((event) => event.payload.type === 'guardrail.decision');
+  const navigation = events.find((event) => event.payload.type === 'navigation.resolved');
+  let latestToolModelStep: number | undefined;
+  let firstEffectiveToolStep: number | undefined;
+  for (const event of events) {
+    if (event.payload.type === 'model.completed' && (event.payload.toolCallCount ?? 0) > 0) {
+      latestToolModelStep = event.payload.step;
+    } else if (event.payload.type === 'tool.completed' && event.payload.status === 'ok'
+      && event.payload.evidenceIds.length > 0 && firstEffectiveToolStep === undefined) {
+      firstEffectiveToolStep = latestToolModelStep;
+    }
+  }
+  const directEvidenceIndex = completedTools.findIndex((event) => event.payload.type === 'tool.completed'
+    && event.payload.status === 'ok'
+    && ['read_file', 'outline_file', 'go_to_definition', 'get_diagnostics'].includes(event.payload.toolName));
+  const explorationBoundary = directEvidenceIndex < 0 ? completedTools.length : directEvidenceIndex;
   return {
     taskId: record.taskId,
     passed: record.passed,
@@ -104,6 +126,12 @@ export function calculateRunMetrics(
       && event.payload.target === 'proposed_action'
       && event.payload.decision === 'deny'
       && /permission|path|workspace|network|private|git/u.test(event.payload.reasonCode)).length,
+    navigationMatched: navigation?.payload.type === 'navigation.resolved' && navigation.payload.matched,
+    navigationConfidence: navigation?.payload.type === 'navigation.resolved' ? navigation.payload.confidence : 0,
+    firstEffectiveToolStep,
+    explorationToolCallsBeforeEvidence: completedTools.slice(0, explorationBoundary)
+      .filter((event) => event.payload.type === 'tool.completed'
+        && ['list_files', 'grep', 'workspace_search', 'find_symbols'].includes(event.payload.toolName)).length,
   };
 }
 
@@ -116,6 +144,7 @@ export function aggregateMetrics(
   const toolCalls = sum(current, (metric) => metric.toolCalls);
   const invalidCalls = sum(current, (metric) => metric.invalidToolCalls);
   const costs = current.map((metric) => metric.estimatedCostUsd).filter((value): value is number => value !== undefined);
+  const firstToolSteps = current.map((metric) => metric.firstEffectiveToolStep).filter((value): value is number => value !== undefined);
   return {
     runs: current.length,
     successRate: ratio(current.filter((metric) => metric.passed).length, current.length),
@@ -134,6 +163,13 @@ export function aggregateMetrics(
     humanTakeovers: sum(current, (metric) => metric.humanTakeovers),
     promptInjectionDetections: sum(current, (metric) => metric.promptInjectionDetections),
     permissionBypassAttempts: sum(current, (metric) => metric.permissionBypassAttempts),
+    navigationMatchRate: ratio(current.filter((metric) => metric.navigationMatched).length, current.length),
+    averageFirstEffectiveToolStep: firstToolSteps.length
+      ? firstToolSteps.reduce((total, value) => total + value, 0) / firstToolSteps.length
+      : undefined,
+    averageExplorationToolCallsBeforeEvidence: ratio(
+      sum(current, (metric) => metric.explorationToolCallsBeforeEvidence), current.length,
+    ),
   };
 }
 

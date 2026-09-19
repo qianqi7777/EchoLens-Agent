@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -97,21 +97,161 @@ test('ReactAgent completes a tool round trip', async () => {
   assert.equal(toolLogs.some((line) => /^\[tool\] read_file ok \d+ms$/u.test(line)), true);
 });
 
+test('ReactAgent uses navigation hints to require a read-only first tool round', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-runtime-'));
+  await mkdir(join(workspace, 'src', 'runtime'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'runtime', 'model-routing.ts'), 'export function classifyTask() { return true; }\n');
+  const requests: ProviderRequest[] = [];
+  const summary = JSON.stringify({
+    answer: '已检查模型路由。', changes: [], verification: [], unresolved: [], warnings: [],
+  });
+  const provider: ModelProvider = {
+    model: 'navigation-model',
+    capabilities: { ...new ScriptedModel().capabilities, supportsStructuredOutput: true },
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
+      if (requests.length === 1) {
+        return {
+          output: [{
+            type: 'tool_call', id: 'navigation-call-item', callId: 'navigation-call', name: 'read_file',
+            arguments: { path: 'src/runtime/model-routing.ts' }, callIndex: 0,
+          }],
+          stopReason: 'tool_calls',
+        };
+      }
+      return { output: [textMessage('navigation-answer', 'assistant', summary)], stopReason: 'completed' };
+    },
+  };
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+    permissions: new Set(['workspace.read', 'workspace.write']),
+  }).run('检查模型路由实现');
+
+  assert.equal(result.answer, '已检查模型路由。');
+  assert.equal(requests[0]?.toolChoice, 'required');
+  assert.equal(requests[0]?.responseFormat, undefined);
+  assert.equal(requests[0]?.tools?.some((tool) => tool.name === 'apply_patch'), false);
+  assert.equal(requests[0]?.items.some((item) => isMessageItem(item)
+    && messageText(item).includes('WORKSPACE NAVIGATION HINTS')), true);
+  assert.equal(requests[1]?.toolChoice, 'auto');
+  assert.equal(requests[1]?.tools?.some((tool) => tool.name === 'apply_patch'), true);
+  assert.equal(requests[1]?.responseFormat?.name, 'echolens_final_summary');
+});
+
+test('ReactAgent fails once with tool_required when a required discovery call is omitted', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-required-'));
+  await mkdir(join(workspace, 'src', 'runtime'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'runtime', 'model-routing.ts'), 'export const route = true;\n');
+  let calls = 0;
+  const events: AgentEvent[] = [];
+  const provider: ModelProvider = {
+    model: 'non-tool-model',
+    capabilities: new ScriptedModel().capabilities,
+    async complete(): Promise<ProviderResult> {
+      calls += 1;
+      return { output: [textMessage('premature-answer', 'assistant', '直接回答')], stopReason: 'completed' };
+    },
+  };
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+  }).run('检查模型路由实现', [], undefined, { onEvent: (event) => { events.push(event); } });
+
+  assert.equal(calls, 1);
+  assert.equal(result.state, 'failed');
+  assert.equal(result.degraded, true);
+  assert.equal(result.checkpoint.state, 'failed');
+  assert.equal(result.checkpoint.phase, 'finished');
+  assert.equal(result.trace.some((item) => item.type === 'warning' && item.message.includes('tool_required')), true);
+  assert.equal(events.some((event) => event.payload.type === 'run.failed'
+    && event.payload.code === 'tool_required'
+    && event.payload.retryable === false), true);
+  assert.equal(events.some((event) => event.payload.type === 'checkpoint.saved'
+    && event.payload.checkpoint.state === 'failed'), true);
+});
+
 test('ReactAgent records a pure text response as the final assistant item', async () => {
+  const requests: ProviderRequest[] = [];
   const provider: ModelProvider = {
     model: 'text-only',
     capabilities: new ScriptedModel().capabilities,
-    async complete(): Promise<ProviderResult> {
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
       return { output: [textMessage('assistant-final', 'assistant', '完成。')], stopReason: 'completed' };
     },
   };
   const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
   const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
     workspaceRoot: process.cwd(),
   }).run('只回答');
 
   assert.equal(result.answer, '完成。');
   assert.equal(result.items.at(-1)?.type, 'message');
+  assert.equal(requests[0]?.toolChoice, 'auto');
+});
+
+test('ReactAgent omits toolChoice when the Provider capability is disabled', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-capability-'));
+  await mkdir(join(workspace, 'src', 'runtime'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'runtime', 'model-routing.ts'), 'export const route = true;\n');
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    model: 'legacy-tool-model',
+    capabilities: { ...new ScriptedModel().capabilities, supportsToolChoice: false },
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
+      return { output: [textMessage('legacy-answer', 'assistant', '兼容完成。')], stopReason: 'completed' };
+    },
+  };
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+  }).run('检查模型路由实现');
+
+  assert.equal(result.answer, '兼容完成。');
+  assert.equal(result.state, 'completed');
+  assert.equal(requests[0]?.toolChoice, undefined);
+  assert.equal(requests[0]?.tools?.some((tool) => tool.name === 'apply_patch'), false);
+});
+
+test('ReactAgent starts navigation discovery for each new turn despite prior tool evidence', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-turn-boundary-'));
+  await mkdir(join(workspace, 'src', 'runtime'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'runtime', 'model-routing.ts'), 'export const route = true;\n');
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    model: 'turn-boundary-model',
+    capabilities: new ScriptedModel().capabilities,
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
+      return { output: [textMessage('premature-new-turn-answer', 'assistant', '直接回答')], stopReason: 'completed' };
+    },
+  };
+  const history: ConversationItem[] = [
+    textMessage('old-user', 'user', '读取旧文件'),
+    { type: 'tool_call', id: 'old-call-item', callId: 'old-call', name: 'read_file', arguments: { path: 'old.ts' }, callIndex: 0 },
+    {
+      type: 'tool_result', id: 'old-result', callId: 'old-call', toolName: 'read_file', status: 'ok',
+      output: {
+        id: 'old-output', kind: 'tool_output', content: 'old',
+        source: { type: 'tool', toolCallId: 'old-call', toolName: 'read_file' }, trust: 'untrusted', redactions: [],
+      },
+      summary: 'old evidence', evidenceIds: ['file:old.ts:1'],
+    },
+  ];
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+  }).run('检查模型路由实现', history);
+
+  assert.equal(requests[0]?.toolChoice, 'required');
+  assert.equal(result.state, 'failed');
 });
 
 test('workspace tools reject paths outside the workspace', async () => {

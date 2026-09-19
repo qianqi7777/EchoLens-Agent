@@ -14,6 +14,8 @@ export interface ProviderCapabilities {
   supportsStructuredOutput: boolean;
   supportsPromptCaching: boolean;
   supportsUsageReporting: boolean;
+  /** 缺省按支持处理，显式 false 时 Runtime 不发送 tool_choice。 */
+  supportsToolChoice?: boolean;
 }
 
 /**
@@ -42,9 +44,12 @@ export interface ModelToolDefinition {
   parameters: JsonSchema;
 }
 
+export type ToolChoice = 'auto' | 'required' | { type: 'function'; name: string };
+
 export interface ProviderRequest {
   items: ConversationItem[];
   tools?: ModelToolDefinition[];
+  toolChoice?: ToolChoice;
   responseFormat?: {
     name: string;
     description?: string;

@@ -39,6 +39,11 @@ export class TreeSitterIndex {
     return structuredClone((await this.parse(workspaceRoot, relativePath)).symbols);
   }
 
+  /** 解析已经由 PathPolicy 验证并读取的源码，供工作区索引避免重复文件 IO。 */
+  outlineSource(workspaceRoot: string, relativePath: string, source: string): CodeSymbol[] {
+    return structuredClone(this.parseSource(workspaceRoot, relativePath.replaceAll('\\', '/'), source).symbols);
+  }
+
   async searchSymbols(workspaceRoot: string, query: string, relative = '.'): Promise<CodeSymbol[]> {
     const policy = await PathPolicy.create(workspaceRoot);
     const files = await sourceFiles(policy, relative, 5_000);
@@ -122,9 +127,17 @@ export class TreeSitterIndex {
     const policy = await PathPolicy.create(workspaceRoot);
     const file = await policy.readTextFile(relativePath, 2 * 1024 * 1024);
     const normalizedPath = path.relative(policy.workspaceRoot, file.canonicalPath).replaceAll('\\', '/');
-    const hash = createHash('sha256').update(file.content).digest('hex');
+    return this.parseSource(policy.workspaceRoot, normalizedPath, file.content);
+  }
+
+  private parseSource(workspaceRoot: string, normalizedPath: string, source: string): ParsedFile {
+    const extension = path.extname(normalizedPath).toLowerCase();
+    if (!SOURCE_EXTENSIONS.has(extension)) {
+      throw new CodeIntelligenceError('code_intelligence_failed', `tree-sitter 暂不支持该文件类型：${extension}`);
+    }
+    const hash = createHash('sha256').update(source).digest('hex');
     // 缓存以“工作区根 + 规范化相对路径”为键、内容 hash 为校验，文件未变时直接复用解析树。
-    const key = `${policy.workspaceRoot}\0${normalizedPath}`;
+    const key = `${workspaceRoot}\0${normalizedPath}`;
     const cached = this.cache.get(key);
     if (cached?.hash === hash) return cached;
     // tsx/jsx 必须使用 JSX 方言解析器：<T> 泛型与 JSX 标签在两种语法下规则不同。
@@ -132,14 +145,14 @@ export class TreeSitterIndex {
     const language = TypeScript[dialect];
     const parser = new Parser();
     parser.setLanguage(language);
-    const tree = parser.parse(file.content);
+    const tree = parser.parse(source);
     let query = this.queries.get(dialect);
     if (!query) {
       query = new Parser.Query(language, SYMBOL_QUERY);
       this.queries.set(dialect, query);
     }
     const symbols = symbolsFromMatches(normalizedPath, query.matches(tree.rootNode));
-    const parsed = { hash, source: file.content, tree, symbols };
+    const parsed = { hash, source, tree, symbols };
     this.cache.set(key, parsed);
     return parsed;
   }

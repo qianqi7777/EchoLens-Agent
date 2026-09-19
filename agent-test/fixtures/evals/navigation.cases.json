@@ -1,0 +1,50 @@
+[
+  {
+    "id": "model-routing",
+    "prompt": "检查模型路由实现",
+    "expectedFeatureId": "startup-routing",
+    "expectedPath": "src/runtime/model-routing.ts"
+  },
+  {
+    "id": "session-resume",
+    "prompt": "修改会话恢复逻辑",
+    "expectedFeatureId": "conversation-runtime",
+    "expectedPath": "src/runtime/resumable-react-agent.ts"
+  },
+  {
+    "id": "mcp",
+    "prompt": "排查 MCP 工具发现",
+    "expectedFeatureId": "context-mcp-code",
+    "expectedPath": "src/context/context-manager.ts"
+  },
+  {
+    "id": "approval",
+    "prompt": "检查审批流程",
+    "expectedFeatureId": "approval-sandbox",
+    "expectedPath": "src/runtime/tool-executor.ts"
+  },
+  {
+    "id": "sandbox",
+    "prompt": "调试 Sandbox 执行边界",
+    "expectedFeatureId": "approval-sandbox",
+    "expectedPath": "src/runtime/tool-executor.ts"
+  },
+  {
+    "id": "workspace-switching",
+    "prompt": "修复工作区切换",
+    "expectedFeatureId": "workspace-switching",
+    "expectedPath": "src/runtime/workspace-manager.ts"
+  },
+  {
+    "id": "code-intelligence",
+    "prompt": "检查代码智能符号定位",
+    "expectedFeatureId": "context-mcp-code",
+    "expectedPath": "src/context/context-manager.ts"
+  },
+  {
+    "id": "config-test-entry",
+    "prompt": "检查启动配置和测试入口",
+    "expectedFeatureId": "startup-routing",
+    "expectedPath": "src/runtime/model-routing.ts"
+  }
+]

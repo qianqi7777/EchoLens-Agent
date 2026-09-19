@@ -11,7 +11,8 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 支持流式文本、连接前分类重试、Usage 与 Request ID 追踪
 - 提供 Gateway 登录状态、模型能力目录和 OpenAPI 客户端契约
 - 提供独立 Gateway MVP：Device Flow、Token 刷新/撤销、固定上游代理、SSE、用量和限流
-- 执行 `list_files`、`read_file`、`grep` 只读工具
+- 通过本地功能索引和工作区索引为首轮请求提供文件、符号和搜索导航
+- 执行 `list_files`、`read_file`、`grep`、`workspace_search` 只读工具
 - 使用带跨进程锁的单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
 - 支持在 TUI/行模式中查看和切换工作目录，并为目标目录重建隔离的 Session 与运行时资源
@@ -82,6 +83,17 @@ npm run dev -- --resume latest
 TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚和 steering 命令。
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
+
+## 首轮工具导航
+
+代码、配置、测试和仓库维护类请求会先在本地匹配功能目录与工作区索引，再把有限的候选文件、
+符号和只读动作提示交给模型。高置信度和低置信度搜索场景要求模型首轮返回只读工具调用；取得
+首个工具结果后恢复正常工具集合和最终结构化输出。该过程不增加额外模型调用，也不会让索引授予
+文件权限；真实读取仍经过 `PathPolicy` 和 `ToolExecutor`。
+
+`workspace_search` 统一搜索功能、文件、符号、配置、测试和字面量文本。索引只保存在本地内存，
+排除 `.env*`、私有规则、凭据命名文件、Git 元数据、依赖和构建目录。设置
+`AGENT_NAVIGATION_MODE=off` 可关闭导航并恢复模型自行探索的兼容行为。
 
 ## 模型智能路由
 
@@ -165,6 +177,7 @@ src/
   core/                  模型中立的消息、权限与 System Policy
   context/               项目指令来源和权限收紧契约
   code-intelligence/     tree-sitter 索引、TypeScript LSP 和代码工具
+  navigation/            本地工作区索引、功能目录与首轮导航解析
   orchestration/         后台队列、独立工作区、受限子 Agent 和只读 Hook
   credentials/           凭据引用与异步解析接口
   mcp/                   MCP 配置、Client 生命周期与工具桥接

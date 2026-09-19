@@ -228,6 +228,28 @@ test('non-terminal Responses states are not reported as completed', async () => 
   }
 });
 
+test('Provider rejects invalid tool choice requests before network access', async () => {
+  const noNetwork: typeof fetch = async () => {
+    throw new Error('validation should run before fetch');
+  };
+  const unsupported = new OpenAICompatibleProvider({
+    model: 'test-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: '', protocol: 'responses',
+    capabilities: { supportsToolChoice: false }, fetch: noNetwork,
+  });
+  await assert.rejects(
+    unsupported.complete({ items: [textMessage('user-unsupported', 'user', 'hello')], tools, toolChoice: 'auto' }),
+    (error: unknown) => error instanceof ProviderError && error.code === 'tool_choice_unsupported',
+  );
+
+  const provider = new OpenAICompatibleProvider({
+    model: 'test-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: '', protocol: 'chat_completions', fetch: noNetwork,
+  });
+  await assert.rejects(
+    provider.complete({ items: [textMessage('user-required', 'user', 'hello')], toolChoice: 'required' }),
+    (error: unknown) => error instanceof ProviderError && error.code === 'tool_choice_without_tools',
+  );
+});
+
 function providerFor(baseUrl: string, protocol: 'chat_completions' | 'responses') {
   return new OpenAICompatibleProvider({
     model: 'test-model',

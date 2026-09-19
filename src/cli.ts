@@ -21,6 +21,7 @@ import { JsonApprovalStore, type ApprovalDecision, type ApprovalRequest } from '
 import { loadEditCheckpoint, rollbackCheckpoint } from './runtime/structured-patch.js';
 import { runVerification, selectVerificationPlan } from './runtime/verification.js';
 import { initializeRuntimeExtensions } from './runtime/runtime-extensions.js';
+import { parseNavigationMode } from './navigation/navigation-resolver.js';
 import { PersistentTaskQueue } from './orchestration/task-queue.js';
 import { SubagentBackgroundService } from './orchestration/subagent-background.js';
 import { SubagentOrchestrator, registerSubagentTool } from './orchestration/subagent.js';
@@ -308,6 +309,7 @@ async function createCliWorkspaceRuntime(
       workspaceRoot,
       permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
       privacy: options.privacy,
+      navigationMode: parseNavigationMode(process.env.AGENT_NAVIGATION_MODE),
     });
     const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
     session = await SessionRuntime.open(agent, {

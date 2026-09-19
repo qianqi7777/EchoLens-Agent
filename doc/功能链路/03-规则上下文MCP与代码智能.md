@@ -92,6 +92,16 @@ sequenceDiagram
 
 tree-sitter 索引不扫描 `.git`、`.echolens`、`node_modules`、构建目录和 `studydocs`。LSP 文档和诊断只存在内存/子进程中，`CodeIntelligenceService.close()` 负责关闭，不产生业务持久化表。
 
+## 6.1 工作区与功能导航索引
+
+`WorkspaceIndex` 本地枚举允许读取的源码、配置、测试和公开文档，按内容 hash 复用解析结果；
+TypeScript/JavaScript 符号按需由 tree-sitter 提取。`.env*`、`AGENTS.md`、凭据命名文件、私有目录、
+依赖和构建产物不会进入索引。`FeatureIndex` 把 EchoLens 功能别名关联到实现、测试、配置和文档，
+`NavigationResolver` 只向首轮上下文注入 Top-K 候选，不注入完整索引，也不能改变权限。
+
+`workspace_search` 按功能命中、文件/符号索引和字面量文本顺序返回相对路径、行号、内容 hash 与
+Evidence ID；索引不可用时退化为受限实时文本扫描。所有候选在实际读取时仍重新经过 Path Policy。
+
 ## 7. 失败与测试
 
 - 规则目标路径不可信时，回退到项目根规则并产生 warning。

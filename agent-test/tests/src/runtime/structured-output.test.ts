@@ -83,6 +83,7 @@ test('Plan, Verifier, and Final Summary use strict local schemas', () => {
 test('Chat and Responses codecs place the same strict schema in protocol-specific fields', () => {
   const request: ProviderRequest = {
     items: [textMessage('user-1', 'user', 'hello')],
+    toolChoice: 'required',
     responseFormat: FINAL_SUMMARY_FORMAT,
   };
   const chat = new ChatCompletionsCodec().encode('model', request);
@@ -92,6 +93,7 @@ test('Chat and Responses codecs place the same strict schema in protocol-specifi
   assert.equal(jsonSchema.name, 'echolens_final_summary');
   assert.equal(jsonSchema.strict, true);
   assert.deepEqual(jsonSchema.schema, FINAL_SUMMARY_FORMAT.schema);
+  assert.equal(chat.body.tool_choice, 'required');
 
   const responses = new ResponsesCodec().encode('model', request);
   const text = responses.body.text as Record<string, unknown>;
@@ -100,6 +102,7 @@ test('Chat and Responses codecs place the same strict schema in protocol-specifi
   assert.equal(format.name, 'echolens_final_summary');
   assert.equal(format.strict, true);
   assert.deepEqual(format.schema, FINAL_SUMMARY_FORMAT.schema);
+  assert.equal(responses.body.tool_choice, 'required');
 });
 
 test('ReactAgent keeps a stable System Policy prefix and trusts only schema-valid final summaries', async () => {

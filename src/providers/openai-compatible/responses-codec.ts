@@ -35,6 +35,7 @@ export class ResponsesCodec implements ProtocolCodec {
         model,
         input: encodeInput(request.items),
         tools: request.tools?.map(encodeTool),
+        tool_choice: encodeToolChoice(request.toolChoice),
         text: request.responseFormat ? {
           format: {
             type: 'json_schema',
@@ -96,6 +97,11 @@ export class ResponsesCodec implements ProtocolCodec {
       cache: cachedInputTokens === undefined ? undefined : { readTokens: cachedInputTokens },
     };
   }
+}
+
+function encodeToolChoice(choice: ProviderRequest['toolChoice']): unknown {
+  if (!choice || choice === 'auto' || choice === 'required') return choice;
+  return { type: 'function', name: choice.name };
 }
 
 // Provider 响应不可信：转译为内部消息或工具调用前先校验结构与 status，任意不符立即抛错，

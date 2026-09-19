@@ -29,6 +29,7 @@ export type ToolErrorCode =
   | 'timeout'
   | 'cancelled'
   | 'tool_failed'
+  | 'workspace_changed'
   | 'patch_invalid'
   | 'patch_context_mismatch'
   | 'patch_ambiguous'

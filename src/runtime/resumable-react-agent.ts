@@ -21,6 +21,7 @@ import type {
   ModelToolDefinition,
   ProviderRequest,
   ProviderResult,
+  ToolChoice,
 } from '../providers/types.js';
 import type {
   AgentCheckpoint,
@@ -50,6 +51,8 @@ import type {
   ToolSpec,
 } from './types.js';
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
+import { navigationResolverFor, type NavigationResolver } from '../navigation/navigation-resolver.js';
+import type { NavigationHint } from '../navigation/types.js';
 
 /**
  * 一次 run/resume 的完整结果。
@@ -88,6 +91,8 @@ export interface ReactAgentOptions {
   contextManager?: ContextManager;
   toolScheduler?: ToolScheduler;
   hooks?: LifecycleHookRunner;
+  navigationMode?: 'auto' | 'off';
+  navigationResolver?: NavigationResolver;
 }
 
 interface RunMachine {
@@ -102,12 +107,14 @@ interface RunMachine {
   onEvent?: (event: AgentEvent) => void | Promise<void>;
   takeSteering?: () => Promise<string[]>;
   hooks?: LifecycleHookRunner;
+  navigationHint?: NavigationHint;
 }
 
 /** 显式、可检查点恢复的 model -> tools -> model 状态机。 */
 export class ReactAgent {
   private readonly contextManager: ContextManager;
   private readonly toolScheduler: ToolScheduler;
+  private readonly navigationResolver: NavigationResolver;
 
   constructor(
     private readonly model: ModelProvider,
@@ -120,6 +127,7 @@ export class ReactAgent {
       maxHistoryTurns: options.maxHistoryTurns,
     });
     this.toolScheduler = options.toolScheduler ?? new ToolScheduler();
+    this.navigationResolver = options.navigationResolver ?? navigationResolverFor(options.workspaceRoot);
   }
 
   /**
@@ -157,12 +165,16 @@ export class ReactAgent {
       onEvent: runtime.onEvent,
       takeSteering: runtime.takeSteering,
       hooks: this.options.hooks,
+      navigationHint: this.options.navigationMode === 'off'
+        ? undefined
+        : await this.navigationResolver.resolve(userMessage),
     };
     this.executor.resetBudget();
     await emit(machine, runtime.eventSink, { payload: { type: 'turn.started', userMessage } });
     await emit(machine, runtime.eventSink, {
       payload: { type: 'run.started', model: this.model.model, resumed: false },
     });
+    await this.emitNavigationEvent(machine, runtime.eventSink);
     await this.emitRouteEvents(machine, runtime.eventSink);
     await this.saveCheckpoint(machine, runtime.eventSink);
     return this.execute(machine, signal, runtime.eventSink);
@@ -188,6 +200,9 @@ export class ReactAgent {
       onEvent: runtime.onEvent,
       takeSteering: runtime.takeSteering,
       hooks: this.options.hooks,
+      navigationHint: this.options.navigationMode === 'off'
+        ? undefined
+        : await this.navigationResolver.resolve(latestUserText(checkpoint.items)),
     };
     // A resume is an explicit request for another bounded execution slice.
     // Completed tool results stay in the checkpoint, while runtime budgets are
@@ -196,6 +211,7 @@ export class ReactAgent {
     await emit(machine, runtime.eventSink, {
       payload: { type: 'run.started', model: this.model.model, resumed: true },
     });
+    await this.emitNavigationEvent(machine, runtime.eventSink);
     await this.emitRouteEvents(machine, runtime.eventSink);
     return this.execute(machine, signal, runtime.eventSink);
   }
@@ -211,8 +227,6 @@ export class ReactAgent {
     const runtimePermissions = effectiveRuntimePermissions(
       this.options.permissions ?? new Set<Permission>(['workspace.read']), this.model,
     );
-    const tools = providerTools(this.model, this.registry, runtimePermissions);
-
     // stepLimit 从 checkpoint 步数起算而非从 0 计数：恢复后的每个新片段都只获得
     // 一份 maxSteps 预算，已耗步数不重复计，因此不会因多次恢复而无限延长执行。
     const stepLimit = machine.step + (this.options.maxSteps ?? 8);
@@ -242,7 +256,21 @@ export class ReactAgent {
 
       await this.applySteering(machine, itemId, eventSink);
 
-      await emit(machine, eventSink, { payload: { type: 'model.started', step: machine.step } });
+      // 首轮强制只读只持续到首次工具结果。成功结果可作为证据；失败结果也必须交还模型解释或
+      // 修正，不能再次强制工具调用并覆盖 permission_denied 等确定性结论。
+      const navigationPending = Boolean(machine.navigationHint) && !hasToolResultInCurrentTurn(machine.items);
+      const discoveryTools = providerTools(this.model, this.registry, runtimePermissions, true);
+      const discovery = navigationPending && Boolean(discoveryTools?.length);
+      const tools = discovery ? discoveryTools : providerTools(this.model, this.registry, runtimePermissions);
+      const toolChoice = requestToolChoice(this.model, machine.navigationHint, discovery, tools);
+      await emit(machine, eventSink, {
+        payload: {
+          type: 'model.started',
+          step: machine.step,
+          toolChoice,
+          navigationMode: machine.navigationHint?.mode ?? 'none',
+        },
+      });
       let response;
       try {
         const prepared = await this.contextManager.build(machine.items, {
@@ -250,11 +278,13 @@ export class ReactAgent {
           providerMaxContextTokens: this.model.capabilities.maxContextTokens,
           runtimePermissions,
           targetPath: latestInstructionTarget(machine.items, this.options.instructionTarget),
+          navigationHint: navigationPending ? machine.navigationHint : undefined,
         });
         response = await this.completeModel(machine, eventSink, {
           items: prepared.items,
           tools,
-          responseFormat: this.model.capabilities.supportsStructuredOutput
+          toolChoice,
+          responseFormat: !discovery && this.model.capabilities.supportsStructuredOutput
             ? FINAL_SUMMARY_FORMAT
             : undefined,
           signal,
@@ -291,6 +321,7 @@ export class ReactAgent {
           usage: response.usage,
           elapsedMs: response.transport?.elapsedMs,
           retries: response.transport?.retries,
+          toolCallCount: toolCalls.length,
         },
       });
       if (response.usage) {
@@ -315,6 +346,11 @@ export class ReactAgent {
         machine.phase = 'tools';
         await this.saveCheckpoint(machine, eventSink);
         continue;
+      }
+
+      if (toolChoice === 'required') {
+        machine.trace.push({ type: 'warning', message: 'tool_required：模型未返回所需的只读工具调用' });
+        return this.fail(machine, eventSink, 'tool_required', '模型未按要求返回只读工具调用。');
       }
 
       const answer = assistantText(response.output);
@@ -417,6 +453,19 @@ export class ReactAgent {
         });
       }
     }
+  }
+
+  private async emitNavigationEvent(machine: RunMachine, eventSink: AgentEventSink | undefined): Promise<void> {
+    const hint = machine.navigationHint;
+    await emit(machine, eventSink, {
+      payload: {
+        type: 'navigation.resolved',
+        mode: this.options.navigationMode === 'off' ? 'off' : hint?.mode ?? 'none',
+        confidence: hint?.confidence ?? 0,
+        candidateCount: hint?.candidatePaths.length ?? 0,
+        matched: Boolean(hint?.matches.length || hint?.candidatePaths.length),
+      },
+    });
   }
 
   private async applySteering(
@@ -649,6 +698,18 @@ export class ReactAgent {
     return finishRun('当前 Turn 已取消，可稍后恢复。', machine, true, 'cancelled', checkpoint);
   }
 
+  private async fail(
+    machine: RunMachine,
+    eventSink: AgentEventSink | undefined,
+    code: string,
+    answer: string,
+  ): Promise<AgentRunResult> {
+    machine.phase = 'finished';
+    const checkpoint = await this.saveCheckpoint(machine, eventSink, 'failed');
+    await emit(machine, eventSink, { payload: { type: 'run.failed', code, retryable: false } });
+    return finishRun(answer, machine, true, 'failed', checkpoint);
+  }
+
   private async finish(
     machine: RunMachine,
     rawAnswer: string,
@@ -732,14 +793,38 @@ function providerTools(
   model: ModelProvider,
   registry: ToolRegistry,
   permissions: ReadonlySet<Permission>,
+  readOnly = false,
 ): ModelToolDefinition[] | undefined {
   if (!model.capabilities.supportsToolCalls) return undefined;
-  const tools = registry.list().filter((tool) => permissions.has(tool.permission)).map((tool) => ({
+  const tools = registry.list().filter((tool) => permissions.has(tool.permission))
+    .filter((tool) => !readOnly || (tool.effect ?? (tool.permission === 'workspace.read' ? 'read' : 'external')) === 'read')
+    .map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.inputSchema,
   }));
   return tools.length > 0 ? tools : undefined;
+}
+
+function requestToolChoice(
+  model: ModelProvider,
+  navigationHint: NavigationHint | undefined,
+  discovery: boolean,
+  tools: ModelToolDefinition[] | undefined,
+): ToolChoice | undefined {
+  if (!tools?.length || model.capabilities.supportsToolChoice === false) return undefined;
+  if (!discovery || !navigationHint) return 'auto';
+  return navigationHint.mode === 'advisory' ? 'auto' : 'required';
+}
+
+function hasToolResultInCurrentTurn(items: readonly ConversationItem[]): boolean {
+  const currentTurnStart = items.findLastIndex((item) => item.type === 'message' && item.role === 'user');
+  return items.slice(currentTurnStart + 1).some((item) => item.type === 'tool_result');
+}
+
+function latestUserText(items: readonly ConversationItem[]): string {
+  const message = items.findLast((item) => item.type === 'message' && item.role === 'user');
+  return message && isMessageItem(message) ? messageText(message) : '';
 }
 
 function effectiveRuntimePermissions(
