@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "id": "project-policy",
+        "enabled": false,
+        "matcher": {
+          "tools": ["shell_exec", "package_install"]
+        },
+        "handler": {
+          "type": "command",
+          "executable": "node",
+          "args": ["scripts/hooks/project-policy.mjs"],
+          "timeoutMs": 5000,
+          "envFrom": []
+        },
+        "failureMode": "closed",
+        "trustFiles": ["scripts/hooks/project-policy.mjs"]
+      }
+    ]
+  }
+}

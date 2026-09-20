@@ -39,6 +39,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
 - TypeScript 启用未使用代码、数组越界、隐式返回、Switch 穿透和 Override 等额外静态检查
 - 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
+- 支持用户级与项目级可执行命令 Hook；项目 Hook 按配置和脚本内容指纹显式信任
 
 ## 快速开始
 
@@ -149,6 +150,19 @@ Server 全部禁用且不包含真实地址。敏感 Header 和环境变量只�
 tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、引用和诊断结果只保留工作区内
 的相对路径；LSP 不可用时定义、引用和语法诊断自动降级到 tree-sitter。
 
+## 生命周期 Hook
+
+用户 Hook 读取 `$ECHOLENS_HOME/hooks.json`（默认 `~/.echolens/hooks.json`），项目 Hook
+读取 `.echolens/hooks.json`。配置采用版本化 JSON，示例见 `examples/hooks.example.json`。
+支持 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop` 和
+`SessionEnd`；命令从 stdin 读取事件 JSON，并可用 stdout JSON 拒绝 Prompt/工具或为 Prompt
+补充上下文。
+
+项目 Hook 在宿主机以当前用户权限执行，因此默认不受信。使用 `/hooks` 查看状态，确认命令和
+指纹后运行 `/hooks trust <id|all>`；配置或 `trustFiles` 内容变化会自动撤销信任。
+`/hooks revoke <id|all>` 撤销信任，`/hooks reload` 显式重载配置。Hook 只能拒绝动作，不能
+自动批准或绕过原有 Schema、权限、guardrail 和审批链。敏感环境变量只能用 `envFrom` 引用。
+
 ## 文档
 
 - [公开文档中心](doc/README.md)
@@ -215,7 +229,7 @@ contracts/
 v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和
-可执行生命周期 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
+HTTP/MCP/Prompt/Agent 型 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

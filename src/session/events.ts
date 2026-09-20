@@ -23,7 +23,15 @@ export interface AgentCheckpoint {
   toolCallsUsed: number;
   state: RunState;
   items: ConversationItem[];
+  hookContexts?: RuntimeHookContext[];
   routing?: ModelRoutingSnapshot;
+}
+
+export interface RuntimeHookContext {
+  hookId: string;
+  scope: 'user' | 'project';
+  content: string;
+  contentHash: string;
 }
 
 export type AgentEventPayload =
@@ -68,6 +76,15 @@ export type AgentEventPayload =
   | { type: 'model.failed'; step: number; code: string; retryable: boolean }
   | { type: 'tool.started'; callId: string; toolName: string; callIndex: number }
   | { type: 'tool.progress'; callId: string; toolName: string; progress: number; total?: number }
+  | {
+      type: 'hook.completed';
+      hookId: string;
+      scope: 'user' | 'project';
+      hookEventName: 'SessionStart' | 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse' | 'Stop' | 'SessionEnd';
+      status: 'completed' | 'denied' | 'timeout' | 'failed' | 'cancelled' | 'skipped';
+      durationMs: number;
+      reasonCode: string;
+    }
   | {
       type: 'tool.completed';
       callId: string;

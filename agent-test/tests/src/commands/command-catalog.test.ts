@@ -20,7 +20,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/model', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
+    ['/hooks', '/model', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
@@ -128,4 +128,38 @@ test('/model delegates session routing configuration and keeps invalid arguments
   assert.deepEqual((await executeServiceCommand('/model quality plan', services, session)).lines, ['mode=quality', 'phase=plan']);
   assert.deepEqual(calls, [['quality', 'plan']]);
   assert.match((await executeServiceCommand('/model quality plan extra', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/hooks 查看状态并在确认后信任项目 Hook', async () => {
+  let trusted = false;
+  let revoked = false;
+  let reloaded = false;
+  const services = {
+    listSessions: async () => [],
+    verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    hooks: {
+      list: () => [{
+        id: 'policy', runtimeId: 'project:policy', scope: 'project' as const,
+        event: 'PreToolUse' as const, enabled: true, trusted,
+        fingerprint: `sha256:${'a'.repeat(64)}`, executable: 'node',
+      }],
+      trust: async () => { trusted = true; return ['trusted']; },
+      revoke: async () => { revoked = true; return ['revoked']; },
+      reload: async () => { reloaded = true; return ['reloaded']; },
+    },
+  };
+  let confirm = false;
+  const session = { currentSessionId: 'active', confirm: async () => confirm };
+  assert.match((await executeServiceCommand('/hooks', services, session)).lines[0] ?? '', /untrusted/u);
+  assert.deepEqual((await executeServiceCommand('/hooks trust policy', services, session)).lines, ['已取消 Hook 信任操作']);
+  assert.equal(trusted, false);
+  confirm = true;
+  assert.deepEqual((await executeServiceCommand('/hooks trust policy', services, session)).lines, ['trusted']);
+  await executeServiceCommand('/hooks revoke policy', services, session);
+  await executeServiceCommand('/hooks reload', services, session);
+  assert.equal(revoked, true);
+  assert.equal(reloaded, true);
+  assert.match((await executeServiceCommand('/hooks nope', services, session)).lines[0] ?? '', /用法/u);
 });

@@ -24,6 +24,7 @@ export type ToolErrorCode =
   | 'unknown_tool'
   | 'invalid_arguments'
   | 'permission_denied'
+  | 'hook_denied'
   | 'approval_required'
   | 'budget_exhausted'
   | 'timeout'

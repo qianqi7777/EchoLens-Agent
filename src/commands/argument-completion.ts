@@ -13,6 +13,7 @@ export interface ArgumentCompletionContext {
   currentSessionId: string;
   listSessions(): Promise<readonly { sessionId: string }[]>;
   listTasks?(): Promise<readonly { id: string; state: string }[]>;
+  listHooks?(): readonly { id: string; scope: string; trusted: boolean }[];
 }
 
 export async function completeArguments(input: string, context: ArgumentCompletionContext): Promise<ArgumentCandidate[]> {
@@ -39,6 +40,17 @@ export async function completeArguments(input: string, context: ArgumentCompleti
     if (deletion) return values('delete ', (await context.listSessions())
       .filter((item) => item.sessionId !== context.currentSessionId)
       .map((item) => [item.sessionId, '历史会话']), deletion[1]!);
+  }
+  if (command === '/hooks') {
+    if (!args.includes(' ')) return values('', [
+      ['trust', '信任项目 Hook'], ['revoke', '撤销项目 Hook 信任'], ['reload', '重载 Hook 配置'],
+    ], args);
+    const action = /^(trust|revoke)\s+(\S*)$/u.exec(args);
+    if (action && context.listHooks) return values(`${action[1]} `, [
+      ['all', '全部项目 Hook'],
+      ...context.listHooks().filter((item) => item.scope === 'project')
+        .map((item): [string, string] => [item.id, item.trusted ? '已信任' : '未信任']),
+    ], action[2]!);
   }
   if (command === '/rollback' && !/\s/u.test(args)) {
     return values('', (await directoryEntries(path.join(context.workspaceRoot, '.echolens', 'checkpoints')))

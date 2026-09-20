@@ -20,11 +20,21 @@ export interface CommandCatalogContext {
   sessionDeletionAvailable?: boolean;
   skillImportAvailable?: boolean;
   modelRoutingAvailable?: boolean;
+  hooksAvailable?: boolean;
   verificationAvailable?: boolean;
   rollbackAvailable?: boolean;
 }
 
 export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
+  {
+    name: '/hooks',
+    description: '查看、信任、撤销或重载生命周期 Hook',
+    usage: '/hooks [trust|revoke|reload] [id|all]',
+    category: 'system',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
   {
     name: '/model',
     description: '查看或设置当前 Session 的模型路由模式',
@@ -162,6 +172,7 @@ export function getCommandCatalog(context: CommandCatalogContext): CommandDescri
     if (!context.workspaceAvailable && ['/pwd', '/cd'].includes(command.name)) return false;
     if (command.name === '/skill' && !context.skillImportAvailable) return false;
     if (command.name === '/model' && context.modelRoutingAvailable === false) return false;
+    if (command.name === '/hooks' && context.hooksAvailable === false) return false;
     if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
     if (command.name === '/verify' && context.verificationAvailable === false) return false;
     if (command.name === '/rollback' && context.rollbackAvailable === false) return false;

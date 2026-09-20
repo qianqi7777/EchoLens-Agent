@@ -663,6 +663,7 @@ export class TerminalUi {
       sessionDeletionAvailable: Boolean(this.options.deleteSession),
       skillImportAvailable: Boolean(this.options.importSkill),
       modelRoutingAvailable: Boolean(this.options.modelRouting),
+      hooksAvailable: Boolean(this.options.hooks),
       busy: this.store.get().busy,
       interface: 'tui' as const,
     };
@@ -868,6 +869,7 @@ export class TerminalUi {
         currentSessionId: state.sessionId,
         listSessions: this.options.listSessions,
         listTasks: this.options.backgroundTasks ? () => this.options.backgroundTasks!.list() : undefined,
+        listHooks: this.options.hooks ? () => this.options.hooks!.list() : undefined,
       }).then((candidates) => {
         if (this.stopped || generation !== this.completionGeneration || this.store.get().input !== input) return;
         this.store.update((s) => ({ ...s, argumentInput: input,
@@ -1185,6 +1187,12 @@ export class TerminalUi {
         });
         break;
       }
+      case 'hook.completed':
+        if (payload.status !== 'completed') {
+          this.pushNotice(`Hook ${payload.hookId}: ${payload.status} (${payload.reasonCode})`,
+            payload.status === 'denied' || payload.status === 'failed' ? 'warn' : 'dim');
+        }
+        break;
       case 'approval.requested':
         this.store.update((s) => ({ ...s, status: `等待审批：${payload.permission}`, statusTone: 'warn' }));
         break;

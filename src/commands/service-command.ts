@@ -4,6 +4,14 @@ import { executeWorkspaceCommand, type WorkspaceCommandService, type WorkspaceCo
 import type { EditCheckpoint } from '../runtime/structured-patch.js';
 import type { EditVerificationResult } from '../runtime/verification.js';
 import type { ImportedSkill } from '../skills/skill-manager.js';
+import type { HookStatus } from '../orchestration/command-hooks.js';
+
+export interface HookCommands {
+  list(): HookStatus[];
+  trust(selector: string): Promise<string[]>;
+  revoke(selector: string): Promise<string[]>;
+  reload(): Promise<string[]>;
+}
 
 /** 两种终端共用业务命令，确认、进度和显示状态由界面提供。 */
 export interface CommandServices {
@@ -19,9 +27,10 @@ export interface CommandServices {
     configure(mode?: string, phase?: string): Promise<string[]>;
     status(): string[];
   };
+  hooks?: HookCommands;
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -76,7 +85,42 @@ export async function executeServiceCommand(
       lines = args.length === 0 ? services.modelRouting.status() : await services.modelRouting.configure(args[0], args[1]);
       break;
     }
+    case '/hooks': {
+      if (!services.hooks) throw new Error('Hook 管理服务不可用');
+      if (args.length === 0) {
+        const statuses = services.hooks.list();
+        lines = statuses.length === 0 ? ['未配置 Hook'] : statuses.map(formatHookStatus);
+        break;
+      }
+      if (args[0] === 'reload' && args.length === 1) {
+        lines = await services.hooks.reload();
+        break;
+      }
+      if ((args[0] === 'trust' || args[0] === 'revoke') && args.length === 2 && args[1]) {
+        if (args[0] === 'trust') {
+          const targets = services.hooks.list().filter((item) => item.scope === 'project'
+            && (args[1] === 'all' || item.id === args[1]));
+          if (targets.length === 0) throw new Error(`未找到项目 Hook：${args[1]}`);
+          const approved = await session.confirm([
+            '项目 Hook 将在宿主机以当前用户权限执行外部程序。',
+            ...targets.map((item) => `${item.runtimeId}: ${item.executable} fingerprint=${item.fingerprint?.slice(7, 19) ?? 'unknown'}`),
+            '确认信任以上 Hook？',
+          ].join('\n'));
+          lines = approved ? await services.hooks.trust(args[1]) : ['已取消 Hook 信任操作'];
+        } else {
+          lines = await services.hooks.revoke(args[1]);
+        }
+        break;
+      }
+      lines = ['用法：/hooks [trust|revoke|reload] [id|all]'];
+      break;
+    }
     default: return { handled: false, lines: [] };
   }
   return { handled: true, lines };
+}
+
+function formatHookStatus(item: HookStatus): string {
+  const state = !item.enabled ? 'disabled' : item.trusted ? 'trusted' : 'untrusted';
+  return `${item.runtimeId} event=${item.event} state=${state} command=${item.executable}`;
 }

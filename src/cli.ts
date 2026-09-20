@@ -31,6 +31,7 @@ import { isModelProviderRunLifecycle, type ModelProvider } from './providers/typ
 import { SkillManager } from './skills/skill-manager.js';
 import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
 import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
+import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -119,6 +120,7 @@ if (!connectedModel) {
         configure: (mode, phase) => manager.currentRuntime().session.configureModelRouting(mode, phase),
         status: () => manager.currentRuntime().session.modelRoutingStatus(),
       },
+      hooks: hookCommandProxy(manager),
     };
 
     if (useTui) {
@@ -187,7 +189,8 @@ if (!connectedModel) {
         let prompt = (await lineTerminal!.question('\n> ')).trim();
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
-          sessionDeletionAvailable: true, skillImportAvailable: true, modelRoutingAvailable: true, interface: 'line' as const };
+          sessionDeletionAvailable: true, skillImportAvailable: true, modelRoutingAvailable: true,
+          hooksAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }
         prompt = parsed.input;
@@ -203,7 +206,7 @@ if (!connectedModel) {
           const result = await executeServiceCommand(prompt, commandServices, {
             currentSessionId: manager.currentRuntime().sessionId,
             confirm: async (message) => {
-              if (!input.isTTY) throw new Error('历史会话删除需要交互式终端确认，不接受管道确认');
+              if (!input.isTTY) throw new Error('该操作需要交互式终端确认，不接受管道确认');
               return (await lineTerminal!.question(`${message}\n输入 y 确认，其他输入取消 [y/N]：`)).trim().toLowerCase() === 'y';
             },
           });
@@ -249,6 +252,7 @@ interface CliWorkspaceRuntime extends ManagedWorkspaceRuntime {
   session: SessionRuntime;
   backgroundTasks: SubagentBackgroundService;
   startupMessages: string[];
+  hooks: LifecycleHookRunner;
 }
 
 interface CreateCliWorkspaceRuntimeOptions {
@@ -273,6 +277,7 @@ async function createCliWorkspaceRuntime(
   let backgroundTasks: SubagentBackgroundService | undefined;
   let session: SessionRuntime | undefined;
   try {
+    const hooks = await LifecycleHookRunner.load(workspaceRoot);
     extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
     const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
     const subagents = new SubagentOrchestrator(runtimeModel, registry, workspaceRoot);
@@ -310,6 +315,7 @@ async function createCliWorkspaceRuntime(
       permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
       privacy: options.privacy,
       navigationMode: parseNavigationMode(process.env.AGENT_NAVIGATION_MODE),
+      hooks,
     });
     const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
     session = await SessionRuntime.open(agent, {
@@ -317,11 +323,13 @@ async function createCliWorkspaceRuntime(
       workspaceRoot,
       sessionId: options.sessionId,
       storeOptions: { flushEachEvent: false },
+      hooks,
     });
     const startupMessages = [
       '代码智能已启用：tree-sitter + TypeScript LSP（按需启动）',
       `MCP 已连接 ${extensions.connectedMcpServers.length} 个 Server`,
       ...extensions.notices,
+      ...hooks.hookSummary(),
     ];
     return {
       workspaceRoot,
@@ -330,12 +338,24 @@ async function createCliWorkspaceRuntime(
       session,
       backgroundTasks,
       startupMessages,
+      hooks,
       close: () => closeWorkspaceResources(session, backgroundTasks!, extensions!),
     };
   } catch (error) {
     await closeWorkspaceResources(session, backgroundTasks, extensions).catch(() => undefined);
     throw error;
   }
+}
+
+function hookCommandProxy(
+  manager: WorkspaceRuntimeManager<CliWorkspaceRuntime>,
+): NonNullable<CommandServices['hooks']> {
+  return {
+    list: () => manager.currentRuntime().hooks.hookStatus(),
+    trust: (selector) => manager.currentRuntime().hooks.trustProjectHooks(selector),
+    revoke: (selector) => manager.currentRuntime().hooks.revokeProjectHooks(selector),
+    reload: () => manager.currentRuntime().hooks.reloadCommandHooks(),
+  };
 }
 
 function workspaceCommandProxy(

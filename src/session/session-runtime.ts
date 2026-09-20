@@ -19,10 +19,13 @@ export class SessionRuntime {
   private history: ConversationItem[] = [];
   private steeringQueue: string[] = [];
   private activeTurnId?: string;
+  private closed = false;
 
   private constructor(
     private readonly agent: ReactAgent,
     store: JsonlEventStore,
+    private readonly workspaceRoot: string,
+    private readonly hooks?: LifecycleHookRunner,
   ) {
     this.store = store;
     this.sessionId = store.sessionId;
@@ -34,7 +37,7 @@ export class SessionRuntime {
       options.sessionId ?? randomUUID(),
       options.storeOptions,
     );
-    const runtime = new SessionRuntime(agent, store);
+    const runtime = new SessionRuntime(agent, store, options.workspaceRoot, options.hooks);
     try {
       const events = await store.read();
       if (events.length === 0) {
@@ -61,6 +64,7 @@ export class SessionRuntime {
           agent.restoreModelRouting(latestRouting.payload.checkpoint.routing);
         }
       }
+      await runtime.runSessionHook(events.length === 0 ? 'startup' : 'resume');
       return runtime;
     } catch (error) {
       await store.close().catch(() => undefined);
@@ -144,12 +148,61 @@ export class SessionRuntime {
     return this.agent.modelRoutingStatus();
   }
 
-  close(): Promise<void> {
-    return this.store.close();
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    let failure: unknown;
+    try { await this.runSessionEndHook(); }
+    catch (error) { failure = error; }
+    try { await this.store.close(); }
+    catch (error) { failure ??= error; }
+    if (failure) throw failure;
   }
 
   private async takeSteering(): Promise<string[]> {
     return this.steeringQueue.splice(0, this.steeringQueue.length);
+  }
+
+  private async runSessionHook(source: 'startup' | 'resume'): Promise<void> {
+    const outcome = await this.hooks?.run({
+      version: 1,
+      hookEventName: 'SessionStart',
+      sessionId: this.sessionId,
+      cwd: this.workspaceRoot,
+      source,
+    });
+    for (const result of outcome?.results ?? []) await this.store.append({
+      payload: {
+        type: 'hook.completed',
+        hookId: result.hookId,
+        scope: result.scope,
+        hookEventName: result.hookEventName,
+        status: result.status,
+        durationMs: result.durationMs,
+        reasonCode: result.reasonCode,
+      },
+    });
+  }
+
+  private async runSessionEndHook(): Promise<void> {
+    const outcome = await this.hooks?.run({
+      version: 1,
+      hookEventName: 'SessionEnd',
+      sessionId: this.sessionId,
+      cwd: this.workspaceRoot,
+      source: 'close',
+    });
+    for (const result of outcome?.results ?? []) await this.store.append({
+      payload: {
+        type: 'hook.completed',
+        hookId: result.hookId,
+        scope: result.scope,
+        hookEventName: result.hookEventName,
+        status: result.status,
+        durationMs: result.durationMs,
+        reasonCode: result.reasonCode,
+      },
+    });
   }
 }
 
@@ -205,6 +258,7 @@ function countsAgainstBudget(result: ConversationItem & { type: 'tool_result' })
   return ![
     'approval_required',
     'permission_denied',
+    'hook_denied',
     'budget_exhausted',
     'unknown_tool',
     'invalid_arguments',

@@ -2,6 +2,9 @@ node_modules/
 dist/
 coverage/
 .echolens/
+!/.echolens/
+/.echolens/*
+!/.echolens/hooks.json
 .env
 .env.*
 !.env.example

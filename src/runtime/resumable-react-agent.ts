@@ -29,6 +29,7 @@ import type {
   AgentEventIntent,
   AgentEventSink,
   RunState,
+  RuntimeHookContext,
 } from '../session/events.js';
 import { ToolExecutor } from './tool-executor.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -107,6 +108,7 @@ interface RunMachine {
   onEvent?: (event: AgentEvent) => void | Promise<void>;
   takeSteering?: () => Promise<string[]>;
   hooks?: LifecycleHookRunner;
+  hookContexts: RuntimeHookContext[];
   navigationHint?: NavigationHint;
 }
 
@@ -165,6 +167,7 @@ export class ReactAgent {
       onEvent: runtime.onEvent,
       takeSteering: runtime.takeSteering,
       hooks: this.options.hooks,
+      hookContexts: [],
       navigationHint: this.options.navigationMode === 'off'
         ? undefined
         : await this.navigationResolver.resolve(userMessage),
@@ -174,6 +177,19 @@ export class ReactAgent {
     await emit(machine, runtime.eventSink, {
       payload: { type: 'run.started', model: this.model.model, resumed: false },
     });
+    const promptHooks = await this.runCommandHooks(machine, runtime.eventSink, {
+      version: 1,
+      hookEventName: 'UserPromptSubmit',
+      sessionId,
+      turnId,
+      runId,
+      cwd: this.options.workspaceRoot,
+      prompt: userMessage,
+    }, signal);
+    machine.hookContexts = promptHooks.contexts;
+    if (promptHooks.decision === 'deny') {
+      return this.fail(machine, runtime.eventSink, 'hook_denied', promptHooks.reason ?? 'Hook 拒绝了当前请求');
+    }
     await this.emitNavigationEvent(machine, runtime.eventSink);
     await this.emitRouteEvents(machine, runtime.eventSink);
     await this.saveCheckpoint(machine, runtime.eventSink);
@@ -200,6 +216,7 @@ export class ReactAgent {
       onEvent: runtime.onEvent,
       takeSteering: runtime.takeSteering,
       hooks: this.options.hooks,
+      hookContexts: structuredClone(checkpoint.hookContexts ?? []),
       navigationHint: this.options.navigationMode === 'off'
         ? undefined
         : await this.navigationResolver.resolve(latestUserText(checkpoint.items)),
@@ -279,6 +296,7 @@ export class ReactAgent {
           runtimePermissions,
           targetPath: latestInstructionTarget(machine.items, this.options.instructionTarget),
           navigationHint: navigationPending ? machine.navigationHint : undefined,
+          hookContexts: machine.hookContexts,
         });
         response = await this.completeModel(machine, eventSink, {
           items: prepared.items,
@@ -303,6 +321,7 @@ export class ReactAgent {
         await emit(machine, eventSink, {
           payload: { type: 'run.failed', code, retryable: errorRetryable(error) },
         });
+        await this.runStopHooks(machine, eventSink, 'failed', true, stopReasonMessage(code));
         throw error;
       }
 
@@ -540,6 +559,7 @@ export class ReactAgent {
       runtimePermissions,
       targetPath: typeof call.arguments.path === 'string'
         ? call.arguments.path : this.options.instructionTarget,
+      hookContexts: machine.hookContexts,
     });
     // 工具可执行的权限完全来自 ContextManager 构建的权限规则；
     // 工具输出/MCP 内容只能作为不可信证据回填，不能反向修改权限集合或 System Policy。
@@ -615,9 +635,28 @@ export class ReactAgent {
           },
         });
       },
+      async (tool, validatedArguments) => {
+        const hookResult = await this.runCommandHooks(machine, eventSink, {
+          version: 1,
+          hookEventName: 'PreToolUse',
+          sessionId: machine.sessionId,
+          turnId: machine.turnId,
+          runId: machine.runId,
+          cwd: this.options.workspaceRoot,
+          callId: call.callId,
+          toolName: tool.name,
+          permission: tool.permission,
+          effect: tool.effect ?? (tool.permission === 'workspace.read' ? 'read' : 'external'),
+          toolInput: structuredClone(validatedArguments),
+        }, context.signal);
+        return hookResult.decision === 'deny'
+          ? { decision: 'deny', reason: hookResult.reason ?? 'Hook 拒绝了工具调用' }
+          : undefined;
+      },
     );
     const result = outcome.result;
     const item = toolResultItem(call, result, itemId);
+    const completedTool = this.registry.list().find((tool) => tool.name === call.name);
     const outputDecision = toolOutputGuardrailDecision(result);
     await emit(machine, eventSink, {
       payload: {
@@ -640,6 +679,21 @@ export class ReactAgent {
         result: item,
       },
     });
+    await this.runCommandHooks(machine, eventSink, {
+      version: 1,
+      hookEventName: 'PostToolUse',
+      sessionId: machine.sessionId,
+      turnId: machine.turnId,
+      runId: machine.runId,
+      cwd: this.options.workspaceRoot,
+      callId: call.callId,
+      toolName: call.name,
+      permission: completedTool?.permission,
+      effect: completedTool?.effect
+        ?? (completedTool?.permission === 'workspace.read' ? 'read' : 'external'),
+      toolInput: structuredClone(outcome.decision.normalizedArguments),
+      toolResult: structuredClone(result),
+    }, context.signal);
     const observation = result.status === 'ok'
       ? workspaceFileObservation(
           this.registry,
@@ -667,6 +721,7 @@ export class ReactAgent {
       toolCallsUsed: this.executor.callsUsed(),
       state,
       items: structuredClone(machine.items),
+      hookContexts: structuredClone(machine.hookContexts),
       routing: isModelProviderRunLifecycle(this.model) ? this.model.snapshot() : undefined,
     };
     const event = await emit(machine, eventSink, {
@@ -683,6 +738,7 @@ export class ReactAgent {
   ): Promise<AgentRunResult> {
     const checkpoint = await this.saveCheckpoint(machine, eventSink, 'paused');
     await emit(machine, eventSink, { payload: { type: 'run.paused', reason } });
+    await this.runStopHooks(machine, eventSink, 'paused', true, 'Agent 已暂停，可从当前检查点继续。');
     return finishRun('Agent 已暂停，可从当前检查点继续。', machine, true, 'paused', checkpoint);
   }
 
@@ -695,6 +751,7 @@ export class ReactAgent {
     await emit(machine, eventSink, {
       payload: { type: 'run.cancelled', reason: safeReason(reason) },
     });
+    await this.runStopHooks(machine, eventSink, 'cancelled', true, '当前 Turn 已取消，可稍后恢复。');
     return finishRun('当前 Turn 已取消，可稍后恢复。', machine, true, 'cancelled', checkpoint);
   }
 
@@ -707,6 +764,7 @@ export class ReactAgent {
     machine.phase = 'finished';
     const checkpoint = await this.saveCheckpoint(machine, eventSink, 'failed');
     await emit(machine, eventSink, { payload: { type: 'run.failed', code, retryable: false } });
+    await this.runStopHooks(machine, eventSink, 'failed', true, answer);
     return finishRun(answer, machine, true, 'failed', checkpoint);
   }
 
@@ -730,7 +788,52 @@ export class ReactAgent {
     await emit(machine, eventSink, {
       payload: { type: 'run.completed', answer: rawAnswer, degraded },
     });
+    await this.runStopHooks(machine, eventSink, state, degraded, rawAnswer);
     return finishRun(rawAnswer, machine, degraded, state, checkpoint, parsed);
+  }
+
+  private async runStopHooks(
+    machine: RunMachine,
+    eventSink: AgentEventSink | undefined,
+    state: RunState,
+    degraded: boolean,
+    answer: string,
+  ): Promise<void> {
+    await this.runCommandHooks(machine, eventSink, {
+      version: 1,
+      hookEventName: 'Stop',
+      sessionId: machine.sessionId,
+      turnId: machine.turnId,
+      runId: machine.runId,
+      cwd: this.options.workspaceRoot,
+      state,
+      degraded,
+      answer,
+    });
+  }
+
+  private async runCommandHooks(
+    machine: RunMachine,
+    eventSink: AgentEventSink | undefined,
+    input: import('../orchestration/command-hooks.js').HookInput,
+    signal?: AbortSignal,
+  ): Promise<import('../orchestration/command-hooks.js').HookRunResult> {
+    const outcome = await machine.hooks?.run(input, signal)
+      ?? { decision: 'continue' as const, contexts: [], results: [] };
+    for (const result of outcome.results) {
+      await emit(machine, eventSink, {
+        payload: {
+          type: 'hook.completed',
+          hookId: result.hookId,
+          scope: result.scope,
+          hookEventName: result.hookEventName,
+          status: result.status,
+          durationMs: result.durationMs,
+          reasonCode: result.reasonCode,
+        },
+      });
+    }
+    return outcome;
   }
 }
 
