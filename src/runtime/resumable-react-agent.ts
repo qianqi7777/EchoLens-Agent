@@ -40,7 +40,10 @@ import {
 } from './tool-output.js';
 import {
   FINAL_SUMMARY_FORMAT,
+  PLAN_FORMAT,
+  parseAgentPlan,
   parseFinalSummary,
+  type AgentPlan,
   type StructuredOutputResult,
   type FinalSummary,
 } from './structured-output.js';
@@ -54,6 +57,8 @@ import type {
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 import { navigationResolverFor, type NavigationResolver } from '../navigation/navigation-resolver.js';
 import type { NavigationHint } from '../navigation/types.js';
+import type { AgentGoal } from './goal.js';
+import type { ExecutionPhase } from './model-routing.js';
 
 /**
  * 一次 run/resume 的完整结果。
@@ -72,6 +77,7 @@ export interface AgentRunResult {
   runId: string;
   checkpoint: AgentCheckpoint;
   finalSummary: StructuredOutputResult<FinalSummary>;
+  proposedPlan?: { planId: string; plan?: AgentPlan; raw?: string };
 }
 
 export interface AgentRunRuntime {
@@ -80,6 +86,9 @@ export interface AgentRunRuntime {
   eventSink?: AgentEventSink;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
   takeSteering?: () => Promise<string[]>;
+  approvedPlan?: AgentPlan;
+  activeGoal?: AgentGoal;
+  getActiveGoal?: () => AgentGoal | undefined;
 }
 
 export interface ReactAgentOptions {
@@ -110,6 +119,10 @@ interface RunMachine {
   hooks?: LifecycleHookRunner;
   hookContexts: RuntimeHookContext[];
   navigationHint?: NavigationHint;
+  approvedPlan?: AgentPlan;
+  activeGoal?: AgentGoal;
+  getActiveGoal?: () => AgentGoal | undefined;
+  lastResponsePhase?: ExecutionPhase;
 }
 
 /** 显式、可检查点恢复的 model -> tools -> model 状态机。 */
@@ -171,6 +184,9 @@ export class ReactAgent {
       navigationHint: this.options.navigationMode === 'off'
         ? undefined
         : await this.navigationResolver.resolve(userMessage),
+      approvedPlan: runtime.approvedPlan,
+      activeGoal: runtime.activeGoal,
+      getActiveGoal: runtime.getActiveGoal,
     };
     this.executor.resetBudget();
     await emit(machine, runtime.eventSink, { payload: { type: 'turn.started', userMessage } });
@@ -220,6 +236,9 @@ export class ReactAgent {
       navigationHint: this.options.navigationMode === 'off'
         ? undefined
         : await this.navigationResolver.resolve(latestUserText(checkpoint.items)),
+      approvedPlan: runtime.approvedPlan,
+      activeGoal: runtime.activeGoal,
+      getActiveGoal: runtime.getActiveGoal,
     };
     // A resume is an explicit request for another bounded execution slice.
     // Completed tool results stay in the checkpoint, while runtime budgets are
@@ -241,14 +260,17 @@ export class ReactAgent {
     // 本次 execute 全程复用同一个 itemId 工厂，计数器从已有 items 数量起步并持续递增，
     // 跨越 model/tools 多次循环及恢复后都不产生重复 ID。
     const itemId = itemIdFactory(machine.runId, machine.items.length);
-    const runtimePermissions = effectiveRuntimePermissions(
-      this.options.permissions ?? new Set<Permission>(['workspace.read']), this.model,
-    );
     // stepLimit 从 checkpoint 步数起算而非从 0 计数：恢复后的每个新片段都只获得
     // 一份 maxSteps 预算，已耗步数不重复计，因此不会因多次恢复而无限延长执行。
     const stepLimit = machine.step + (this.options.maxSteps ?? 8);
     while (machine.step < stepLimit) {
       if (signal?.aborted) return this.cancel(machine, eventSink, signal.reason);
+
+      // 阶段可以在运行中通过 /plan 切换；每一轮重算权限，确保下一次模型请求
+      // 立即看到收窄后的工具集合，且在途写调用仍由 guardrail 拒绝。
+      const runtimePermissions = effectiveRuntimePermissions(
+        this.options.permissions ?? new Set<Permission>(['workspace.read']), this.model,
+      );
 
       // tools 阶段先执行所有挂起工具；执行结果决定继续、暂停还是取消。
       if (machine.phase === 'tools') {
@@ -276,6 +298,7 @@ export class ReactAgent {
       // 首轮强制只读只持续到首次工具结果。成功结果可作为证据；失败结果也必须交还模型解释或
       // 修正，不能再次强制工具调用并覆盖 permission_denied 等确定性结论。
       const navigationPending = Boolean(machine.navigationHint) && !hasToolResultInCurrentTurn(machine.items);
+      const requestPhase = isModelProviderRunLifecycle(this.model) ? this.model.currentPhase() : 'execute';
       const discoveryTools = providerTools(this.model, this.registry, runtimePermissions, true);
       const discovery = navigationPending && Boolean(discoveryTools?.length);
       const tools = discovery ? discoveryTools : providerTools(this.model, this.registry, runtimePermissions);
@@ -297,17 +320,24 @@ export class ReactAgent {
           targetPath: latestInstructionTarget(machine.items, this.options.instructionTarget),
           navigationHint: navigationPending ? machine.navigationHint : undefined,
           hookContexts: machine.hookContexts,
+          approvedPlan: requestPhase === 'execute' ? machine.approvedPlan : undefined,
+          activeGoal: requestPhase === 'execute'
+            ? (machine.getActiveGoal?.() ?? machine.activeGoal)
+            : undefined,
         });
         response = await this.completeModel(machine, eventSink, {
           items: prepared.items,
           tools,
           toolChoice,
           responseFormat: !discovery && this.model.capabilities.supportsStructuredOutput
-            ? FINAL_SUMMARY_FORMAT
+            ? (requestPhase === 'plan'
+                ? PLAN_FORMAT
+                : FINAL_SUMMARY_FORMAT)
             : undefined,
           signal,
         });
         await this.emitRouteEvents(machine, eventSink);
+        machine.lastResponsePhase = requestPhase;
       } catch (error) {
         await this.emitRouteEvents(machine, eventSink);
         // 请求失败后先判定中止：已中止则按取消处理而不是失败重试，
@@ -433,6 +463,10 @@ export class ReactAgent {
     return isModelProviderRunLifecycle(this.model) ? this.model.status() : [`model=${this.model.model}`];
   }
 
+  executionPhase(): 'plan' | 'execute' | 'verify' {
+    return isModelProviderRunLifecycle(this.model) ? this.model.currentPhase() : 'execute';
+  }
+
   modelRoutingSnapshot(): import('../providers/types.js').ModelRoutingSnapshot | undefined {
     return isModelProviderRunLifecycle(this.model) ? this.model.snapshot() : undefined;
   }
@@ -454,6 +488,7 @@ export class ReactAgent {
             candidates: event.candidates,
             actualModel: event.actualModel,
             phase: event.phase,
+            phaseOverride: event.phaseOverride,
             suggestedModel: event.suggestedModel,
           },
         });
@@ -778,18 +813,26 @@ export class ReactAgent {
     machine.phase = 'finished';
     const checkpoint = await this.saveCheckpoint(machine, eventSink, state);
     const parsed = parseFinalSummary(rawAnswer);
-    await emit(machine, eventSink, {
-      payload: {
-        type: 'verification.completed',
-        verified: parsed.verified,
-        issueCount: parsed.verified ? parsed.value.unresolved.length : 1,
-      },
-    });
+    let proposedPlan: AgentRunResult['proposedPlan'];
+    if (machine.lastResponsePhase === 'plan' && rawAnswer.trim()) {
+      const planId = `${machine.runId}:plan`;
+      const plan = parseAgentPlan(rawAnswer);
+      proposedPlan = plan.verified ? { planId, plan: plan.value } : { planId, raw: rawAnswer };
+      await emit(machine, eventSink, { payload: { type: 'plan.proposed', ...proposedPlan } });
+    } else {
+      await emit(machine, eventSink, {
+        payload: {
+          type: 'verification.completed',
+          verified: parsed.verified,
+          issueCount: parsed.verified ? parsed.value.unresolved.length : 1,
+        },
+      });
+    }
     await emit(machine, eventSink, {
       payload: { type: 'run.completed', answer: rawAnswer, degraded },
     });
     await this.runStopHooks(machine, eventSink, state, degraded, rawAnswer);
-    return finishRun(rawAnswer, machine, degraded, state, checkpoint, parsed);
+    return finishRun(rawAnswer, machine, degraded, state, checkpoint, parsed, proposedPlan);
   }
 
   private async runStopHooks(
@@ -954,6 +997,7 @@ function finishRun(
   state: RunState,
   checkpoint: AgentCheckpoint,
   finalSummary: StructuredOutputResult<FinalSummary> = parseFinalSummary(rawAnswer),
+  proposedPlan?: AgentRunResult['proposedPlan'],
 ): AgentRunResult {
   return {
     answer: finalSummary.verified ? finalSummary.value.answer : rawAnswer,
@@ -966,6 +1010,7 @@ function finishRun(
     runId: machine.runId,
     checkpoint,
     finalSummary,
+    proposedPlan,
   };
 }
 

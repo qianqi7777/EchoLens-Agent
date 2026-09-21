@@ -74,6 +74,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
   private fallbackCandidates: ModelProfile[] = [];
   private fallbackCount = 0;
   private phase: ExecutionPhase = 'execute';
+  private automaticPhase: ExecutionPhase = 'execute';
   private phaseOverride: ExecutionPhase | undefined;
   private requiresTools = false;
   private toolsStarted = false;
@@ -110,7 +111,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
 
   get privacy(): PrivacyLevel { return this.active.privacy; }
 
-  get readOnlyPhase(): boolean { return this.phase === 'plan' || this.phase === 'verify'; }
+  currentPhase(): ExecutionPhase { return this.phase; }
 
   allowedPermissions(): ReadonlySet<Permission> | undefined {
     if (this.phase === 'plan') return new Set<Permission>(['workspace.read']);
@@ -120,6 +121,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
 
   beginRun(userMessage: string): void {
     const classification = classifyTask(userMessage);
+    this.automaticPhase = classification.phase;
     this.phase = this.phaseOverride ?? classification.phase;
     this.requiresTools = classification.requiresTools;
     this.toolsStarted = false;
@@ -141,6 +143,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
     this.active = profile;
     this.mode = routingMode(snapshot.mode);
     this.phase = snapshot.phase;
+    this.automaticPhase = snapshot.automaticPhase ?? snapshot.phase;
     this.phaseOverride = snapshot.phaseOverride;
     this.fallbackCount = snapshot.fallbacks;
     this.runCostUsd = snapshot.runCostUsd;
@@ -163,6 +166,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
       version: 1,
       mode: this.mode,
       phase: this.phase,
+      automaticPhase: this.automaticPhase,
       phaseOverride: this.phaseOverride,
       profileId: this.active.id,
       tier: this.active.tier,
@@ -209,6 +213,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
     }
     this.mode = nextMode;
     this.phaseOverride = nextPhaseOverride;
+    this.phase = nextPhaseOverride ?? this.automaticPhase;
     return this.status();
   }
 
@@ -292,6 +297,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
       candidates: candidates.map((candidate) => candidate.profile.id),
       actualModel: this.active.provider.model,
       phase: this.phase,
+      phaseOverride: this.phaseOverride,
       suggestedModel: this.mode === 'off' ? undefined : candidates[0]?.profile.id,
     });
   }

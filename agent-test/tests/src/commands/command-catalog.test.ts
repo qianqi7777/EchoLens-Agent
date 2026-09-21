@@ -20,7 +20,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/hooks', '/model', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
+    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
@@ -46,7 +46,7 @@ test('主名称优先，别名、界面和依赖能力独立处理', () => {
   const names = getCommandCatalog({ ...context, workspaceAvailable: false, interface: 'line' }).map((item) => item.name);
   assert.ok(names.includes('/verify') && names.includes('/rollback'));
   assert.ok(!names.includes('/clear') && !names.includes('/cd'));
-  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/steer']);
+  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/plan', '/goal', '/steer']);
   assert.ok(getCommandCatalog({ ...context, sessionDeletionAvailable: true }).some((item) => item.name === '/session'));
 });
 
@@ -128,6 +128,36 @@ test('/model delegates session routing configuration and keeps invalid arguments
   assert.deepEqual((await executeServiceCommand('/model quality plan', services, session)).lines, ['mode=quality', 'phase=plan']);
   assert.deepEqual(calls, [['quality', 'plan']]);
   assert.match((await executeServiceCommand('/model quality plan extra', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/plan 只配置阶段，/goal 支持状态、证据与收口', async () => {
+  const routes: Array<[string | undefined, string | undefined]> = [];
+  let goal = undefined as import('../../../../src/runtime/goal.js').AgentGoal | undefined;
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    modelRouting: {
+      status: () => ['phase=auto'],
+      configure: async (mode?: string, phase?: string) => { routes.push([mode, phase]); return [`phase=${phase}`]; },
+    },
+    goals: {
+      status: () => goal,
+      set: async (statement: string) => (goal = { id: 'g1', statement, criteria: [], status: 'active' as const, evidence: [] }),
+      note: async (text: string) => { goal?.evidence.push({ id: 'e1', kind: 'note', ref: 'user', summary: text, at: 'now' }); },
+      close: async () => { goal = undefined; },
+    },
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/plan', services, session)).lines, ['phase=auto']);
+  await executeServiceCommand('/plan on', services, session);
+  await executeServiceCommand('/plan off', services, session);
+  assert.deepEqual(routes, [[undefined, 'plan'], [undefined, 'auto']]);
+  await executeServiceCommand('/goal 完成发布', services, session);
+  await executeServiceCommand('/goal note 构建通过', services, session);
+  assert.match((await executeServiceCommand('/goal status', services, session)).lines.join('\n'), /完成发布[\s\S]*构建通过/u);
+  await executeServiceCommand('/goal done', services, session);
+  assert.equal(goal, undefined);
 });
 
 test('/hooks 查看状态并在确认后信任项目 Hook', async () => {

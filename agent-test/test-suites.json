@@ -14,6 +14,7 @@
     "agent-test/tests/src/runtime/edit-loop.test.ts",
     "agent-test/tests/src/runtime/file-lock.test.ts",
     "agent-test/tests/src/runtime/navigation.test.ts",
+    "agent-test/tests/src/runtime/plan-goal.test.ts",
     "agent-test/tests/src/runtime/runtime.test.ts",
     "agent-test/tests/src/runtime/sandbox-tools.test.ts",
     "agent-test/tests/src/runtime/structured-output.test.ts",

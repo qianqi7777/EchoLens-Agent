@@ -4,6 +4,8 @@ import type { AgentRunResult, ReactAgent } from '../runtime/resumable-react-agen
 import type { AgentCheckpoint, AgentEvent } from './events.js';
 import { JsonlEventStore, type JsonlEventStoreOptions } from './jsonl-event-store.js';
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
+import type { AgentPlan } from '../runtime/structured-output.js';
+import { createGoal, createGoalEvidence, type AgentGoal, type GoalEvidence } from '../runtime/goal.js';
 
 export interface SessionRuntimeOptions {
   rootDirectory: string;
@@ -19,6 +21,8 @@ export class SessionRuntime {
   private history: ConversationItem[] = [];
   private steeringQueue: string[] = [];
   private activeTurnId?: string;
+  private pendingApprovedPlan?: AgentPlan;
+  private activeGoal?: AgentGoal;
   private closed = false;
 
   private constructor(
@@ -56,6 +60,8 @@ export class SessionRuntime {
         const checkpoint = recoverCheckpoint(events);
         runtime.history = checkpoint?.items ?? [];
         runtime.steeringQueue = pendingSteering(events);
+        runtime.activeGoal = recoverGoal(events);
+        runtime.pendingApprovedPlan = recoverPendingApprovedPlan(events);
         const latestRouting = events.findLast((event) => event.payload.type === 'route.configured'
           || (event.payload.type === 'checkpoint.saved' && Boolean(event.payload.checkpoint.routing)));
         if (latestRouting?.payload.type === 'route.configured') {
@@ -80,14 +86,19 @@ export class SessionRuntime {
     const turnId = randomUUID();
     this.activeTurnId = turnId;
     try {
+      const approvedPlan = this.agent.executionPhase() === 'execute' ? this.pendingApprovedPlan : undefined;
       const result = await this.agent.run(userMessage, this.history, signal, {
         sessionId: this.sessionId,
         turnId,
         eventSink: this.store,
-        onEvent,
+        onEvent: (event) => this.handleRuntimeEvent(event, onEvent),
         takeSteering: () => this.takeSteering(),
+        approvedPlan,
+        activeGoal: this.activeGoal,
+        getActiveGoal: () => this.activeGoal ? structuredClone(this.activeGoal) : undefined,
       });
       this.history = result.items;
+      if (approvedPlan && result.state !== 'paused') this.pendingApprovedPlan = undefined;
       return result;
     } finally {
       this.activeTurnId = undefined;
@@ -103,13 +114,18 @@ export class SessionRuntime {
     if (checkpoint.state === 'completed') throw new Error('最近一个 Turn 已完成，无需恢复');
     this.activeTurnId = checkpoint.turnId;
     try {
+      const approvedPlan = this.agent.executionPhase() === 'execute' ? this.pendingApprovedPlan : undefined;
       const result = await this.agent.resume(checkpoint, signal, {
         sessionId: this.sessionId,
         eventSink: this.store,
-        onEvent,
+        onEvent: (event) => this.handleRuntimeEvent(event, onEvent),
         takeSteering: () => this.takeSteering(),
+        approvedPlan,
+        activeGoal: this.activeGoal,
+        getActiveGoal: () => this.activeGoal ? structuredClone(this.activeGoal) : undefined,
       });
       this.history = result.items;
+      if (approvedPlan && result.state !== 'paused') this.pendingApprovedPlan = undefined;
       return result;
     } finally {
       this.activeTurnId = undefined;
@@ -148,6 +164,52 @@ export class SessionRuntime {
     return this.agent.modelRoutingStatus();
   }
 
+  async decidePlan(
+    planId: string,
+    decision: 'approved' | 'edited' | 'rejected',
+    plan?: AgentPlan,
+  ): Promise<void> {
+    if (decision !== 'rejected' && !plan) throw new Error('批准计划必须包含结构化计划');
+    await this.store.append({ payload: { type: 'plan.decided', planId, decision, plan } });
+    this.pendingApprovedPlan = decision === 'rejected' ? undefined : structuredClone(plan!);
+    if (decision !== 'rejected') await this.configureModelRouting(undefined, 'execute');
+  }
+
+  async setApprovedPlan(planId: string, plan: AgentPlan, edited = false): Promise<void> {
+    await this.decidePlan(planId, edited ? 'edited' : 'approved', plan);
+  }
+
+  async setGoal(statement: string, criteria: readonly string[] = []): Promise<AgentGoal> {
+    const goal = createGoal(statement, criteria);
+    await this.store.append({ payload: { type: 'goal.set', goal } });
+    this.activeGoal = goal;
+    return structuredClone(goal);
+  }
+
+  goalStatus(): AgentGoal | undefined {
+    return this.activeGoal ? structuredClone(this.activeGoal) : undefined;
+  }
+
+  async appendGoalEvidence(kind: GoalEvidence['kind'], ref: string, summary: string): Promise<GoalEvidence> {
+    if (!this.activeGoal) throw new Error('当前没有活动目标');
+    const evidence = createGoalEvidence(kind, ref, summary.trim());
+    await this.store.append({ payload: { type: 'goal.progress', goalId: this.activeGoal.id, evidence } });
+    this.activeGoal.evidence.push(evidence);
+    return structuredClone(evidence);
+  }
+
+  async closeGoal(status: 'met' | 'dropped'): Promise<void> {
+    if (!this.activeGoal) throw new Error('当前没有活动目标');
+    const goalId = this.activeGoal.id;
+    await this.store.append({ payload: { type: 'goal.closed', goalId, status } });
+    this.activeGoal = undefined;
+  }
+
+  async approvePlanAsGoal(planId: string, plan: AgentPlan, edited = false): Promise<AgentGoal> {
+    await this.setApprovedPlan(planId, plan, edited);
+    return this.setGoal(plan.objective, plan.steps.map((step) => step.objective));
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -161,6 +223,38 @@ export class SessionRuntime {
 
   private async takeSteering(): Promise<string[]> {
     return this.steeringQueue.splice(0, this.steeringQueue.length);
+  }
+
+  private async handleRuntimeEvent(
+    event: AgentEvent,
+    observer?: (event: AgentEvent) => void | Promise<void>,
+  ): Promise<void> {
+    await observer?.(event);
+    if (event.payload.type === 'run.completed' || event.payload.type === 'run.failed'
+      || event.payload.type === 'run.cancelled') this.pendingApprovedPlan = undefined;
+    if (!this.activeGoal) return;
+    if (event.payload.type === 'checkpoint.saved') {
+      const checkpoint = event.payload.checkpoint;
+      await this.appendObservedGoalEvidence('checkpoint', event.eventId, checkpointSummary(checkpoint), observer);
+    } else if (event.payload.type === 'verification.completed') {
+      await this.appendObservedGoalEvidence('verification', event.eventId,
+        `verified=${event.payload.verified} issueCount=${event.payload.issueCount}`, observer);
+    }
+  }
+
+  private async appendObservedGoalEvidence(
+    kind: GoalEvidence['kind'],
+    ref: string,
+    summary: string,
+    observer?: (event: AgentEvent) => void | Promise<void>,
+  ): Promise<void> {
+    if (!this.activeGoal) return;
+    const evidence = createGoalEvidence(kind, ref, summary);
+    const event = await this.store.append({
+      payload: { type: 'goal.progress', goalId: this.activeGoal.id, evidence },
+    });
+    this.activeGoal.evidence.push(evidence);
+    await observer?.(event);
   }
 
   private async runSessionHook(source: 'startup' | 'resume'): Promise<void> {
@@ -246,6 +340,49 @@ function pendingSteering(events: Awaited<ReturnType<JsonlEventStore['read']>>): 
   const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved');
   return events.slice(checkpointIndex + 1)
     .flatMap((event) => event.payload.type === 'turn.steered' ? [event.payload.message] : []);
+}
+
+function recoverGoal(events: Awaited<ReturnType<JsonlEventStore['read']>>): AgentGoal | undefined {
+  let goal: AgentGoal | undefined;
+  for (const event of events) {
+    if (event.payload.type === 'goal.set') goal = structuredClone(event.payload.goal);
+    else if (event.payload.type === 'goal.progress' && goal?.id === event.payload.goalId) {
+      goal.evidence.push(structuredClone(event.payload.evidence));
+    } else if (event.payload.type === 'goal.closed' && goal?.id === event.payload.goalId) {
+      goal = undefined;
+    }
+  }
+  return goal;
+}
+
+function recoverPendingApprovedPlan(
+  events: Awaited<ReturnType<JsonlEventStore['read']>>,
+): AgentPlan | undefined {
+  const decisionIndex = events.findLastIndex((event) => event.payload.type === 'plan.decided');
+  if (decisionIndex < 0) return undefined;
+  const payload = events[decisionIndex]!.payload;
+  if (payload.type !== 'plan.decided' || payload.decision === 'rejected' || !payload.plan) return undefined;
+  if (events.slice(decisionIndex + 1).some((event) => event.payload.type === 'run.completed'
+    || event.payload.type === 'run.failed' || event.payload.type === 'run.cancelled')) return undefined;
+  return structuredClone(payload.plan);
+}
+
+function checkpointSummary(checkpoint: AgentCheckpoint): string {
+  const writeCalls = checkpoint.items.flatMap((item) => item.type === 'tool_call'
+    && /(write|patch|edit|delete|move|rename)/iu.test(item.name) ? [item] : []);
+  const writeCallIds = new Set(writeCalls.map((item) => item.callId));
+  const changedPaths = [
+    ...writeCalls.flatMap((item) => typeof item.arguments.path === 'string' ? [item.arguments.path] : []),
+    ...checkpoint.items
+      .filter((item) => item.type === 'tool_result' && writeCallIds.has(item.callId))
+      .flatMap((item) => item.type === 'tool_result'
+        ? item.evidenceIds.filter((id) => id.startsWith('file:')).map((id) => id.slice('file:'.length))
+        : []),
+  ];
+  const suffix = changedPaths.length > 0
+    ? ` changed=${[...new Set(changedPaths)].slice(0, 10).join(',')}`
+    : '';
+  return `step=${checkpoint.step} phase=${checkpoint.phase} state=${checkpoint.state}${suffix}`;
 }
 
 function callIndex(checkpoint: AgentCheckpoint, callId: string): number {

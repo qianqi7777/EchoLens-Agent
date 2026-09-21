@@ -23,6 +23,7 @@ export interface CommandCatalogContext {
   hooksAvailable?: boolean;
   verificationAvailable?: boolean;
   rollbackAvailable?: boolean;
+  goalAvailable?: boolean;
 }
 
 export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
@@ -38,10 +39,28 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
   {
     name: '/model',
     description: '查看或设置当前 Session 的模型路由模式',
-    usage: '/model [auto|fast|balanced|quality|privacy|off|pinned:<profile-id>] [auto|plan|execute|verify]',
+    usage: '/model [auto|fast|balanced|quality|privacy|off|pinned:<profile-id>]（阶段切换请用 /plan）',
     category: 'session',
     acceptsArguments: true,
     availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
+    name: '/plan',
+    description: '查看或切换执行阶段（规划为只读模式）',
+    usage: '/plan [on|off|plan|execute|verify|status]',
+    category: 'session',
+    acceptsArguments: true,
+    availableDuringTask: true,
+    source: 'builtin',
+  },
+  {
+    name: '/goal',
+    description: '设置、查看或结束当前目标',
+    usage: '/goal [status|done|drop|note <证据>] | <目标描述>',
+    category: 'session',
+    acceptsArguments: true,
+    availableDuringTask: true,
     source: 'builtin',
   },
   {
@@ -172,6 +191,8 @@ export function getCommandCatalog(context: CommandCatalogContext): CommandDescri
     if (!context.workspaceAvailable && ['/pwd', '/cd'].includes(command.name)) return false;
     if (command.name === '/skill' && !context.skillImportAvailable) return false;
     if (command.name === '/model' && context.modelRoutingAvailable === false) return false;
+    if (command.name === '/plan' && context.modelRoutingAvailable === false) return false;
+    if (command.name === '/goal' && context.goalAvailable === false) return false;
     if (command.name === '/hooks' && context.hooksAvailable === false) return false;
     if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
     if (command.name === '/verify' && context.verificationAvailable === false) return false;

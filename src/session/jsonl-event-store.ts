@@ -281,6 +281,10 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 function isDurableEvent(type: AgentEventPayload['type']): boolean {
   return type === 'checkpoint.saved'
     || type === 'route.configured'
+    || type === 'plan.decided'
+    || type === 'goal.set'
+    || type === 'goal.progress'
+    || type === 'goal.closed'
     || type === 'run.completed'
     || type === 'run.paused'
     || type === 'run.cancelled'

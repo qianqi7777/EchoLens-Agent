@@ -47,7 +47,7 @@ export function createEventRenderer(
         sink.log(`[model] step ${event.payload.step + 1} started`);
       } else if (event.payload.type === 'route.selected') {
         closeLine();
-        sink.log(`[route] model=${event.payload.model} mode=${event.payload.mode} tier=${event.payload.tier} (${event.payload.reason})`);
+        sink.log(`[route] model=${event.payload.model} mode=${event.payload.mode} phase=${event.payload.phase ?? 'auto'} tier=${event.payload.tier} (${event.payload.reason})`);
       } else if (event.payload.type === 'route.fallback') {
         closeLine();
         sink.log(`[route] fallback ${event.payload.fromModel} -> ${event.payload.toModel} (${event.payload.reason})`);

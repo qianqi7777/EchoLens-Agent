@@ -74,6 +74,8 @@ npm run dev -- --resume latest
 - 在 TUI 中输入 `/`：打开带说明的命令候选菜单；`↑/↓` 选择、`Tab` 补全、`Enter` 确认、`Esc` 关闭
 - `/resume`：恢复当前 Session 的未完成 Turn
 - `/steer 新要求`：运行中排队补充要求；暂停后写入并从当前检查点继续
+- `/plan [on|off|plan|execute|verify|status]`：查看或切换执行阶段；规划阶段只提供只读工具
+- `/goal <目标>`：设置长时目标；`/goal status|note <证据>|done|drop` 管理证据与状态
 - `/tasks`：列出最近后台任务
 - `/task <explore|test|review> [sandbox|worktree] <目标>`：创建并启动受限后台任务
 - `/task cancel <id>`：取消后台任务
@@ -82,6 +84,10 @@ npm run dev -- --resume latest
 - `/exit`：退出 CLI
 
 TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚和 steering 命令。
+TUI 可用 `Shift+Tab` 循环 `plan → execute → auto`；终端无法区分 Shift+Tab 时使用 `Ctrl+P`。
+
+规划阶段结束后，TUI 或行模式会要求批准、修改或拒绝计划，也可批准并转为目标。批准计划只注入
+紧随其后的首个执行 Turn；活动目标则在后续执行中持续注入，但不会授予权限、跳过审批或扩大工具范围。
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
 

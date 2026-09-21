@@ -6,6 +6,8 @@ import type {
 import type { Permission } from '../core/permissions.js';
 import type { ProviderStopReason, TokenUsage, ModelRoutingSnapshot, ToolChoice } from '../providers/types.js';
 import type { ApprovalDecision, ApprovalRequest } from '../runtime/approval.js';
+import type { AgentPlan } from '../runtime/structured-output.js';
+import type { AgentGoal, GoalEvidence } from '../runtime/goal.js';
 
 // 事件 schema 版本，仅在不兼容变更时递增；读取端以该值校验事件结构。
 export const AGENT_EVENT_VERSION = 1 as const;
@@ -56,6 +58,7 @@ export type AgentEventPayload =
       candidates: string[];
       actualModel?: string;
       phase?: string;
+      phaseOverride?: 'plan' | 'execute' | 'verify';
       suggestedModel?: string;
     }
   | { type: 'route.fallback'; fromModel: string; toModel: string; reason: string }
@@ -120,6 +123,11 @@ export type AgentEventPayload =
     }
   | { type: 'checkpoint.saved'; checkpoint: AgentCheckpoint }
   | { type: 'verification.completed'; verified: boolean; issueCount: number }
+  | { type: 'plan.proposed'; planId: string; plan?: AgentPlan; raw?: string }
+  | { type: 'plan.decided'; planId: string; decision: 'approved' | 'edited' | 'rejected'; plan?: AgentPlan }
+  | { type: 'goal.set'; goal: AgentGoal }
+  | { type: 'goal.progress'; goalId: string; evidence: GoalEvidence }
+  | { type: 'goal.closed'; goalId: string; status: 'met' | 'dropped' }
   | { type: 'usage.recorded'; model: string; usage: TokenUsage; cachedReadTokens?: number }
   | { type: 'run.completed'; answer: string; degraded: boolean }
   | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' }

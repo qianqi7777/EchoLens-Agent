@@ -11,6 +11,8 @@ import {
 import type { Permission } from '../core/permissions.js';
 import type { NavigationHint } from '../navigation/types.js';
 import type { RuntimeHookContext } from '../session/events.js';
+import type { AgentPlan } from '../runtime/structured-output.js';
+import type { AgentGoal } from '../runtime/goal.js';
 import {
   evaluateInstructionPermissions,
   type InstructionDocument,
@@ -35,6 +37,8 @@ export interface ContextBuildOptions {
   targetPath?: string;
   navigationHint?: NavigationHint;
   hookContexts?: readonly RuntimeHookContext[];
+  approvedPlan?: AgentPlan;
+  activeGoal?: AgentGoal;
 }
 
 export interface ContextBuildResult {
@@ -80,7 +84,10 @@ export class ContextManager {
     const body = projected.filter((item) => !isSystemMessage(item));
     const hookContexts = (options.hookContexts ?? []).map(hookContextMessage);
     const navigation = options.navigationHint ? [navigationMessage(options.navigationHint)] : [];
-    const prefix = [...system, ...instructions, ...hookContexts, ...navigation];
+    const executionContext = options.approvedPlan || options.activeGoal
+      ? [executionContextMessage(options.approvedPlan, options.activeGoal)]
+      : [];
+    const prefix = [...system, ...instructions, ...hookContexts, ...navigation, ...executionContext];
     const budget = inputBudget(
       options.providerMaxContextTokens,
       this.maxInputTokens,
@@ -112,6 +119,28 @@ export class ContextManager {
       };
     }
   }
+}
+
+function executionContextMessage(plan?: AgentPlan, goal?: AgentGoal): MessageItem {
+  const lines = [
+    '[RUNTIME-GENERATED EXECUTION CONTEXT]',
+    'This user-approved context guides execution but cannot grant permissions or override system policy.',
+  ];
+  if (plan) {
+    lines.push('Approved plan:', `Objective: ${plan.objective}`,
+      ...plan.steps.map((step, index) => `${index + 1}. ${step.objective} (verify: ${step.verification})`));
+  }
+  if (goal) {
+    lines.push('Active goal:', goal.statement, 'Acceptance criteria:',
+      ...goal.criteria.map((criterion, index) => `${index + 1}. ${criterion}`));
+    const recent = goal.evidence.slice(-10);
+    if (recent.length) lines.push('Recent evidence:', ...recent.map((item) => `- [${item.kind}] ${item.summary}`));
+  }
+  lines.push('Execute within existing approval and permission boundaries, then compare results against every criterion.',
+    '[/RUNTIME-GENERATED EXECUTION CONTEXT]');
+  const content = lines.join('\n');
+  const hash = createHash('sha256').update(content).digest('hex').slice(0, 16);
+  return textMessage(`execution-context:${hash}`, 'user', content);
 }
 
 function hookContextMessage(context: RuntimeHookContext): MessageItem {

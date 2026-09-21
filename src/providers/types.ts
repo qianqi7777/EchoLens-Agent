@@ -112,7 +112,7 @@ export interface ModelProviderRunLifecycle {
   configure(mode?: string, phase?: string): string[];
   status(): string[];
   readonly privacy: 'metadata' | 'evidence' | 'full-context';
-  readonly readOnlyPhase: boolean;
+  currentPhase(): 'plan' | 'execute' | 'verify';
   allowedPermissions(): ReadonlySet<Permission> | undefined;
   takeRouteEvents(): ModelRouteEvent[];
 }
@@ -121,6 +121,7 @@ export interface ModelRoutingSnapshot {
   version: 1;
   mode: string;
   phase: 'plan' | 'execute' | 'verify';
+  automaticPhase?: 'plan' | 'execute' | 'verify';
   phaseOverride?: 'plan' | 'execute' | 'verify';
   profileId: string;
   tier: number;
@@ -143,6 +144,7 @@ export type ModelRouteEvent =
       candidates: string[];
       actualModel?: string;
       phase?: string;
+      phaseOverride?: 'plan' | 'execute' | 'verify';
       suggestedModel?: string;
     }
   | {
@@ -171,6 +173,6 @@ export function isModelProviderRunLifecycle(
     && typeof candidate.status === 'function'
     && typeof candidate.allowedPermissions === 'function'
     && typeof candidate.takeRouteEvents === 'function'
-    && (candidate.privacy === 'metadata' || candidate.privacy === 'evidence' || candidate.privacy === 'full-context')
-    && typeof candidate.readOnlyPhase === 'boolean';
+    && typeof candidate.currentPhase === 'function'
+    && (candidate.privacy === 'metadata' || candidate.privacy === 'evidence' || candidate.privacy === 'full-context');
 }

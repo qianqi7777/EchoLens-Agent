@@ -14,6 +14,7 @@ export class SubagentBackgroundService {
     orchestrator: SubagentOrchestrator,
     onStateChange?: (task: BackgroundTaskRecord) => void | Promise<void>,
     onError?: (error: unknown) => void | Promise<void>,
+    decorateObjective?: (objective: string) => string,
   ) {
     // 把子 Agent 终态映射为后台任务态：paused→waiting_approval（等待显式恢复重跑）、cancelled→可重试失败、
     // completed→完成；其余异常统一记为 failed 并带 subagent_ 前缀错误码。
@@ -21,7 +22,7 @@ export class SubagentBackgroundService {
       execute: async (task, signal) => {
         const result = await orchestrator.run({
           profile: task.payload.profile,
-          objective: task.payload.objective,
+          objective: decorateObjective?.(task.payload.objective) ?? task.payload.objective,
           workspaceMode: task.isolation,
         }, signal);
         if (result.state === 'paused') return { state: 'waiting_approval', reason: '子 Agent 等待审批', result: taskResult(result) };

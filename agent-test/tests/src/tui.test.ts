@@ -6,6 +6,7 @@ import { render, type Key } from 'ink';
 import { PassThrough, Writable } from 'node:stream';
 import { stripVTControlCharacters } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { AgentPlan } from '../../../src/runtime/structured-output.js';
 
 const result = { answer: 'done', state: 'completed', turnId: 'turn', finalSummary: { verified: false } } as Awaited<ReturnType<TuiOptions['run']>>;
 
@@ -142,6 +143,65 @@ test('TUI 运行中 steering 不并发启动 Turn，暂停后 steering 会恢复
   await ui['submit']();
   assert.equal(steers, 2);
   assert.equal(resumes, 1);
+});
+
+test('TUI Shift+Tab/Ctrl+P 切换阶段且运行中 /goal 立即生效', async () => {
+  const phases: Array<string | undefined> = [];
+  let goal: import('../../../src/runtime/goal.js').AgentGoal | undefined;
+  let finish!: (value: typeof result) => void;
+  const ui = createUi({
+    run: () => new Promise((resolve) => { finish = resolve; }),
+    modelRouting: {
+      status: () => ['phase=auto'],
+      configure: async (_mode, phase) => { phases.push(phase); return [`phase=${phase}`]; },
+    },
+    goals: {
+      status: () => goal,
+      set: async (statement) => (goal = { id: 'g1', statement, criteria: [], status: 'active', evidence: [] }),
+      note: async () => undefined,
+      close: async () => { goal = undefined; },
+    },
+  });
+  key(ui, '', { tab: true, shift: true });
+  await delay(5);
+  ui.handleKey('p', { ctrl: true } as Key);
+  await delay(5);
+  assert.deepEqual(phases, ['plan', 'execute']);
+
+  key(ui, 'start');
+  key(ui, '', { return: true });
+  assert.equal(ui['store'].get().busy, true);
+  ui['setInput']('/goal 发布版本');
+  await ui['submit']();
+  await delay(5);
+  assert.equal(ui['store'].get().goal?.statement, '发布版本');
+  finish(result);
+  await idle(ui);
+});
+
+test('TUI 计划卡片可批准并转换为目标', async () => {
+  const plan: AgentPlan = {
+    objective: '交付功能',
+    steps: [{ id: 's1', objective: '实现', verification: '测试', evidenceRequired: [] }],
+    risks: [], completionCriteria: ['测试通过'],
+  };
+  let converted = false;
+  const ui = createUi({
+    plans: {
+      decide: async () => undefined,
+      approveAsGoal: async (_id, selected) => {
+        converted = true;
+        return { id: 'g1', statement: selected.objective, criteria: selected.steps.map((step) => step.objective), status: 'active', evidence: [] };
+      },
+    },
+  });
+  ui['onEvent']({ payload: { type: 'plan.proposed', planId: 'p1', plan } } as import('../../../src/session/events.js').AgentEvent);
+  assert.equal(ui['store'].get().planApproval?.plan.objective, '交付功能');
+  key(ui, 'g');
+  await delay(5);
+  assert.equal(converted, true);
+  assert.equal(ui['store'].get().goal?.statement, '交付功能');
+  assert.equal(ui['store'].get().planApproval, undefined);
 });
 
 test('TUI 丢弃过期的异步参数候选', async () => {

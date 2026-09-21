@@ -5,6 +5,8 @@ import type { EditCheckpoint } from '../runtime/structured-patch.js';
 import type { EditVerificationResult } from '../runtime/verification.js';
 import type { ImportedSkill } from '../skills/skill-manager.js';
 import type { HookStatus } from '../orchestration/command-hooks.js';
+import type { AgentGoal } from '../runtime/goal.js';
+import type { AgentPlan } from '../runtime/structured-output.js';
 
 export interface HookCommands {
   list(): HookStatus[];
@@ -28,9 +30,19 @@ export interface CommandServices {
     status(): string[];
   };
   hooks?: HookCommands;
+  plans?: {
+    decide(planId: string, decision: 'approved' | 'edited' | 'rejected', plan?: AgentPlan): Promise<void>;
+    approveAsGoal(planId: string, plan: AgentPlan, edited?: boolean): Promise<AgentGoal>;
+  };
+  goals?: {
+    status(): AgentGoal | undefined;
+    set(statement: string, criteria?: readonly string[]): Promise<AgentGoal>;
+    note(text: string): Promise<void>;
+    close(status: 'met' | 'dropped'): Promise<void>;
+  };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -85,6 +97,37 @@ export async function executeServiceCommand(
       lines = args.length === 0 ? services.modelRouting.status() : await services.modelRouting.configure(args[0], args[1]);
       break;
     }
+    case '/plan': {
+      if (!services.modelRouting) throw new Error('模型路由服务不可用');
+      if (args.length > 1) return { handled: true, lines: ['用法：/plan [on|off|plan|execute|verify|status]'] };
+      const value = args[0];
+      if (!value || value === 'status') {
+        lines = services.modelRouting.status();
+      } else {
+        const phase = value === 'on' ? 'plan' : value === 'off' ? 'auto' : value;
+        lines = await services.modelRouting.configure(undefined, phase);
+      }
+      break;
+    }
+    case '/goal': {
+      if (!services.goals) throw new Error('目标服务不可用');
+      const argument = input.slice('/goal'.length).trim();
+      if (!argument || argument === 'status') {
+        lines = formatGoalStatus(services.goals.status());
+      } else if (argument === 'done' || argument === 'drop') {
+        await services.goals.close(argument === 'done' ? 'met' : 'dropped');
+        lines = [argument === 'done' ? '目标已完成' : '目标已放弃'];
+      } else if (argument === 'note' || argument.startsWith('note ')) {
+        const note = argument.slice('note'.length).trim();
+        if (!note) return { handled: true, lines: ['用法：/goal note <证据>'] };
+        await services.goals.note(note);
+        lines = ['目标证据已记录'];
+      } else {
+        const goal = await services.goals.set(argument);
+        lines = [`目标已设置：${goal.statement}`];
+      }
+      break;
+    }
     case '/hooks': {
       if (!services.hooks) throw new Error('Hook 管理服务不可用');
       if (args.length === 0) {
@@ -118,6 +161,16 @@ export async function executeServiceCommand(
     default: return { handled: false, lines: [] };
   }
   return { handled: true, lines };
+}
+
+function formatGoalStatus(goal: AgentGoal | undefined): string[] {
+  if (!goal) return ['当前没有活动目标'];
+  return [
+    `目标：${goal.statement}`,
+    `状态：${goal.status}，证据 ${goal.evidence.length} 条`,
+    ...goal.criteria.map((item, index) => `${index + 1}. ${item}`),
+    ...goal.evidence.slice(-5).map((item) => `[${item.kind}] ${item.summary}`),
+  ];
 }
 
 function formatHookStatus(item: HookStatus): string {

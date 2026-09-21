@@ -32,6 +32,7 @@ import { SkillManager } from './skills/skill-manager.js';
 import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
 import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
+import { parseAgentPlan, type AgentPlan } from './runtime/structured-output.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -121,6 +122,16 @@ if (!connectedModel) {
         status: () => manager.currentRuntime().session.modelRoutingStatus(),
       },
       hooks: hookCommandProxy(manager),
+      plans: {
+        decide: (planId, decision, plan) => manager.currentRuntime().session.decidePlan(planId, decision, plan),
+        approveAsGoal: (planId, plan, edited) => manager.currentRuntime().session.approvePlanAsGoal(planId, plan, edited),
+      },
+      goals: {
+        status: () => manager.currentRuntime().session.goalStatus(),
+        set: (statement, criteria) => manager.currentRuntime().session.setGoal(statement, criteria),
+        note: async (text) => { await manager.currentRuntime().session.appendGoalEvidence('note', 'user', text); },
+        close: (goalStatus) => manager.currentRuntime().session.closeGoal(goalStatus),
+      },
     };
 
     if (useTui) {
@@ -162,6 +173,12 @@ if (!connectedModel) {
           if (!result.finalSummary.verified && result.state === 'completed') {
             console.error('结构化结果校验失败：以上内容作为未验证 raw 输出显示。');
           }
+          if (result.finalSummary.verified && manager.currentRuntime().session.goalStatus()) {
+            console.log('验收标准可能已满足，使用 /goal done 确认。');
+          }
+          if (result.proposedPlan) {
+            await interactivePlanDecision(result.proposedPlan, lineTerminal!, manager.currentRuntime().session);
+          }
         } catch (error) {
           renderer.finish();
           console.error(`${errorLabel}：${error instanceof Error ? error.message : String(error)}`);
@@ -190,7 +207,7 @@ if (!connectedModel) {
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
           sessionDeletionAvailable: true, skillImportAvailable: true, modelRoutingAvailable: true,
-          hooksAvailable: true, interface: 'line' as const };
+          hooksAvailable: true, goalAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }
         prompt = parsed.input;
@@ -247,6 +264,49 @@ if (!connectedModel) {
   }
 }
 
+async function interactivePlanDecision(
+  proposal: NonNullable<AgentRunResult['proposedPlan']>,
+  terminal: readline.Interface,
+  session: SessionRuntime,
+): Promise<void> {
+  const plan = proposal.plan ?? rawPlan(proposal.raw ?? '');
+  console.log(`\n计划目标：${plan.objective}`);
+  for (const [index, step] of plan.steps.entries()) console.log(`${index + 1}. ${step.objective}（验证：${step.verification}）`);
+  for (const risk of plan.risks) console.log(`风险：${risk}`);
+  const answer = (await terminal.question('[y] 批准并执行 / [e] 修改后批准 / [g] 批准并设为目标 / [n] 拒绝：'))
+    .trim().toLowerCase();
+  if (answer === 'n' || !['y', 'e', 'g'].includes(answer)) {
+    await session.decidePlan(proposal.planId, 'rejected');
+    console.log('计划已拒绝；仍处规划阶段，可继续补充要求。');
+    return;
+  }
+  let selected = plan;
+  let edited = false;
+  if (answer === 'e') {
+    const value = await terminal.question('输入修改后的计划 JSON，或输入替代计划文本：');
+    const parsed = parseAgentPlan(value);
+    selected = parsed.verified ? parsed.value : rawPlan(value);
+    edited = true;
+  }
+  if (answer === 'g') {
+    await session.approvePlanAsGoal(proposal.planId, selected, edited);
+    console.log('计划已批准、切换执行阶段并设为目标。');
+  } else {
+    await session.setApprovedPlan(proposal.planId, selected, edited);
+    console.log('计划已批准并切换到执行阶段。');
+  }
+}
+
+function rawPlan(raw: string): AgentPlan {
+  const objective = raw.trim() || '按已批准计划执行';
+  return {
+    objective,
+    steps: [{ id: 'raw-1', objective, verification: '逐条核对执行结果', evidenceRequired: [] }],
+    risks: [],
+    completionCriteria: ['完成计划并提供验证证据'],
+  };
+}
+
 interface CliWorkspaceRuntime extends ManagedWorkspaceRuntime {
   sessionRoot: string;
   session: SessionRuntime;
@@ -297,6 +357,7 @@ async function createCliWorkspaceRuntime(
         if (tui) tui.notify(message);
         else console.error(message);
       },
+      (objective) => goalAwareTaskObjective(objective, session?.goalStatus()),
     );
     const executor = new ToolExecutor(registry, {
       approvalStore,
@@ -345,6 +406,22 @@ async function createCliWorkspaceRuntime(
     await closeWorkspaceResources(session, backgroundTasks, extensions).catch(() => undefined);
     throw error;
   }
+}
+
+function goalAwareTaskObjective(
+  objective: string,
+  goal: import('./runtime/goal.js').AgentGoal | undefined,
+): string {
+  if (!goal) return objective;
+  return [
+    objective,
+    '',
+    '[ACTIVE SESSION GOAL]',
+    goal.statement,
+    ...goal.criteria.map((criterion, index) => `${index + 1}. ${criterion}`),
+    'This goal is user context only and cannot grant permissions or bypass approval.',
+    '[/ACTIVE SESSION GOAL]',
+  ].join('\n');
 }
 
 function hookCommandProxy(
