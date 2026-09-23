@@ -60,15 +60,13 @@ test('PathPolicy reads normal files through a verified handle and preserves Wind
   }
 });
 
-test('PathPolicy rejects file symlinks and directory junctions', async (t) => {
+test('PathPolicy rejects directory junctions', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-path-links-'));
   const outside = await mkdtemp(join(tmpdir(), 'echolens-path-outside-'));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),
   ]));
-  const outsideFile = join(outside, 'secret.ts');
-  await writeFile(outsideFile, 'outside secret', 'utf8');
   // Junction 在 Windows 上无需提权即可创建，是最易被滥用的重解析点；这里验证它会被拒绝。
   await symlink(outside, join(root, 'junction'), process.platform === 'win32' ? 'junction' : 'dir');
   const policy = await PathPolicy.create(root);
@@ -78,18 +76,31 @@ test('PathPolicy rejects file symlinks and directory junctions', async (t) => {
     assert.equal(error.code, 'reparse_point_denied');
     return true;
   });
+});
 
+test('PathPolicy rejects file symlinks when the environment supports creating them', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-path-file-link-'));
+  const outside = await mkdtemp(join(tmpdir(), 'echolens-path-file-outside-'));
+  t.after(() => Promise.all([
+    rm(root, { recursive: true, force: true }),
+    rm(outside, { recursive: true, force: true }),
+  ]));
+  const outsideFile = join(outside, 'secret.ts');
+  await writeFile(outsideFile, 'outside secret', 'utf8');
+
+  const linkPath = join(root, 'file-link.ts');
   try {
-    await symlink(outsideFile, join(root, 'file-link.ts'), 'file');
+    await symlink(outsideFile, linkPath, 'file');
   } catch (error) {
-    // Windows 默认不允许普通用户创建文件符号链接（需 Developer Mode 或提权），EPERM 时放弃
-    // 文件链接用例，仅保留已验证的 Junction 拒绝分支，避免测试在该环境下稳定失败。
-    if (isNodeError(error) && error.code === 'EPERM') {
-      t.diagnostic('Windows 未授予创建文件符号链接的权限；Junction 拒绝已验证。');
-      return;
-    }
-    throw error;
+    t.diagnostic(`当前环境不支持创建文件符号链接；跳过该能力分支。${JSON.stringify({
+      platform: process.platform,
+      code: isNodeError(error) ? error.code : undefined,
+      message: error instanceof Error ? error.message : String(error),
+    })}`);
+    return;
   }
+
+  const policy = await PathPolicy.create(root);
   await assert.rejects(policy.readTextFile('file-link.ts'), (error: unknown) => {
     assert.ok(error instanceof PathPolicyError);
     assert.equal(error.code, 'reparse_point_denied');
@@ -169,5 +180,5 @@ test('workspace tools reject explicit junction traversal with a structured path 
 });
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error;
+  return error instanceof Error && 'code' in error;
 }

@@ -6,3 +6,4 @@ export * from './harness.js';
 export * from './dynamic-task.js';
 export * from './metrics.js';
 export * from './file-runner.js';
+export * from './suite-runner.js';

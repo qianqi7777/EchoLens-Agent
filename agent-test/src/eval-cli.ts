@@ -2,11 +2,28 @@
 // 因此可以在没有凭据的网络隔离环境里运行。
 import path from 'node:path';
 import { runEvalFiles } from './evals/file-runner.js';
+import { runEvalSuite } from './evals/suite-runner.js';
 
 try {
   const args = parseArgs(process.argv.slice(2));
+  if (args.suite && (args.task || args.template || args.candidate || args.seed || args.suiteId)) {
+    throw new Error('--suite 不能与单项任务参数或 --suite-id 同时使用');
+  }
   if (args.help) {
     printHelp();
+  } else if (args.suite) {
+    const resultPath = path.resolve(args.results ?? defaultSuiteResultPath(args.suite));
+    const result = await runEvalSuite(args.suite, resultPath, args.docker ? {
+      docker: {
+        executable: process.env.AGENT_DOCKER_EXECUTABLE,
+        image: process.env.AGENT_SANDBOX_IMAGE,
+        user: process.env.AGENT_SANDBOX_USER,
+      },
+    } : {});
+    console.log(`suite=${result.report.suiteId}@${result.report.suiteVersion} tasks=${result.report.taskCount} passed=${result.report.passedCount} failed=${result.report.failedCount} successRate=${result.report.successRate.toFixed(4)} durationMs=${result.report.totalDurationMs}`);
+    console.log(`results=${resultPath}`);
+    console.log(`report=${result.reportPath}`);
+    if (result.report.failedCount > 0) process.exitCode = 1;
   } else {
     const result = await runEvalFiles({
       taskPath: args.task,
@@ -14,7 +31,7 @@ try {
       seed: args.seed,
       candidatePath: required(args.candidate, '--candidate'),
       resultPath: path.resolve(args.results ?? '.echolens/evals/results.jsonl'),
-      suiteId: args.suite,
+      suiteId: args.suiteId,
       // 失败时保留工作区只用于人工排查，默认关闭以免磁盘被大量失败用例占满。
       retainFailedWorkspace: args.retainFailed,
       // 只有显式 --docker 才读取沙箱环境变量：未开启时不探测 Docker，
@@ -50,6 +67,7 @@ interface ParsedArgs {
   candidate?: string;
   results?: string;
   suite?: string;
+  suiteId?: string;
   docker: boolean;
   retainFailed: boolean;
   help: boolean;
@@ -69,6 +87,7 @@ function parseArgs(args: string[]): ParsedArgs {
     else if (current === '--candidate') result.candidate = nextValue(args, ++index, current);
     else if (current === '--results') result.results = nextValue(args, ++index, current);
     else if (current === '--suite') result.suite = nextValue(args, ++index, current);
+    else if (current === '--suite-id') result.suiteId = nextValue(args, ++index, current);
     else throw new Error(`未知参数：${current}`);
   }
   return result;
@@ -91,8 +110,14 @@ function required(value: string | undefined, option: string): string {
 function printHelp(): void {
   console.log([
     'EchoLens Eval（只读取本地任务与候选结果，不调用模型）',
+    '  --suite <name> [--results <jsonl>] [--docker]',
     '  --task <file> | --template <file> --seed <seed>',
-    '  --candidate <file> [--results <jsonl>] [--suite <id>]',
+    '  --candidate <file> [--results <jsonl>] [--suite-id <id>]',
     '  [--docker] [--retain-failed]',
   ].join('\n'));
+}
+
+function defaultSuiteResultPath(suiteId: string): string {
+  const timestamp = new Date().toISOString().replaceAll(':', '').replaceAll('.', '-');
+  return path.join('.echolens/evals/results', `${suiteId}-${timestamp}.jsonl`);
 }

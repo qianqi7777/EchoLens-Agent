@@ -12,6 +12,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 提供 Gateway 登录状态、模型能力目录和 OpenAPI 客户端契约
 - 提供独立 Gateway MVP：Device Flow、Token 刷新/撤销、固定上游代理、SSE、用量和限流
 - 通过本地功能索引和工作区索引为首轮请求提供文件、符号和搜索导航
+- `src/` 全量覆盖率由 c8 `--all --src src --exclude "agent-test/**" --exclude "server/**"` 统计，并设有实测基线门禁；CI 保存 LCOV 报告
 - 执行 `list_files`、`read_file`、`grep`、`workspace_search` 只读工具
 - 使用带跨进程锁的单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
@@ -34,6 +35,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
 - 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
 - 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
+- 支持版本锁定的 Eval Suite（静态任务 + 固定 seed 动态变体），归档逐任务原始结果与汇总报告；复现命令 `npm run eval:fixed`
 - 提供带跨进程锁的持久后台任务队列、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
 - Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
@@ -179,6 +181,7 @@ tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、�
 
 ```bash
 npm run check:ci
+npm run test:coverage
 npm run gateway:build
 npm run eval:smoke
 npm run audit
@@ -188,6 +191,9 @@ npm run audit
 
 测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
 由 `package.json` 和 `.github/workflows/ci.yml` 定义。
+Security 当前为 11 个已登记测试；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
+`npm run eval:fixed` 运行 6 项固定版本地静态 Candidate 套件，并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；该套件验证本地 Grader/结构化 Patch/安全事件判据，不代表真实模型完成率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
+CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage 分为独立 job；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
 
 ## 目录
 
@@ -233,9 +239,12 @@ contracts/
 ## 当前边界
 
 v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
+当前全量 `src/` 覆盖率实测为行 84.42%、函数 89.02%、分支 77.02%（19,444 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和
 HTTP/MCP/Prompt/Agent 型 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
+固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

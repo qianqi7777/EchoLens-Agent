@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "seeded-answer",
+  "version": "1.0.0",
+  "introducedAt": "2026-09-23T00:00:00.000Z",
+  "leakageRisk": "low",
+  "variables": { "token": { "type": "choice", "values": ["seeded-alpha", "seeded-beta"] } },
+  "task": {
+    "schemaVersion": 1,
+    "id": "seeded-answer-template",
+    "version": "1.0.0",
+    "kind": "answer",
+    "title": "Return the fixed evaluation token for variant {{token}}",
+    "prompt": "Variant {{token}} is an identifier. Return the constant eval-seed-ok.",
+    "introducedAt": "2026-09-23T00:00:00.000Z",
+    "leakageRisk": "low",
+    "fixture": { "files": [] },
+    "grader": { "type": "answer", "mode": "exact", "expected": "eval-seed-ok" }
+  }
+}

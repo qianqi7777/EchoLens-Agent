@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "fixed-core",
+  "version": "1.0.0",
+  "entries": [
+    { "task": "answer-smoke.task.json", "candidate": "answer-smoke.candidate.json" },
+    { "task": "tasks/patch-create.task.json", "candidate": "candidates/patch-create.candidate.json" },
+    { "task": "tasks/session-dedup.task.json", "candidate": "candidates/session-dedup.candidate.json" },
+    { "task": "tasks/approval-denial.task.json", "candidate": "candidates/approval-denial.candidate.json" },
+    { "template": "templates/seeded-answer.template.json", "seed": "fixed-seed-001", "candidate": "candidates/seeded-answer.candidate.json" },
+    { "template": "templates/seeded-answer.template.json", "seed": "fixed-seed-002", "candidate": "candidates/seeded-answer.candidate.json" }
+  ]
+}

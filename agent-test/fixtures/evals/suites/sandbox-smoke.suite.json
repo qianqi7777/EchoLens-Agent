@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "sandbox-smoke",
+  "version": "1.0.0",
+  "entries": [
+    { "task": "tasks/sandbox-command.task.json", "candidate": "candidates/empty.candidate.json" }
+  ]
+}

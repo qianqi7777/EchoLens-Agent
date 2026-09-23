@@ -22,12 +22,14 @@
     "agent-test:web": "tsx agent-test/src/server.ts",
     "agent-test:web:test": "node agent-test/scripts/verify-web.mjs",
     "agent-test:test": "tsx --test agent-test/tests/agent-test/engine.test.ts",
-    "eval:smoke": "tsx agent-test/src/eval-cli.ts --task agent-test/fixtures/evals/answer-smoke.task.json --candidate agent-test/fixtures/evals/answer-smoke.candidate.json --results .echolens/evals/smoke-results.jsonl --suite smoke",
+    "eval:smoke": "tsx agent-test/src/eval-cli.ts --suite smoke",
+    "eval:fixed": "tsx agent-test/src/eval-cli.ts --suite fixed-core",
     "test:classification": "tsx agent-test/scripts/run-tests.ts --check",
     "test:unit": "tsx agent-test/scripts/run-tests.ts unit",
     "test:contract": "tsx agent-test/scripts/run-tests.ts contract",
     "test:security": "tsx agent-test/scripts/run-tests.ts security",
     "test:performance": "tsx agent-test/scripts/run-tests.ts performance",
+    "test:coverage": "c8 --all --src src --exclude \"agent-test/**\" --exclude \"server/**\" --reporter=text-summary --reporter=lcov --check-coverage --lines 84 --functions 88 --branches 76 npm test",
     "test": "npm run test:classification && npm run test:unit && npm run test:contract && npm run test:security",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
@@ -52,6 +54,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.18",
+    "c8": "^12.0.0",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3"
   }

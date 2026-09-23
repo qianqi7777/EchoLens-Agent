@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "smoke",
+  "version": "1.0.0",
+  "entries": [
+    { "task": "answer-smoke.task.json", "candidate": "answer-smoke.candidate.json" }
+  ]
+}

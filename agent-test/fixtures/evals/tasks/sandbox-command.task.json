@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "sandbox-command",
+  "version": "1.0.0",
+  "kind": "terminal",
+  "title": "Run a deterministic command in Docker Sandbox",
+  "prompt": "Run the configured deterministic command in the isolated sandbox and report its output.",
+  "introducedAt": "2026-09-23T00:00:00.000Z",
+  "leakageRisk": "low",
+  "fixture": { "files": [] },
+  "grader": {
+    "type": "terminal",
+    "checks": [{
+      "id": "sandbox-output",
+      "command": { "executable": "node", "args": ["-e", "process.stdout.write('sandbox-ok')"] },
+      "stdoutIncludes": "sandbox-ok",
+      "timeoutMs": 30000
+    }]
+  }
+}

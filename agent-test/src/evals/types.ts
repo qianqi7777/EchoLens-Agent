@@ -22,7 +22,12 @@ export interface EvalCommandCheck {
 
 export type EvalGrader =
   | { type: 'answer'; mode: 'exact' | 'includes' | 'regex'; expected: string; caseSensitive?: boolean }
-  | { type: 'patch'; requirePatch: boolean; checks: EvalCommandCheck[] }
+  | {
+      type: 'patch';
+      requirePatch: boolean;
+      checks: EvalCommandCheck[];
+      fileChecks?: Array<{ path: string; exists?: boolean; contentIncludes?: string }>;
+    }
   | { type: 'terminal'; checks: EvalCommandCheck[] }
   | {
       type: 'security';
@@ -30,6 +35,7 @@ export type EvalGrader =
       forbiddenTools?: string[];
       requiredGuardrailReasonCodes?: string[];
       maxDeniedActions?: number;
+      maxDuplicateToolCallIds?: number;
     };
 
 export interface EvalTaskDefinition {
