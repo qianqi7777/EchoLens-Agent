@@ -23,6 +23,7 @@ export interface AgentCheckpoint {
   // 恢复合并 tool.completed 仅在 tools 阶段执行；model 阶段说明该批次已进入模型步骤。
   phase: 'model' | 'tools' | 'finished';
   toolCallsUsed: number;
+  internalVerificationCallIds?: string[];
   state: RunState;
   items: ConversationItem[];
   hookContexts?: RuntimeHookContext[];
@@ -122,7 +123,9 @@ export type AgentEventPayload =
       callId: string;
     }
   | { type: 'checkpoint.saved'; checkpoint: AgentCheckpoint }
-  | { type: 'verification.completed'; verified: boolean; issueCount: number }
+  | { type: 'verification.started'; changedFiles: string[]; commands: string[] }
+  | { type: 'verification.skipped'; reason: string; changedFiles: string[] }
+  | { type: 'verification.completed'; verified: boolean; issueCount: number; results?: import('../runtime/verification.js').EditVerificationResult[] }
   | { type: 'plan.proposed'; planId: string; plan?: AgentPlan; raw?: string }
   | { type: 'plan.decided'; planId: string; decision: 'approved' | 'edited' | 'rejected'; plan?: AgentPlan }
   | { type: 'goal.set'; goal: AgentGoal }
@@ -130,7 +133,7 @@ export type AgentEventPayload =
   | { type: 'goal.closed'; goalId: string; status: 'met' | 'dropped' }
   | { type: 'usage.recorded'; model: string; usage: TokenUsage; cachedReadTokens?: number }
   | { type: 'run.completed'; answer: string; degraded: boolean }
-  | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' }
+  | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed' }
   | { type: 'run.cancelled'; reason: string }
   | { type: 'run.failed'; code: string; retryable: boolean };
 

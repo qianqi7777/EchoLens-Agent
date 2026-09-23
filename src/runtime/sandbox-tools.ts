@@ -134,6 +134,18 @@ async function executeVerification(
         }, signal);
         return verificationResult(command, executed);
       } catch (error) {
+        if (error instanceof SandboxError
+          && (error.code === 'sandbox_unavailable' || error.code === 'sandbox_launch_failed')) {
+          return {
+            id: command.id,
+            label: command.label,
+            command: command.command,
+            status: 'skipped',
+            durationMs: 0,
+            summary: 'Sandbox 不可用，验证未运行',
+            reason: 'sandbox_unavailable',
+          };
+        }
         return {
           id: command.id,
           label: command.label,

@@ -3,6 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { redactText } from '../providers/redaction.js';
 
 export type VerificationStatus = 'passed' | 'failed' | 'skipped' | 'timeout';
+export type VerificationGate = 'off' | 'auto' | 'strict';
+
+export function parseVerificationGate(value: string | undefined): VerificationGate {
+  if (value === undefined || value === '') return 'auto';
+  if (value === 'off' || value === 'auto' || value === 'strict') return value;
+  throw new Error('AGENT_VERIFY_GATE 必须是 off、auto 或 strict');
+}
 
 export interface VerificationCommand {
   id: string;
@@ -24,6 +31,7 @@ export interface EditVerificationResult {
   durationMs: number;
   summary: string;
   output?: string;
+  reason?: 'sandbox_unavailable';
 }
 
 export interface VerificationPlan {

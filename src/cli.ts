@@ -19,7 +19,7 @@ import { registerSandboxTools } from './runtime/sandbox-tools.js';
 import { DockerSandboxAdapter } from './sandbox/docker-sandbox.js';
 import { JsonApprovalStore, type ApprovalDecision, type ApprovalRequest } from './runtime/approval.js';
 import { loadEditCheckpoint, rollbackCheckpoint } from './runtime/structured-patch.js';
-import { runVerification, selectVerificationPlan } from './runtime/verification.js';
+import { parseVerificationGate, runVerification, selectVerificationPlan } from './runtime/verification.js';
 import { initializeRuntimeExtensions } from './runtime/runtime-extensions.js';
 import { parseNavigationMode } from './navigation/navigation-resolver.js';
 import { PersistentTaskQueue } from './orchestration/task-queue.js';
@@ -376,6 +376,7 @@ async function createCliWorkspaceRuntime(
       permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
       privacy: options.privacy,
       navigationMode: parseNavigationMode(process.env.AGENT_NAVIGATION_MODE),
+      verificationGate: parseVerificationGate(process.env.AGENT_VERIFY_GATE),
       hooks,
     });
     const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');

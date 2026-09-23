@@ -71,6 +71,22 @@ export function createEventRenderer(
       } else if (event.payload.type === 'tool.completed') {
         closeLine();
         sink.log(`[tool] ${event.payload.toolName} ${event.payload.status} ${event.payload.elapsedMs}ms`);
+      } else if (event.payload.type === 'verification.started') {
+        closeLine();
+        sink.log(`[verify] started (${event.payload.commands.join(', ') || 'no commands'})`);
+      } else if (event.payload.type === 'verification.skipped') {
+        closeLine();
+        sink.log(`[verify] skipped (${event.payload.reason})`);
+      } else if (event.payload.type === 'verification.completed') {
+        closeLine();
+        if (event.payload.results) {
+          sink.log(`[verify] ${event.payload.verified ? 'passed' : `failed: ${event.payload.issueCount} issue(s)`}`);
+        } else {
+          sink.log(`[summary] ${event.payload.verified ? 'structured output valid' : `unverified (${event.payload.issueCount} issue(s))`}`);
+        }
+      } else if (event.payload.type === 'run.paused') {
+        closeLine();
+        sink.log(`[run] paused (${event.payload.reason})`);
       } else if (event.payload.type === 'model.retry') {
         closeLine();
         sink.log(`[model] retry ${event.payload.attempt} (${event.payload.code})`);

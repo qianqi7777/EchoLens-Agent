@@ -59,6 +59,7 @@ import { navigationResolverFor, type NavigationResolver } from '../navigation/na
 import type { NavigationHint } from '../navigation/types.js';
 import type { AgentGoal } from './goal.js';
 import type { ExecutionPhase } from './model-routing.js';
+import { selectVerificationPlan, type EditVerificationResult } from './verification.js';
 
 /**
  * 一次 run/resume 的完整结果。
@@ -103,6 +104,7 @@ export interface ReactAgentOptions {
   hooks?: LifecycleHookRunner;
   navigationMode?: 'auto' | 'off';
   navigationResolver?: NavigationResolver;
+  verificationGate?: 'off' | 'auto' | 'strict';
 }
 
 interface RunMachine {
@@ -123,6 +125,7 @@ interface RunMachine {
   activeGoal?: AgentGoal;
   getActiveGoal?: () => AgentGoal | undefined;
   lastResponsePhase?: ExecutionPhase;
+  internalVerificationCallIds: Set<string>;
 }
 
 /** 显式、可检查点恢复的 model -> tools -> model 状态机。 */
@@ -187,6 +190,7 @@ export class ReactAgent {
       approvedPlan: runtime.approvedPlan,
       activeGoal: runtime.activeGoal,
       getActiveGoal: runtime.getActiveGoal,
+      internalVerificationCallIds: new Set(),
     };
     this.executor.resetBudget();
     await emit(machine, runtime.eventSink, { payload: { type: 'turn.started', userMessage } });
@@ -239,6 +243,9 @@ export class ReactAgent {
       approvedPlan: runtime.approvedPlan,
       activeGoal: runtime.activeGoal,
       getActiveGoal: runtime.getActiveGoal,
+      internalVerificationCallIds: pendingAutomaticVerificationCallIds(
+        checkpoint.items, checkpoint.internalVerificationCallIds ?? [],
+      ),
     };
     // A resume is an explicit request for another bounded execution slice.
     // Completed tool results stay in the checkpoint, while runtime budgets are
@@ -287,6 +294,7 @@ export class ReactAgent {
         if (result === 'cancelled') return this.cancel(machine, eventSink, signal?.reason);
         if (result === 'budget_exhausted') return this.pause(machine, eventSink, 'tool_budget');
         if (result === 'approval_required') return this.pause(machine, eventSink, 'approval_required');
+        if (result === 'verification_failed') return this.pause(machine, eventSink, 'verification_failed');
         machine.phase = 'model';
         machine.step += 1;
         await this.saveCheckpoint(machine, eventSink);
@@ -543,7 +551,7 @@ export class ReactAgent {
     signal: AbortSignal | undefined,
     itemId: (kind: string) => string,
     eventSink?: AgentEventSink,
-  ): Promise<'ok' | 'cancelled' | 'budget_exhausted' | 'approval_required'> {
+  ): Promise<'ok' | 'cancelled' | 'budget_exhausted' | 'approval_required' | 'verification_failed'> {
     const scheduled = await this.toolScheduler.execute(
       calls,
       this.registry,
@@ -560,6 +568,8 @@ export class ReactAgent {
     // 调度器已按 callIndex 排序（tool-scheduler.execute）且同批完成后再统一写回，
     // 因此并行工具完成顺序即使不同，写回顺序也与模型看到的工具调用顺序一致，
     // 保证下一轮 Provider 消息稳定；副作用工具不会与其他写操作交叉。
+    const changedFiles = new Set<string>();
+    let hasSuccessfulWrite = false;
     for (const { value } of scheduled) {
       // 清除历史里等待审批写入的占位结果：用户批准后该工具必须真正执行，
       // 占位结果不删会导致同一次调用出现两条 tool_result。
@@ -568,6 +578,22 @@ export class ReactAgent {
         && item.error?.code === 'approval_required'));
       machine.items.push(value.item);
       machine.trace.push({ type: 'tool', message: `${value.call.name}: ${value.result.summary}` });
+      if (this.registry.list().some((tool) => tool.name === value.call.name && tool.effect === 'write')
+        && value.result.status === 'ok') {
+        hasSuccessfulWrite = true;
+        const data = value.result.data && typeof value.result.data === 'object'
+          ? value.result.data as Record<string, unknown> : {};
+        if (Array.isArray(data.changedFiles)) {
+          for (const file of data.changedFiles) if (typeof file === 'string') changedFiles.add(file);
+        }
+      }
+    }
+    let verificationStop: 'cancelled' | 'budget_exhausted' | 'approval_required' | 'verification_failed' | undefined;
+    if (hasSuccessfulWrite) {
+      const verificationResult = await this.runAutomaticVerification(
+        machine, [...changedFiles], runtimePermissions, signal, itemId, eventSink,
+      );
+      if (verificationResult !== 'continue') verificationStop = verificationResult;
     }
     await this.saveCheckpoint(machine, eventSink);
     if (scheduled.some(({ value }) => value.result.status === 'cancelled')) return 'cancelled';
@@ -577,7 +603,87 @@ export class ReactAgent {
     if (scheduled.some(({ value }) => value.result.error?.code === 'budget_exhausted')) {
       return 'budget_exhausted';
     }
+    if (verificationStop) return verificationStop;
     return 'ok';
+  }
+
+  private async runAutomaticVerification(
+    machine: RunMachine,
+    changedFiles: string[],
+    runtimePermissions: ReadonlySet<Permission>,
+    signal: AbortSignal | undefined,
+    itemId: (kind: string) => string,
+    eventSink?: AgentEventSink,
+  ): Promise<'continue' | 'cancelled' | 'budget_exhausted' | 'approval_required' | 'verification_failed'> {
+    const gate = this.options.verificationGate ?? 'off';
+    if (gate === 'off') return 'continue';
+    const planned = machine.approvedPlan?.steps.some((step) => step.verification.trim().length > 0) ?? false;
+    if (!changedFiles.length && !planned) return 'continue';
+
+    const skip = async (reason: string, shouldPause: boolean): Promise<'continue' | 'verification_failed'> => {
+      await emit(machine, eventSink, {
+        payload: { type: 'verification.skipped', reason, changedFiles },
+      });
+      return shouldPause ? 'verification_failed' : 'continue';
+    };
+    if (!this.registry.list().some((tool) => tool.name === 'verify_changes')) {
+      return skip('未注册 Sandbox 验证工具', gate === 'strict');
+    }
+    if (!runtimePermissions.has('process.exec')) {
+      return skip('Runtime 未授予 Sandbox 命令执行权限', gate === 'strict');
+    }
+
+    const plan = await selectVerificationPlan(this.options.workspaceRoot, changedFiles);
+    if (plan.commands.length === 0) return skip(plan.reason, false);
+    await emit(machine, eventSink, {
+      payload: {
+        type: 'verification.started',
+        changedFiles,
+        commands: plan.commands.map((command) => command.id),
+      },
+    });
+    const call: ToolCallItem = {
+      type: 'tool_call',
+      id: itemId('verification-call'),
+      callId: `${machine.runId}:verify:${machine.step}:${machine.items.length}`,
+      name: 'verify_changes',
+      arguments: { changedFiles },
+      callIndex: 0,
+    };
+    machine.internalVerificationCallIds.add(call.callId);
+    machine.items.push(call);
+    // Persist the internal call before starting Sandbox work. A crash can then either
+    // resume this exact authorized verifier call or merge its completed result safely.
+    await this.saveCheckpoint(machine, eventSink);
+    const invoked = await this.executeOneTool(
+      machine, call, runtimePermissions, signal, itemId, eventSink,
+    );
+    machine.internalVerificationCallIds.delete(call.callId);
+    machine.items.push(invoked.item);
+    machine.trace.push({ type: 'tool', message: `verify_changes: ${invoked.result.summary}` });
+    if (invoked.result.error?.code === 'budget_exhausted') return 'budget_exhausted';
+    if (invoked.result.error?.code === 'approval_required') return 'approval_required';
+    if (invoked.result.status === 'cancelled') return 'cancelled';
+    const results = verificationResults(invoked.result.data);
+    const unavailable = results.some((result) => result.reason === 'sandbox_unavailable');
+    if (unavailable) {
+      return skip('Sandbox 不可用，验证未运行', gate === 'strict');
+    }
+    const verified = invoked.result.status === 'ok'
+      && results.length > 0
+      && results.every((result) => result.status === 'passed');
+    await emit(machine, eventSink, {
+      payload: {
+        type: 'verification.completed',
+        verified,
+        issueCount: verified ? 0 : Math.max(1, results.filter((result) => result.status !== 'passed').length),
+        results,
+      },
+    });
+    if (verified) return 'continue';
+
+    const consecutiveFailures = consecutiveVerificationFailures(machine.items);
+    return consecutiveFailures >= 2 ? 'verification_failed' : 'continue';
   }
 
   private async executeOneTool(
@@ -600,6 +706,8 @@ export class ReactAgent {
     // 工具输出/MCP 内容只能作为不可信证据回填，不能反向修改权限集合或 System Policy。
     const context: ToolContext = {
       workspaceRoot: this.options.workspaceRoot,
+      internalOperation: call.name === 'verify_changes' && machine.internalVerificationCallIds.has(call.callId)
+        ? 'automatic_verification' : undefined,
       allowedPermissions: new Set(prepared.permissions.effectivePermissions),
       approvalRequiredPermissions: new Set(
         prepared.permissions.approvalRequests.map((request) => request.permission),
@@ -754,6 +862,7 @@ export class ReactAgent {
       step: machine.step,
       phase: machine.phase,
       toolCallsUsed: this.executor.callsUsed(),
+      internalVerificationCallIds: [...machine.internalVerificationCallIds],
       state,
       items: structuredClone(machine.items),
       hookContexts: structuredClone(machine.hookContexts),
@@ -769,7 +878,7 @@ export class ReactAgent {
   private async pause(
     machine: RunMachine,
     eventSink: AgentEventSink | undefined,
-    reason: 'step_budget' | 'tool_budget' | 'approval_required',
+    reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed',
   ): Promise<AgentRunResult> {
     const checkpoint = await this.saveCheckpoint(machine, eventSink, 'paused');
     await emit(machine, eventSink, { payload: { type: 'run.paused', reason } });
@@ -878,6 +987,33 @@ export class ReactAgent {
     }
     return outcome;
   }
+}
+
+function verificationResults(data: unknown): EditVerificationResult[] {
+  if (!data || typeof data !== 'object' || !Array.isArray((data as { verification?: unknown }).verification)) return [];
+  return (data as { verification: EditVerificationResult[] }).verification;
+}
+
+function consecutiveVerificationFailures(items: readonly ConversationItem[]): number {
+  let count = 0;
+  for (const item of [...items].reverse()) {
+    if (item.type !== 'tool_result' || item.toolName !== 'verify_changes') continue;
+    if (item.error?.code !== 'verification_failed') break;
+    count += 1;
+  }
+  return count;
+}
+
+function pendingAutomaticVerificationCallIds(
+  items: readonly ConversationItem[],
+  callIds: readonly string[],
+): Set<string> {
+  const calls = new Set(items.filter(isToolCallItem)
+    .filter((call) => call.name === 'verify_changes')
+    .map((call) => call.callId));
+  const results = new Set(items.filter((item): item is ToolResultItem => item.type === 'tool_result')
+    .map((item) => item.callId));
+  return new Set(callIds.filter((callId) => calls.has(callId) && !results.has(callId)));
 }
 
 function workspaceFileObservation(

@@ -71,6 +71,8 @@ export interface ToolSpec {
  */
 export interface ToolContext {
   workspaceRoot: string;
+  /** Trusted runtime-only marker for an explicitly configured automatic verification call. */
+  internalOperation?: 'automatic_verification';
   allowedPermissions: ReadonlySet<Permission>;
   approvalRequiredPermissions?: ReadonlySet<Permission>;
   approvalContext?: {

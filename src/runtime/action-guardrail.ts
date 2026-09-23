@@ -45,6 +45,11 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
       return outcome('deny', 'dangerous_argument_key', '工具参数包含危险对象键', args);
     }
     const effect = tool.effect ?? effectForPermission(tool.permission);
+    // Auto-verification is an explicit runtime configuration. It may run only the
+    // registered verifier, whose implementation delegates commands to Sandbox.
+    if (context.internalOperation === 'automatic_verification' && tool.name === 'verify_changes') {
+      return outcome('allow', 'automatic_verification_allowed', '自动验证由 Sandbox 闸门授权', args);
+    }
     if (effect !== 'read') {
       return outcome(
         'require_approval',

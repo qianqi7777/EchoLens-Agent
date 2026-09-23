@@ -1377,6 +1377,12 @@ export class TerminalUi {
         if (!payload.verified) this.pushNotice(`结构化结果未验证，发现 ${payload.issueCount} 个问题`, 'warn');
         else if (this.store.get().goal) this.pushNotice('验收标准可能已满足，使用 /goal done 确认', 'success');
         break;
+      case 'verification.started':
+        this.store.update((s) => ({ ...s, status: `自动验证中：${payload.commands.join(', ')}`, statusTone: 'info' }));
+        break;
+      case 'verification.skipped':
+        this.pushNotice(`自动验证已跳过：${payload.reason}`, 'warn');
+        break;
       case 'plan.proposed':
         if (this.options.plans) {
           this.store.update((s) => ({

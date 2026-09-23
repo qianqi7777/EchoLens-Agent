@@ -126,6 +126,7 @@ async function directConfiguration(
     AGENT_DIRECT_CREDENTIAL_REF: 'env:AGENT_DIRECT_API_KEY',
     AGENT_DIRECT_PRIVACY: 'full-context',
     AGENT_DIRECT_STREAMING: 'true',
+    AGENT_VERIFY_GATE: env.AGENT_VERIFY_GATE ?? 'auto',
     AGENT_DIRECT_API_KEY: apiKey,
     AGENT_WORKSPACE_ROOT: env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   };
@@ -160,6 +161,7 @@ async function gatewayConfiguration(
     AGENT_GATEWAY_CREDENTIAL_REF: 'gateway-token:default',
     AGENT_GATEWAY_PRIVACY: 'metadata',
     AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
+    AGENT_VERIFY_GATE: env.AGENT_VERIFY_GATE ?? 'auto',
     AGENT_WORKSPACE_ROOT: env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   };
 }

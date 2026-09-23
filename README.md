@@ -26,6 +26,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 通过结构化 Patch、审批、Checkpoint 和后状态哈希完成安全编辑与回滚
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
+- 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
 - Docker Sandbox 默认禁网、只读容器根、清空 Capability、禁止提权并限制 CPU、内存和 PID
 - Sandbox 只挂载过滤后的临时工作区快照，排除 `.env*`、`.git`、`.echolens` 和 Git 忽略文件
 - Sandbox 写入以 Artifact Bundle 返回，并通过独立审批的结构化 Patch 回放到宿主工作区
@@ -239,6 +240,7 @@ contracts/
 ## 当前边界
 
 v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
+自动验证默认开启（`AGENT_VERIFY_GATE=auto`）：本回合写入返回变更文件后，受控验证命令经 Sandbox 执行；缺少验证计划或 Sandbox 不可用时记录 skipped，不代表通过。`strict` 在 Sandbox 不可用时暂停；连续两次验证失败后均会暂停。此闭环依赖 Docker Sandbox 可用，自动验证也消耗单回合最多 24 次工具预算。
 当前全量 `src/` 覆盖率实测为行 84.42%、函数 89.02%、分支 77.02%（19,444 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会

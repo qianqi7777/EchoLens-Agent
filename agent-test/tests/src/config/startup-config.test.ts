@@ -36,6 +36,7 @@ test('首次启动默认生成 DeepSeek Chat Completions 配置', async () => {
   assert.equal(env.AGENT_DIRECT_BASE_URL, 'https://api.deepseek.com/v1');
   assert.equal(env.AGENT_DIRECT_MODEL, 'deepseek-chat');
   assert.equal(env.AGENT_DIRECT_PROTOCOL, 'chat_completions');
+  assert.equal(env.AGENT_VERIFY_GATE, 'auto');
   assert.match(written, /AGENT_DIRECT_API_KEY="sk-local-test"/u);
   assert.doesNotMatch(written, /AGENT_GATEWAY_ACCESS_TOKEN/u);
 });
@@ -65,6 +66,7 @@ test('云端向导只生成 Gateway 凭据引用', async () => {
   assert.equal(env.AGENT_GATEWAY_CREDENTIAL_REF, 'gateway-token:default');
   assert.equal(env.AGENT_GATEWAY_PRIVACY, 'metadata');
   assert.equal(env.AGENT_GATEWAY_PRIVACY_CONFIRMED, 'true');
+  assert.equal(env.AGENT_VERIFY_GATE, 'auto');
   assert.doesNotMatch(written, /^AGENT_GATEWAY_ACCESS_TOKEN=/mu);
   assert.doesNotMatch(written, /AGENT_DIRECT_API_KEY/u);
 });
