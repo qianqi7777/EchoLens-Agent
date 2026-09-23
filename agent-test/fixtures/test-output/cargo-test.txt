@@ -1,0 +1,17 @@
+running 1 test
+test tests::adds_values ... FAILED
+
+failures:
+
+---- tests::adds_values stdout ----
+thread 'tests::adds_values' panicked at src/lib.rs:12:5:
+assertion `left == right` failed
+  left: 4
+ right: 3
+stack backtrace:
+   0: core::panicking
+
+failures:
+    tests::adds_values
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored

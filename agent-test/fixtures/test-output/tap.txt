@@ -1,0 +1,16 @@
+TAP version 13
+# Subtest: adds values
+not ok 1 - adds values
+  ---
+  duration_ms: 0.8
+  location: 'file:///workspace/math.test.js:8:1'
+  failureType: 'testCodeFailure'
+  error: 'Expected 3, received 4'
+  stack: |-
+    AssertionError: Expected 3, received 4
+        at TestContext.<anonymous> (file:///workspace/math.test.js:9:7)
+  ...
+1..1
+# tests 1
+# pass 0
+# fail 1

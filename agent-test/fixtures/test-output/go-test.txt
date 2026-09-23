@@ -1,0 +1,4 @@
+=== RUN   TestAddsValues
+--- FAIL: TestAddsValues (0.00s)
+    math_test.go:12: expected 3, got 4
+FAIL

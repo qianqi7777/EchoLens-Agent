@@ -18,6 +18,7 @@
     "agent-test/tests/src/runtime/runtime.test.ts",
     "agent-test/tests/src/runtime/sandbox-tools.test.ts",
     "agent-test/tests/src/runtime/structured-output.test.ts",
+    "agent-test/tests/src/runtime/test-output.test.ts",
     "agent-test/tests/src/runtime/structured-patch.test.ts",
     "agent-test/tests/src/runtime/tool-errors.test.ts",
     "agent-test/tests/src/runtime/tool-scheduler.test.ts",

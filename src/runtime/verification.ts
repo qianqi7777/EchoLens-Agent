@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { redactText } from '../providers/redaction.js';
+import { parseTestOutput, type ParsedFailure } from './test-output/index.js';
 
 export type VerificationStatus = 'passed' | 'failed' | 'skipped' | 'timeout';
 export type VerificationGate = 'off' | 'auto' | 'strict';
@@ -31,6 +32,7 @@ export interface EditVerificationResult {
   durationMs: number;
   summary: string;
   output?: string;
+  failures?: ParsedFailure[];
   reason?: 'sandbox_unavailable';
 }
 
@@ -125,7 +127,11 @@ async function runCommand(command: VerificationCommand, signal?: AbortSignal): P
       if (timedOut) finish({ id: command.id, label: command.label, command: command.command, status: 'timeout', summary: '验证超时', output });
       else if (signal?.aborted) finish({ id: command.id, label: command.label, command: command.command, status: 'skipped', summary: '验证被取消', output });
       else if (code === 0) finish({ id: command.id, label: command.label, command: command.command, status: 'passed', exitCode: code, summary: '验证通过', output });
-      else finish({ id: command.id, label: command.label, command: command.command, status: 'failed', exitCode: code ?? undefined, summary: `验证失败（退出码 ${code ?? 'unknown'}）`, output });
+      else {
+        const failures = parseTestOutput(output).failures;
+        finish({ id: command.id, label: command.label, command: command.command, status: 'failed', exitCode: code ?? undefined, summary: `验证失败（退出码 ${code ?? 'unknown'}）`, output,
+          ...(failures.length ? { failures } : {}) });
+      }
     });
   });
 }

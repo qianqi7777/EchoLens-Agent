@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { SandboxAdapter, SandboxExecuteRequest } from '../../../../src/sandbox/index.js';
+import type { SandboxAdapter, SandboxExecuteRequest, SandboxExecuteResult } from '../../../../src/sandbox/index.js';
 import { MemoryApprovalStore } from '../../../../src/runtime/approval.js';
 import { registerSandboxTools } from '../../../../src/runtime/sandbox-tools.js';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
@@ -15,7 +15,7 @@ class FakeSandbox implements SandboxAdapter {
     resourceLimits: true, artifactCollection: false, hostExecution: false,
   } as const;
   readonly requests: SandboxExecuteRequest[] = [];
-  async execute(request: SandboxExecuteRequest) {
+  async execute(request: SandboxExecuteRequest): Promise<SandboxExecuteResult> {
     this.requests.push(request);
     return {
       status: 'passed' as const,
@@ -97,4 +97,61 @@ test('run_tests 使用固定 npm argv，非法命令和 package_install 默认�
   }, context);
   assert.equal(install.error?.code, 'permission_denied');
   assert.equal(sandbox.requests.length, 2);
+});
+
+test('verify_changes attaches structured failures while preserving the sandbox execution boundary', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit' } }), 'utf8');
+  class FailingSandbox extends FakeSandbox {
+    override async execute(request: SandboxExecuteRequest) {
+      this.requests.push(request);
+      return {
+        status: 'failed' as const,
+        exitCode: 1,
+        stdout: 'FAIL src/math.test.ts\n  ● adds values\n\n    Expected: 3\n    Received: 4\n\n      at Object.<anonymous> (src/math.test.ts:12:5)\n',
+        stderr: '', durationMs: 4, outputTruncated: false, artifacts: [],
+      };
+    }
+  }
+  const sandbox = new FailingSandbox();
+  const registry = new ToolRegistry();
+  registerSandboxTools(registry, sandbox);
+  const result = await new ToolExecutor(registry, {
+    approvalDecider: async () => ({ decision: 'allow', scope: 'once', decidedAt: new Date().toISOString() }),
+  }).invoke('verify_changes', { changedFiles: ['src/example.ts'] }, {
+    workspaceRoot: root,
+    allowedPermissions: new Set(['process.exec'] as const),
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.status, 'failed');
+  const data = result.data as { verification?: Array<{ failures?: Array<{ testName?: string; line?: number }> }> };
+  assert.equal(data.verification?.[0]?.failures?.[0]?.testName, 'adds values');
+  assert.equal(data.verification?.[0]?.failures?.[0]?.line, 12);
+  assert.equal(sandbox.requests.length, 1);
+  assert.equal(sandbox.requests[0]?.kind, 'test');
+
+  class UnknownOutputSandbox extends FakeSandbox {
+    override async execute(request: SandboxExecuteRequest) {
+      this.requests.push(request);
+      return {
+        status: 'failed' as const, exitCode: 1,
+        stdout: 'custom runner failed: api_key=sk-12345678', stderr: '',
+        durationMs: 4, outputTruncated: false, artifacts: [],
+      };
+    }
+  }
+  const unknownSandbox = new UnknownOutputSandbox();
+  const unknownRegistry = new ToolRegistry();
+  registerSandboxTools(unknownRegistry, unknownSandbox);
+  const unknown = await new ToolExecutor(unknownRegistry, {
+    approvalDecider: async () => ({ decision: 'allow', scope: 'once', decidedAt: new Date().toISOString() }),
+  }).invoke('verify_changes', { changedFiles: ['src/example.ts'] }, {
+    workspaceRoot: root,
+    allowedPermissions: new Set(['process.exec'] as const),
+    signal: new AbortController().signal,
+  });
+  const unknownData = unknown.data as { verification?: Array<{ output?: string; failures?: unknown[] }> };
+  assert.equal(unknownData.verification?.[0]?.output, 'custom runner failed: api_key=[REDACTED]');
+  assert.equal(unknownData.verification?.[0]?.failures, undefined);
 });
