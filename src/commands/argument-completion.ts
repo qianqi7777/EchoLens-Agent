@@ -13,6 +13,7 @@ export interface ArgumentCompletionContext {
   currentSessionId: string;
   listSessions(): Promise<readonly { sessionId: string }[]>;
   listTasks?(): Promise<readonly { id: string; state: string }[]>;
+  listCheckpoints?(): Promise<readonly string[]>;
   listHooks?(): readonly { id: string; scope: string; trusted: boolean }[];
 }
 
@@ -56,6 +57,13 @@ export async function completeArguments(input: string, context: ArgumentCompleti
     return values('', (await directoryEntries(path.join(context.workspaceRoot, '.echolens', 'checkpoints')))
       .filter((entry) => entry.isFile() && /^[A-Za-z0-9._-]+\.json$/u.test(entry.name))
       .map((entry) => [entry.name.slice(0, -5), '编辑检查点']), args);
+  }
+  if (command === '/rollback' && context.listCheckpoints) {
+    const target = /^--to\s+(\d*)$/u.exec(args);
+    if (target) {
+      const count = (await context.listCheckpoints()).length;
+      return values('--to ', Array.from({ length: count }, (_, index) => [String(index), '检查点索引']), target[1]!);
+    }
   }
   return [];
 }

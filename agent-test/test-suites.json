@@ -14,6 +14,7 @@
     "agent-test/tests/src/orchestration/worker-pool.test.ts",
     "agent-test/tests/src/runtime/approval.test.ts",
     "agent-test/tests/src/runtime/change-set.test.ts",
+    "agent-test/tests/src/runtime/rollback-granularity.test.ts",
     "agent-test/tests/src/runtime/edit-loop.test.ts",
     "agent-test/tests/src/runtime/file-lock.test.ts",
     "agent-test/tests/src/runtime/navigation.test.ts",

@@ -1,7 +1,7 @@
 import { executeSessionCommand, type SessionCommands } from './session-command.js';
 import { executeBackgroundTaskCommand, type BackgroundTaskCommands } from '../orchestration/task-command.js';
 import { executeWorkspaceCommand, type WorkspaceCommandService, type WorkspaceCommandResult } from '../runtime/workspace-manager.js';
-import type { EditCheckpoint } from '../runtime/structured-patch.js';
+import type { EditCheckpoint, RollbackToResult } from '../runtime/structured-patch.js';
 import type { EditVerificationResult } from '../runtime/verification.js';
 import type { ImportedSkill } from '../skills/skill-manager.js';
 import type { HookStatus } from '../orchestration/command-hooks.js';
@@ -22,6 +22,9 @@ export interface CommandServices {
   deleteSession?: SessionCommands['delete'];
   verify(): Promise<readonly EditVerificationResult[]>;
   rollback(checkpoint: EditCheckpoint): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
+  restoreFiles?(checkpoint: EditCheckpoint, paths: readonly string[]): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
+  rollbackTo?(index: number): Promise<RollbackToResult>;
+  listCheckpoints?(): Promise<readonly string[]>;
   loadCheckpoint(id: string): Promise<EditCheckpoint>;
   diff?(turnId?: string): Promise<ChangeSet | undefined>;
   backgroundTasks?: BackgroundTaskCommands;
@@ -89,8 +92,22 @@ export async function executeServiceCommand(
       lines = (await services.verify()).map((item) => `${item.id}: ${item.status} - ${item.summary}`);
       break;
     case '/rollback': {
-      if (args.length !== 1 || !args[0]) return { handled: true, lines: ['用法：/rollback <checkpoint-id>'] };
-      const result = await services.rollback(await services.loadCheckpoint(args[0]));
+      if (args[0] === '--to') {
+        if (!services.rollbackTo || args.length !== 2 || !/^\d+$/u.test(args[1] ?? '')) {
+          return { handled: true, lines: ['用法：/rollback --to <检查点索引>'] };
+        }
+        const result = await services.rollbackTo(Number(args[1]));
+        lines = [`已回退到 checkpoint[${result.targetIndex}]，处理 ${result.completedCheckpointIds.length} 个检查点，恢复 ${result.restoredPaths.length} 个文件`,
+          ...result.skippedPaths.map((file) => `警告：跳过后续修改：${file}`)];
+        break;
+      }
+      if (!args[0] || (args.length > 1 && !services.restoreFiles)) {
+        return { handled: true, lines: ['用法：/rollback <checkpoint-id> [文件路径...] 或 /rollback --to <检查点索引>'] };
+      }
+      const checkpoint = await services.loadCheckpoint(args[0]);
+      const result = args.length > 1
+        ? await services.restoreFiles!(checkpoint, args.slice(1))
+        : await services.rollback(checkpoint);
       lines = [`已回滚 checkpoint=${args[0]}，恢复 ${result.restoredPaths.length} 个文件`,
         ...result.skippedPaths.map((file) => `警告：跳过后续修改：${file}`)];
       break;

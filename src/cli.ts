@@ -18,7 +18,7 @@ import { registerWorkspaceTools } from './runtime/workspace-tools.js';
 import { registerSandboxTools } from './runtime/sandbox-tools.js';
 import { DockerSandboxAdapter } from './sandbox/docker-sandbox.js';
 import { JsonApprovalStore, type ApprovalDecision, type ApprovalRequest } from './runtime/approval.js';
-import { loadEditCheckpoint, rollbackCheckpoint } from './runtime/structured-patch.js';
+import { listEditCheckpoints, loadEditCheckpoint, restoreFiles, rollbackCheckpoint, rollbackTo } from './runtime/structured-patch.js';
 import { parseVerificationGate, runVerification, selectVerificationPlan } from './runtime/verification.js';
 import { initializeRuntimeExtensions } from './runtime/runtime-extensions.js';
 import { parseNavigationMode } from './navigation/navigation-resolver.js';
@@ -113,6 +113,12 @@ if (!connectedModel) {
       return runVerification(await selectVerificationPlan(active.workspaceRoot, []));
     },
     rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
+    restoreFiles: (checkpoint, paths) => restoreFiles(checkpoint, paths),
+    rollbackTo: async (index) => {
+      const items = await listEditCheckpoints(manager.currentRuntime().workspaceRoot);
+      return rollbackTo(items.map((item) => item.checkpoint), index);
+    },
+    listCheckpoints: () => listEditCheckpoints(manager.currentRuntime().workspaceRoot).then((items) => items.map((item) => item.id)),
     loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
     diff: (turnId) => manager.currentRuntime().session.changeSet(turnId),
     backgroundTasks,

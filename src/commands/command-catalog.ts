@@ -152,7 +152,7 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
   {
     name: '/rollback',
     description: '回滚到指定的编辑检查点',
-    usage: '/rollback <checkpoint-id>',
+    usage: '/rollback <checkpoint-id> [文件路径...] | /rollback --to <检查点索引>',
     category: 'workspace',
     acceptsArguments: true,
     availableDuringTask: false,

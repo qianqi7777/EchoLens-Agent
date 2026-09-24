@@ -11,6 +11,7 @@ import {
 import { completeArguments } from '../../../../src/commands/argument-completion.js';
 import { executeSessionCommand } from '../../../../src/commands/session-command.js';
 import { executeServiceCommand } from '../../../../src/commands/service-command.js';
+import type { EditCheckpoint } from '../../../../src/runtime/structured-patch.js';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -78,6 +79,7 @@ test('参数补全支持目录、任务、会话和检查点，仅读本地元�
   const ctx = { workspaceRoot: root, currentSessionId: 'active',
     listSessions: async () => [{ sessionId: 'active' }, { sessionId: 'older' }],
     listTasks: async () => [{ id: 'task-1', state: 'paused' }],
+    listCheckpoints: async () => ['cp0', 'cp1'],
   };
   assert.equal((await completeArguments('/cd 中', ctx))[0]?.replacement, `/cd "中文 space${sep}"`);
   assert.equal((await completeArguments('/cd "中文', ctx))[0]?.replacement, `/cd "中文 space${sep}"`);
@@ -85,6 +87,7 @@ test('参数补全支持目录、任务、会话和检查点，仅读本地元�
   assert.equal((await completeArguments('/task cancel ', ctx))[0]?.replacement, '/task cancel task-1 ');
   assert.deepEqual((await completeArguments('/session delete ', ctx)).map((item) => item.name), ['older']);
   assert.equal((await completeArguments('/rollback ', ctx))[0]?.replacement, '/rollback checkpoint-1 ');
+  assert.deepEqual((await completeArguments('/rollback --to ', ctx)).map((item) => item.name), ['0', '1']);
   assert.deepEqual(await completeArguments('/cd nonexistent/', ctx), []);
 });
 
@@ -192,4 +195,20 @@ test('/hooks 查看状态并在确认后信任项目 Hook', async () => {
   assert.equal(revoked, true);
   assert.equal(reloaded, true);
   assert.match((await executeServiceCommand('/hooks nope', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/rollback 支持按文件恢复和按检查点索引回退', async () => {
+  const checkpoint: EditCheckpoint = { version: 1, workspaceRoot: 'root', workspaceRevision: { value: 'r', capturedAt: 'now', fileCount: 0 }, createdAt: 'now', files: [] };
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: ['a.txt'], skippedPaths: [] }),
+    restoreFiles: async (_checkpoint: typeof checkpoint, paths: readonly string[]) => ({ restoredPaths: [...paths], skippedPaths: [] }),
+    rollbackTo: async (index: number) => ({ targetIndex: index, checkpointIds: ['c0', 'c1'], completedCheckpointIds: ['c1'], restoredPaths: ['a.txt'], skippedPaths: [] }),
+    loadCheckpoint: async () => checkpoint,
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/rollback c1 a.txt', services, session)).lines,
+    ['已回滚 checkpoint=c1，恢复 1 个文件']);
+  assert.match((await executeServiceCommand('/rollback --to 0', services, session)).lines[0] ?? '', /checkpoint\[0\]/u);
+  assert.match((await executeServiceCommand('/rollback --to bad', services, session)).lines[0] ?? '', /用法/u);
 });

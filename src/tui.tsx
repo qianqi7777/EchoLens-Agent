@@ -932,6 +932,7 @@ export class TerminalUi {
         currentSessionId: state.sessionId,
         listSessions: this.options.listSessions,
         listTasks: this.options.backgroundTasks ? () => this.options.backgroundTasks!.list() : undefined,
+        listCheckpoints: this.options.listCheckpoints,
         listHooks: this.options.hooks ? () => this.options.hooks!.list() : undefined,
       }).then((candidates) => {
         if (this.stopped || generation !== this.completionGeneration || this.store.get().input !== input) return;
