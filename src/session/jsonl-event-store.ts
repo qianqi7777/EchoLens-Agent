@@ -288,5 +288,6 @@ function isDurableEvent(type: AgentEventPayload['type']): boolean {
     || type === 'run.completed'
     || type === 'run.paused'
     || type === 'run.cancelled'
-    || type === 'run.failed';
+    || type === 'run.failed'
+    || type === 'change.set.completed';
 }

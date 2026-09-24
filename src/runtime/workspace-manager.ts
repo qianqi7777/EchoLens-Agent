@@ -26,6 +26,8 @@ export interface WorkspaceCommandResult {
   handled: boolean;
   lines: string[];
   workspace?: WorkspaceSwitchResult;
+  /** 可选的结构化变更包，供 TUI 聚合渲染；CLI 仍使用 lines。 */
+  changeSet?: import('./change-set.js').ChangeSet;
 }
 
 export type WorkspaceRuntimeFactory<T extends ManagedWorkspaceRuntime> = (

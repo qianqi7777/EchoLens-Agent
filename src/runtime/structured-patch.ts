@@ -75,7 +75,16 @@ export interface EditCheckpoint {
   workspaceRoot: string;
   workspaceRevision: WorkspaceRevision;
   createdAt: string;
-  files: Array<{ path: string; contentBase64?: string; existed: boolean; hash?: string; afterHash?: string }>;
+  files: Array<{
+    path: string;
+    contentBase64?: string;
+    existed: boolean;
+    hash?: string;
+    afterHash?: string;
+    /** 新检查点保存补丁后的内容，供任务级 diff 从证据重建；旧 checkpoint 可缺省。 */
+    afterContentBase64?: string;
+    afterExisted?: boolean;
+  }>;
 }
 
 export interface ApplyPatchResult {
@@ -326,6 +335,9 @@ export async function applyPatch(
         const handle = await policy.openFileForWrite(operation.path);
         try { await handle.handle.writeFile(next!); await handle.handle.truncate(next!.byteLength); } finally { await handle.handle.close(); }
       }
+      const recorded = checkpoint.files.find((file) => file.path === item.path)!;
+      recorded.afterExisted = operation.op !== 'delete';
+      recorded.afterContentBase64 = next?.toString('base64');
     }
   } catch (error) {
     // 任一文件写入失败立即整体回滚；回滚本身失败才抛 patch_rollback_failed，交由调用方人工处理。

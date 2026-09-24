@@ -123,6 +123,12 @@ export type AgentEventPayload =
       callId: string;
     }
   | { type: 'checkpoint.saved'; checkpoint: AgentCheckpoint }
+  | {
+      type: 'change.set.completed';
+      files: string[];
+      checkpointIds: string[];
+      verification?: { status: 'passed' | 'failed' | 'skipped'; issueCount: number };
+    }
   | { type: 'verification.started'; changedFiles: string[]; commands: string[] }
   | { type: 'verification.skipped'; reason: string; changedFiles: string[] }
   | { type: 'verification.completed'; verified: boolean; issueCount: number; results?: import('../runtime/verification.js').EditVerificationResult[] }

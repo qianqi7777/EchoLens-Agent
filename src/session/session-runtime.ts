@@ -6,6 +6,7 @@ import { JsonlEventStore, type JsonlEventStoreOptions } from './jsonl-event-stor
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
 import { createGoal, createGoalEvidence, type AgentGoal, type GoalEvidence } from '../runtime/goal.js';
+import { buildChangeSet, type ChangeSet } from '../runtime/change-set.js';
 
 export interface SessionRuntimeOptions {
   rootDirectory: string;
@@ -164,6 +165,15 @@ export class SessionRuntime {
     return this.agent.modelRoutingStatus();
   }
 
+  async changeSet(turnId?: string): Promise<ChangeSet | undefined> {
+    const events = await this.store.read();
+    const event = [...events].reverse().find((item) => item.payload.type === 'change.set.completed'
+      && (turnId === undefined || item.turnId === turnId));
+    if (!event || event.payload.type !== 'change.set.completed') return undefined;
+    const result = await buildChangeSet(this.workspaceRoot, event.payload.checkpointIds);
+    return { ...result, turnId: event.turnId, verification: event.payload.verification };
+  }
+
   async decidePlan(
     planId: string,
     decision: 'approved' | 'edited' | 'rejected',
@@ -232,6 +242,10 @@ export class SessionRuntime {
     await observer?.(event);
     if (event.payload.type === 'run.completed' || event.payload.type === 'run.failed'
       || event.payload.type === 'run.cancelled') this.pendingApprovedPlan = undefined;
+    if (event.payload.type === 'run.completed' || event.payload.type === 'run.failed'
+      || event.payload.type === 'run.cancelled' || event.payload.type === 'run.paused') {
+      await this.appendChangeSet(event, observer);
+    }
     if (!this.activeGoal) return;
     if (event.payload.type === 'checkpoint.saved') {
       const checkpoint = event.payload.checkpoint;
@@ -240,6 +254,43 @@ export class SessionRuntime {
       await this.appendObservedGoalEvidence('verification', event.eventId,
         `verified=${event.payload.verified} issueCount=${event.payload.issueCount}`, observer);
     }
+  }
+
+  private async appendChangeSet(
+    terminal: AgentEvent,
+    observer?: (event: AgentEvent) => void | Promise<void>,
+  ): Promise<void> {
+    const events = (await this.store.read()).filter((event) => event.turnId === terminal.turnId);
+    const ids: string[] = [];
+    for (const event of events) {
+      if (event.payload.type !== 'tool.completed' || event.payload.status !== 'ok'
+        || !['apply_patch', 'apply_sandbox_patch'].includes(event.payload.toolName)) continue;
+      const data = event.payload.result?.data;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+      const id = (data as { checkpointId?: unknown }).checkpointId;
+      if (typeof id === 'string' && !ids.includes(id)) ids.push(id);
+    }
+    if (ids.length === 0) return;
+    const set = await buildChangeSet(this.workspaceRoot, ids);
+    const verificationEvent = [...events].reverse().find((event) => event.payload.type === 'verification.skipped'
+      || event.payload.type === 'verification.completed');
+    const verification = verificationEvent?.payload.type === 'verification.skipped'
+      ? { status: 'skipped' as const, issueCount: 0 }
+      : verificationEvent?.payload.type === 'verification.completed'
+        ? { status: verificationEvent.payload.verified ? 'passed' as const : 'failed' as const,
+            issueCount: verificationEvent.payload.issueCount }
+        : undefined;
+    const recorded = await this.store.append({
+      turnId: terminal.turnId,
+      runId: terminal.runId,
+      payload: {
+        type: 'change.set.completed',
+        files: set.files.map((file) => file.path),
+        checkpointIds: ids,
+        verification,
+      },
+    });
+    await observer?.(recorded);
   }
 
   private async appendObservedGoalEvidence(

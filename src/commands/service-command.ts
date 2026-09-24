@@ -7,6 +7,7 @@ import type { ImportedSkill } from '../skills/skill-manager.js';
 import type { HookStatus } from '../orchestration/command-hooks.js';
 import type { AgentGoal } from '../runtime/goal.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
+import type { ChangeSet } from '../runtime/change-set.js';
 
 export interface HookCommands {
   list(): HookStatus[];
@@ -22,6 +23,7 @@ export interface CommandServices {
   verify(): Promise<readonly EditVerificationResult[]>;
   rollback(checkpoint: EditCheckpoint): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   loadCheckpoint(id: string): Promise<EditCheckpoint>;
+  diff?(turnId?: string): Promise<ChangeSet | undefined>;
   backgroundTasks?: BackgroundTaskCommands;
   workspaceCommands?: WorkspaceCommandService;
   importSkill?(source: string): Promise<ImportedSkill>;
@@ -42,7 +44,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/diff', '/skill', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -62,6 +64,18 @@ export async function executeServiceCommand(
     case '/tasks': case '/usage': case '/task':
       if (!services.backgroundTasks) throw new Error('后台任务服务不可用。');
       return executeBackgroundTaskCommand(input, services.backgroundTasks);
+    case '/diff': {
+      if (!services.diff) throw new Error('变更包服务不可用。');
+      if (args.length > 1) return { handled: true, lines: ['用法：/diff [turn-id]'] };
+      const changeSet = await services.diff(args[0]);
+      if (!changeSet) return { handled: true, lines: ['当前没有可用的任务变更包。'] };
+      lines = [
+        `变更包：${changeSet.files.length} 个文件，${changeSet.checkpointIds.length} 个 checkpoint${changeSet.truncated ? '（已截断）' : ''}`,
+        ...changeSet.files.map((file) => `${file.path} (${file.beforeExisted ? '修改' : '新增'} -> ${file.afterExisted ? '存在' : '删除'})`),
+        changeSet.diff || '[info] 没有可见差异',
+      ];
+      return { handled: true, lines, changeSet };
+    }
     case '/sessions': case '/session':
       lines = await executeSessionCommand(input, {
         ...session, list: services.listSessions,

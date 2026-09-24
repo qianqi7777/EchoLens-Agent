@@ -41,6 +41,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 提供带跨进程锁的持久后台任务队列、可配置 Worker 池并发、工作区互斥、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
 - 后台任务持久化 input/output/cached tokens、模型步数和工具调用；`/tasks` 展示单任务用量，`/usage` 按任务与会话汇总估算成本
+- 任务结束持久化 `change.set.completed` 变更包；`/diff [turn-id]` 从检查点字节重建多轮、多文件统一 diff，TUI 以聚合 Patch 视图展示并对超长 diff 做有界截断
 - Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
 - TypeScript 启用未使用代码、数组越界、隐式返回、Switch 穿透和 Override 等额外静态检查
 - 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
@@ -249,7 +250,8 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 失败解析目前依据 TAP、Jest、pytest、Go test 与 Cargo test 的文本形态；非标准/custom reporter 可能无法结构化，此时仍回传原有脱敏截断输出，不代表覆盖所有测试运行器。
 后台子 Agent 使用异步 I/O Worker 池；并发默认 `max(1, floor(os.cpus().length / 2))`，允许 1–32 并可由 `AGENT_WORKER_CONCURRENCY` 或 `/task concurrency` 覆盖。同一显式 workspace key 在队列认领时互斥，缺省任务由 allocator 分配独立 Sandbox/Worktree。Docker 主机建议从并发 2–4 起步并按内存/CPU 配额调节；该建议不是压力测试结论。
 后台任务用量按子 Agent 实际收到的 usage 事件累计；成本只复用已配置模型 Profile 的公开单价，任一单价缺失会记录并展示 `unknown`，不会把未知成本当作 0。CLI 入队时自动写入当前 Session ID；未提供该 metadata 的历史或外部入队任务归入 `unknown`。
-当前全量 `src/` 覆盖率实测为行 84.74%、函数 89.49%、分支 77.69%（20,028 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
+当前全量 `src/` 覆盖率实测为行 84.93%、函数 89.67%、分支 77.62%（20,421 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和

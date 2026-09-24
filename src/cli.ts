@@ -114,6 +114,7 @@ if (!connectedModel) {
     },
     rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
     loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
+    diff: (turnId) => manager.currentRuntime().session.changeSet(turnId),
     backgroundTasks,
     workspaceCommands,
       importSkill: (source) => new SkillManager({ workspaceRoot: manager.currentRuntime().workspaceRoot }).import(source),

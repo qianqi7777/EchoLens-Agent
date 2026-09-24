@@ -1133,7 +1133,8 @@ export class TerminalUi {
             currentSessionId: state.sessionId,
             confirm: (text) => this.confirmDeletion(text),
           });
-          for (const line of result.lines) this.pushNotice(line, 'info');
+          if (result.changeSet) this.pushChangeSet(result.changeSet);
+          else for (const line of result.lines) this.pushNotice(line, 'info');
           this.updatePhaseFromStatus(result.lines);
           if (prompt.startsWith('/goal')) {
             this.store.update((s) => ({ ...s, goal: this.options.goals?.status() }));
@@ -1152,7 +1153,8 @@ export class TerminalUi {
           const workspace = result.workspace;
           this.store.update((s) => ({ ...s, workspaceRoot: workspace.workspaceRoot, sessionId: workspace.sessionId, tokens: 0 }));
         }
-        for (const line of result.lines) this.pushNotice(line, line.startsWith('警告：') ? 'warn' : 'info');
+        if (result.changeSet) this.pushChangeSet(result.changeSet);
+        else for (const line of result.lines) this.pushNotice(line, line.startsWith('警告：') ? 'warn' : 'info');
         if (prompt.startsWith('/plan')) this.updatePhaseFromStatus(result.lines);
         if (prompt.startsWith('/goal')) {
           this.store.update((s) => ({ ...s, goal: this.options.goals?.status() }));
@@ -1485,6 +1487,16 @@ export class TerminalUi {
       status: tone === 'error' ? text : s.status,
       statusTone: tone === 'error' ? 'error' : s.statusTone,
     }));
+  }
+
+  private pushChangeSet(changeSet: import('./runtime/change-set.js').ChangeSet): void {
+    const verification = changeSet.verification
+      ? `验证：${changeSet.verification.status}，问题 ${changeSet.verification.issueCount}`
+      : '验证：未记录';
+    const header = `变更包：${changeSet.files.length} 个文件，${changeSet.checkpointIds.length} 个 checkpoint${changeSet.truncated ? '（已截断）' : ''}；${verification}`;
+    const files = changeSet.files.map((file) => `${file.path} (${file.beforeExisted ? '修改' : '新增'} -> ${file.afterExisted ? '存在' : '删除'})`);
+    const text = [header, ...files, changeSet.diff || '[info] 没有可见差异'].join('\n');
+    this.store.update((s) => ({ ...s, transcript: [...s.transcript, { kind: 'patch', id: this.nid(), text }] }));
   }
 
   private nid(): string {

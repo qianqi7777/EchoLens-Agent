@@ -159,6 +159,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     source: 'builtin',
   },
   {
+    name: '/diff',
+    description: '查看当前或指定 Turn 基于检查点重建的任务变更包',
+    usage: '/diff [turn-id]',
+    category: 'workspace',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
     name: '/steer',
     description: '追加要求并从当前检查点继续运行',
     usage: '/steer <要求>',

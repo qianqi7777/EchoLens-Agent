@@ -20,7 +20,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/steer', '/clear', '/help', '/exit'],
+    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/diff', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
