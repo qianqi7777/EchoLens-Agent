@@ -17,6 +17,7 @@ export interface TaskWorkspaceLease {
   id: string;
   mode: BackgroundTaskIsolation;
   root: string;
+  workspaceKey: string;
   changedFiles(): Promise<string[]>;
   cleanup(): Promise<void>;
 }
@@ -30,12 +31,31 @@ export interface TaskWorkspaceAllocator {
  * 工作区分配只做隔离，不做任何业务判断；任务能否写回由调用方依据 changedFiles 决策。
  */
 export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
+  private readonly activeWorkspaceKeys = new Set<string>();
+
   constructor(private readonly stager = new FileSystemWorkspaceStager()) {}
 
   async allocate(workspaceRoot: string, mode: BackgroundTaskIsolation): Promise<TaskWorkspaceLease> {
-    return mode === 'worktree'
+    const lease = await (mode === 'worktree'
       ? this.allocateWorktree(workspaceRoot)
-      : this.allocateSandbox(workspaceRoot);
+      : this.allocateSandbox(workspaceRoot));
+    const workspaceKey = path.resolve(lease.root);
+    if (this.activeWorkspaceKeys.has(workspaceKey)) {
+      await lease.cleanup();
+      throw new Error('后台任务工作区已被占用');
+    }
+    this.activeWorkspaceKeys.add(workspaceKey);
+    let released = false;
+    return {
+      ...lease,
+      workspaceKey,
+      cleanup: async () => {
+        if (released) return;
+        await lease.cleanup();
+        released = true;
+        this.activeWorkspaceKeys.delete(workspaceKey);
+      },
+    };
   }
 
   // sandbox 使用临时暂存副本：只读分析或运行受控测试，改动随 cleanup 丢弃，因此 changedFiles 恒为空。
@@ -46,6 +66,7 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
       id,
       mode: 'sandbox',
       root: staged.root,
+      workspaceKey: path.resolve(staged.root),
       changedFiles: async () => [],
       cleanup: staged.cleanup,
     };
@@ -87,6 +108,7 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
       id,
       mode: 'worktree',
       root: target,
+      workspaceKey: path.resolve(target),
       changedFiles: () => workspaceChanges(this.stager, target, staged.baseline),
       cleanup: async () => {
         // cleanup 只执行一次，确保外部多次调用时也只 remove 一次 worktree 并删除目录。

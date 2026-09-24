@@ -9,6 +9,8 @@ export interface BackgroundTaskCommands {
   list(): Promise<BackgroundTaskRecord[]>;
   cancel(taskId: string): Promise<BackgroundTaskRecord>;
   resume(taskId: string): Promise<BackgroundTaskRecord>;
+  workerStatus?(): Promise<{ concurrency: number; running: number; pending: number }>;
+  setConcurrency?(value: number): void;
 }
 
 export interface BackgroundTaskCommandResult {
@@ -33,13 +35,30 @@ export async function executeBackgroundTaskCommand(
   const parts = input.trim().split(/\s+/u);
   if (parts[0] === '/tasks') {
     const tasks = await service.list();
+    const status = await service.workerStatus?.();
     return {
       handled: true,
-      lines: tasks.length ? tasks.slice(0, 20).map(formatBackgroundTask) : ['暂无后台任务。'],
+      lines: [
+        ...(status ? [`Worker: ${status.running}/${status.concurrency} running | ${status.pending} queued`] : []),
+        ...(tasks.length ? tasks.slice(0, 20).map(formatBackgroundTask) : ['暂无后台任务。']),
+      ],
     };
   }
   const action = parts[1];
   if (!action || action === 'help') return { handled: true, lines: taskHelp() };
+  if (action === 'concurrency') {
+    if (!service.setConcurrency || !service.workerStatus) return { handled: true, lines: ['Worker 并发配置不可用。'] };
+    if (parts.length !== 3 || !/^\d+$/u.test(parts[2] ?? '')) {
+      const status = await service.workerStatus();
+      return { handled: true, lines: [`当前 Worker 并发：${status.concurrency}（${status.running} running，${status.pending} queued）`, '用法：/task concurrency <1-32>'] };
+    }
+    const concurrency = Number(parts[2]);
+    try { service.setConcurrency(concurrency); } catch (error) {
+      return { handled: true, lines: [error instanceof Error ? error.message : '并发值无效'] };
+    }
+    const status = await service.workerStatus();
+    return { handled: true, lines: [`Worker 并发已设为 ${status.concurrency}（${status.running} running，${status.pending} queued）`] };
+  }
   if (action === 'cancel' || action === 'resume') {
     const taskId = parts[2];
     if (!taskId || parts.length !== 3) return { handled: true, lines: [`用法：/task ${action} <task-id>`] };
@@ -73,6 +92,7 @@ export function formatBackgroundTask(task: BackgroundTaskRecord): string {
 function taskHelp(): string[] {
   return [
     '/tasks：列出最近后台任务',
+    '/task concurrency <1-32>：设置 Worker 池并发上限',
     '/task <explore|test|review> [sandbox|worktree] <目标>：创建并启动任务',
     '/task cancel <task-id>：取消任务',
     '/task resume <task-id>：显式恢复任务',

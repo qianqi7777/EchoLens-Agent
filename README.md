@@ -38,7 +38,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
 - 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
 - 支持版本锁定的 Eval Suite（静态任务 + 固定 seed 动态变体），归档逐任务原始结果与汇总报告；复现命令 `npm run eval:fixed`
-- 提供带跨进程锁的持久后台任务队列、租约恢复、显式取消/恢复和状态通知
+- 提供带跨进程锁的持久后台任务队列、可配置 Worker 池并发、工作区互斥、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
 - Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
 - TypeScript 启用未使用代码、数组越界、隐式返回、Switch 穿透和 Override 等额外静态检查
@@ -77,6 +77,8 @@ npm run dev -- --resume latest
 - `/cd <path>` 或 `/workspace <path>`：切换工作目录；相对路径以当前目录为基准
 - 在 TUI 中输入 `/`：打开带说明的命令候选菜单；`↑/↓` 选择、`Tab` 补全、`Enter` 确认、`Esc` 关闭
 - `/resume`：恢复当前 Session 的未完成 Turn
+- `/tasks`：查看后台 Worker 并发、运行中与排队数量及任务状态
+- `/task concurrency <1-32>`：运行时调整后台 Worker 池并发；默认按 CPU 线程数的一半计算，也可通过 `AGENT_WORKER_CONCURRENCY` 配置
 - `/steer 新要求`：运行中排队补充要求；暂停后写入并从当前检查点继续
 - `/plan [on|off|plan|execute|verify|status]`：查看或切换执行阶段；规划阶段只提供只读工具
 - `/goal <目标>`：设置长时目标；`/goal status|note <证据>|done|drop` 管理证据与状态
@@ -243,7 +245,8 @@ contracts/
 v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
 自动验证默认开启（`AGENT_VERIFY_GATE=auto`）：本回合写入返回变更文件后，受控验证命令经 Sandbox 执行；缺少验证计划或 Sandbox 不可用时记录 skipped，不代表通过。`strict` 在 Sandbox 不可用时暂停；连续两次验证失败后均会暂停。此闭环依赖 Docker Sandbox 可用，自动验证也消耗单回合最多 24 次工具预算。
 失败解析目前依据 TAP、Jest、pytest、Go test 与 Cargo test 的文本形态；非标准/custom reporter 可能无法结构化，此时仍回传原有脱敏截断输出，不代表覆盖所有测试运行器。
-当前全量 `src/` 覆盖率实测为行 84.72%、函数 89.23%、分支 77.49%（19,878 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+后台子 Agent 使用异步 I/O Worker 池；并发默认 `max(1, floor(os.cpus().length / 2))`，允许 1–32 并可由 `AGENT_WORKER_CONCURRENCY` 或 `/task concurrency` 覆盖。同一显式 workspace key 在队列认领时互斥，缺省任务由 allocator 分配独立 Sandbox/Worktree。Docker 主机建议从并发 2–4 起步并按内存/CPU 配额调节；该建议不是压力测试结论。
+当前全量 `src/` 覆盖率实测为行 84.74%、函数 89.49%、分支 77.69%（20,028 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和

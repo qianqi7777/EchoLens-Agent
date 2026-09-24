@@ -44,6 +44,15 @@ export class SubagentBackgroundService {
     return this.queue.list();
   }
 
+  async workerStatus(): Promise<{ concurrency: number; running: number; pending: number }> {
+    const tasks = await this.queue.list();
+    return { ...this.worker.workerStatus, pending: tasks.filter((task) => task.state === 'pending').length };
+  }
+
+  setConcurrency(value: number): void {
+    this.worker.setConcurrency(value);
+  }
+
   cancel(taskId: string): Promise<BackgroundTaskRecord> {
     return this.worker.cancel(taskId);
   }

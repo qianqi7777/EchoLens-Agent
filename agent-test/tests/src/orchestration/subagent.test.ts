@@ -28,7 +28,7 @@ test('Explore 子 Agent 只看到白名单工具，父级只收到结构化摘�
     allocate: async (_workspaceRoot, mode) => {
       allocatedMode = mode;
       return {
-      id: 'lease', mode, root,
+      id: 'lease', mode, root, workspaceKey: root,
       changedFiles: async () => [], cleanup: async () => undefined,
     };
     },

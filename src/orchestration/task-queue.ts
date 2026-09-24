@@ -117,11 +117,25 @@ export class PersistentTaskQueue {
   // 认领即写入租约：Worker 需在租约期内持续 heartbeat，否则任务会被 recoverExpired 移交其他 Worker；
   // attempts 在认领时递增，用于重试计数与 release 时回退。
   async claim(workerId: string, leaseMs = 60_000): Promise<BackgroundTaskRecord | undefined> {
+    return this.claimNext(workerId, { leaseMs });
+  }
+
+  /** Atomically claims the first pending task whose workspace is not already active. */
+  async claimNext(
+    workerId: string,
+    options: { excludeWorkspaces?: readonly string[]; leaseMs?: number } = {},
+  ): Promise<BackgroundTaskRecord | undefined> {
     if (!workerId.trim()) throw new Error('workerId 不能为空');
+    const leaseMs = options.leaseMs ?? 60_000;
     boundedInteger(leaseMs, 1_000, 30 * 60_000, 'leaseMs');
     return this.serial(async () => {
       const file = await this.readUnlocked();
-      const task = file.tasks.find((item) => item.state === 'pending' && !item.cancellationRequested);
+      const unavailable = new Set(options.excludeWorkspaces ?? []);
+      for (const running of file.tasks) {
+        if (running.state === 'running') unavailable.add(workspaceKey(running));
+      }
+      const task = file.tasks.find((item) => item.state === 'pending' && !item.cancellationRequested
+        && !unavailable.has(workspaceKey(item)));
       if (!task) return undefined;
       const now = this.now();
       task.state = 'running';
@@ -266,6 +280,12 @@ export class PersistentTaskQueue {
       await rm(temporary, { force: true });
     }
   }
+}
+
+// 显式 workspaceKey 用于同一工作目录的互斥；未指定时每个任务有独立的隔离租约目录。
+function workspaceKey(task: BackgroundTaskRecord): string {
+  const declared = task.payload.metadata?.workspaceKey;
+  return typeof declared === 'string' && declared.trim() ? declared.trim() : `task:${task.id}`;
 }
 
 function requireWorker(task: BackgroundTaskRecord, workerId: string): void {

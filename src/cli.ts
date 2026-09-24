@@ -345,8 +345,10 @@ async function createCliWorkspaceRuntime(
     backgroundTasks = new SubagentBackgroundService(
       new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
       subagents,
-      (task) => {
-        const message = `后台任务：${formatBackgroundTask(task)}`;
+      async (task) => {
+        const status = await backgroundTasks?.workerStatus();
+        const worker = status ? `Worker ${status.running}/${status.concurrency} running，${status.pending} queued；` : '';
+        const message = `${worker}后台任务：${formatBackgroundTask(task)}`;
         const tui = options.getTui();
         if (tui) tui.notify(message);
         else output.write(`\n${message}\n`);
@@ -458,6 +460,8 @@ function backgroundTaskProxy(
     list: () => manager.currentRuntime().backgroundTasks.list(),
     cancel: (taskId) => manager.currentRuntime().backgroundTasks.cancel(taskId),
     resume: (taskId) => manager.currentRuntime().backgroundTasks.resume(taskId),
+    workerStatus: () => manager.currentRuntime().backgroundTasks.workerStatus(),
+    setConcurrency: (value) => manager.currentRuntime().backgroundTasks.setConcurrency(value),
   };
 }
 

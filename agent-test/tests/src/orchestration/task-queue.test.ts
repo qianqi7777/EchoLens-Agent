@@ -155,6 +155,30 @@ test('多个队列实例并发写入时不丢任务且不残留临时文件', as
   assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.tmp')), []);
 });
 
+test('claimNext atomically skips an active workspace but leaves its task pending', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-task-workspace-lock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  const sharedA = await queue.enqueue({ isolation: 'worktree', payload: {
+    profile: 'test', objective: 'same workspace A', metadata: { workspaceKey: 'worktree:/repo/a' },
+  } });
+  const sharedB = await queue.enqueue({ isolation: 'worktree', payload: {
+    profile: 'review', objective: 'same workspace B', metadata: { workspaceKey: 'worktree:/repo/a' },
+  } });
+  const other = await queue.enqueue({ isolation: 'sandbox', payload: {
+    profile: 'explore', objective: 'different workspace', metadata: { workspaceKey: 'sandbox:/repo/a' },
+  } });
+
+  const first = await queue.claimNext('worker-a');
+  assert.equal(first?.id, sharedA.id);
+  const second = await queue.claimNext('worker-b');
+  assert.equal(second?.id, other.id);
+  assert.equal((await queue.get(sharedB.id))?.state, 'pending');
+  await queue.complete(first!.id, 'worker-a', { summary: 'done', evidenceIds: [] });
+  const third = await queue.claimNext('worker-b');
+  assert.equal(third?.id, sharedB.id);
+});
+
 test('Worktree 分配使用独立 checkout，修改不影响原工作区并可清理', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-worktree-source-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -183,4 +207,20 @@ test('Worktree 分配使用独立 checkout，修改不影响原工作区并可�
   assert.equal(await readFile(join(root, 'draft.txt'), 'utf8'), 'untracked\n');
   await lease.cleanup();
   await assert.rejects(readFile(join(worktreeRoot, 'file.txt')));
+});
+
+test('Workspace allocator 为并行后台任务分配互不相同的根目录租约', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-workspace-lease-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'workspace.txt'), 'baseline\n');
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  const [first, second] = await Promise.all([
+    allocator.allocate(root, 'sandbox'),
+    allocator.allocate(root, 'sandbox'),
+  ]);
+  assert.ok(first.workspaceKey);
+  assert.ok(second.workspaceKey);
+  assert.notEqual(first.workspaceKey, second.workspaceKey);
+  assert.notEqual(first.root, second.root);
+  await Promise.all([first.cleanup(), second.cleanup()]);
 });

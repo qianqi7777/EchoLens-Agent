@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import type {
   BackgroundTaskRecord,
   BackgroundTaskResult,
@@ -18,6 +19,7 @@ export interface BackgroundWorkerOptions {
   workerId?: string;
   leaseMs?: number;
   pollMs?: number;
+  concurrency?: number;
   onStateChange?: (task: BackgroundTaskRecord) => void | Promise<void>;
   onError?: (error: unknown) => void | Promise<void>;
 }
@@ -26,7 +28,8 @@ export class BackgroundTaskWorker {
   readonly workerId: string;
   private readonly leaseMs: number;
   private readonly pollMs: number;
-  private readonly active = new Map<string, AbortController>();
+  private concurrency: number;
+  private readonly active = new Map<string, { controller: AbortController; workspaceKey: string; execution?: Promise<void> }>();
   private stopped = false;
   private loop?: Promise<void>;
 
@@ -38,6 +41,17 @@ export class BackgroundTaskWorker {
     this.workerId = options.workerId ?? `worker-${randomUUID()}`;
     this.leaseMs = options.leaseMs ?? 60_000;
     this.pollMs = options.pollMs ?? 500;
+    this.concurrency = options.concurrency ?? defaultConcurrency(process.env.AGENT_WORKER_CONCURRENCY);
+    validateConcurrency(this.concurrency);
+  }
+
+  get workerStatus(): { concurrency: number; running: number } {
+    return { concurrency: this.concurrency, running: this.active.size };
+  }
+
+  setConcurrency(value: number): void {
+    validateConcurrency(value);
+    this.concurrency = value;
   }
 
   async start(): Promise<void> {
@@ -50,30 +64,68 @@ export class BackgroundTaskWorker {
   // 停止：中止所有在跑任务并等待轮询循环收敛；被中止的 running 任务经 settleAborted 释放回 pending。
   async stop(): Promise<void> {
     this.stopped = true;
-    for (const controller of this.active.values()) controller.abort('worker_stopped');
+    for (const task of this.active.values()) task.controller.abort('worker_stopped');
     await this.loop;
+    await Promise.allSettled([...this.active.values()].flatMap((task) => task.execution ? [task.execution] : []));
     this.loop = undefined;
   }
 
   async cancel(taskId: string): Promise<BackgroundTaskRecord> {
     const task = await this.queue.cancel(taskId);
-    this.active.get(taskId)?.abort('task_cancelled');
+    this.active.get(taskId)?.controller.abort('task_cancelled');
     await this.notify(task);
     return task;
   }
 
   async runOnce(): Promise<boolean> {
-    const task = await this.queue.claim(this.workerId, this.leaseMs);
-    if (!task) return false;
-    await this.notify(task);
+    const started = await this.startNext();
+    if (!started) return false;
+    await started.execution;
+    return true;
+  }
+
+  private async startNext(): Promise<{ execution: Promise<void> } | undefined> {
+    if (this.active.size >= this.concurrency) return undefined;
+    const task = await this.queue.claimNext(this.workerId, {
+      leaseMs: this.leaseMs,
+      excludeWorkspaces: [...this.active.values()].map((item) => item.workspaceKey),
+    });
+    if (!task) return undefined;
+    if (this.stopped) {
+      await this.queue.release(task.id, this.workerId);
+      return undefined;
+    }
+    // Public runOnce callers may race each other outside the internal poll loop. Recheck
+    // capacity after the serialized queue claim and release excess claims without failure.
+    if (this.active.size >= this.concurrency) {
+      await this.queue.release(task.id, this.workerId);
+      return undefined;
+    }
     const controller = new AbortController();
-    this.active.set(task.id, controller);
-    // 租约约每 leaseMs/3 续租一次（下限 1s）：heartbeat 失败说明租约可能已过期或被其他 Worker 拿下，
-    // 立即 abort('lease_lost') 终止本 Worker 的继续执行，避免与接管的 Worker 重复执行同一任务。
-    const heartbeat = setInterval(() => {
-      void this.queue.heartbeat(task.id, this.workerId, this.leaseMs).catch(() => controller.abort('lease_lost'));
-    }, Math.max(1_000, Math.floor(this.leaseMs / 3)));
+    const activeTask: { controller: AbortController; workspaceKey: string; execution?: Promise<void> } = {
+      controller, workspaceKey: declaredWorkspaceKey(task),
+    };
+    this.active.set(task.id, activeTask);
+    const execution = this.executeClaimed(task, controller).catch(async (error) => {
+      await this.reportError(error);
+    });
+    activeTask.execution = execution;
+    return { execution };
+  }
+
+  private async executeClaimed(task: BackgroundTaskRecord, controller: AbortController): Promise<void> {
+    let heartbeat: NodeJS.Timeout | undefined;
     try {
+      await this.notify(task);
+      if (controller.signal.aborted) {
+        await this.notify(await this.settleAborted(task.id, controller.signal.reason));
+        return;
+      }
+      // 租约约每 leaseMs/3 续租一次（下限 1s）：heartbeat 失败说明租约可能已过期或被其他 Worker 拿下，
+      // 立即 abort('lease_lost') 终止本 Worker 的继续执行，避免与接管的 Worker 重复执行同一任务。
+      heartbeat = setInterval(() => {
+        void this.queue.heartbeat(task.id, this.workerId, this.leaseMs).catch(() => controller.abort('lease_lost'));
+      }, Math.max(1_000, Math.floor(this.leaseMs / 3)));
       const result = await this.executor.execute(task, controller.signal);
       let updated: BackgroundTaskRecord;
       if (controller.signal.aborted) updated = await this.settleAborted(task.id, controller.signal.reason);
@@ -88,17 +140,21 @@ export class BackgroundTaskWorker {
         : await this.queue.fail(task.id, this.workerId, errorCode(error), true);
       await this.notify(updated);
     } finally {
-      clearInterval(heartbeat);
+      if (heartbeat) clearInterval(heartbeat);
       this.active.delete(task.id);
     }
-    return true;
   }
 
-  // 单 Worker 轮询循环：一次只执行一个任务；执行出错仅上报后继续轮询，Worker 自身不因任务失败退出。
+  // 池内每个执行仍是独立异步任务；单次扫描只认领到 concurrency 上限，失败只影响当前任务。
   private async runLoop(): Promise<void> {
     while (!this.stopped) {
       try {
-        const worked = await this.runOnce();
+        let worked = false;
+        while (!this.stopped && this.active.size < this.concurrency) {
+          const started = await this.startNext();
+          if (!started) break;
+          worked = true;
+        }
         if (!worked) await delay(this.pollMs);
       } catch (error) {
         await this.reportError(error);
@@ -136,6 +192,25 @@ export class BackgroundTaskWorker {
       throw new Error(`后台任务不存在：${taskId}`);
     }
   }
+}
+
+function defaultConcurrency(value: string | undefined): number {
+  const fallback = Math.min(32, Math.max(1, Math.floor(os.cpus().length / 2)));
+  if (value === undefined || value.trim() === '') return fallback;
+  const parsed = Number(value);
+  validateConcurrency(parsed);
+  return parsed;
+}
+
+function validateConcurrency(value: number): void {
+  if (!Number.isInteger(value) || value < 1 || value > 32) {
+    throw new Error('Worker concurrency 必须是 1 到 32 的整数');
+  }
+}
+
+function declaredWorkspaceKey(task: BackgroundTaskRecord): string {
+  const key = task.payload.metadata?.workspaceKey;
+  return typeof key === 'string' && key.trim() ? key.trim() : `task:${task.id}`;
 }
 
 function delay(ms: number): Promise<void> {
