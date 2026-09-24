@@ -231,6 +231,18 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
     return this.routeEvents.splice(0, this.routeEvents.length);
   }
 
+  /** 按当前已锁定 Profile 的公开单价估算一次任务用量；缺任一单价时保留 unknown。 */
+  estimateUsageCost(usage: { inputTokens: number; outputTokens: number }): { amount: number; currency: string } | { unknown: true } {
+    if (this.active.estimatedInputCostPer1k === undefined || this.active.estimatedOutputCostPer1k === undefined) {
+      return { unknown: true };
+    }
+    return {
+      amount: usage.inputTokens / 1_000 * this.active.estimatedInputCostPer1k
+        + usage.outputTokens / 1_000 * this.active.estimatedOutputCostPer1k,
+      currency: 'USD',
+    };
+  }
+
   async complete(request: ProviderRequest): Promise<ProviderResult> {
     while (true) {
       try {

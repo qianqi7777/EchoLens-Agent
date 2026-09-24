@@ -49,6 +49,10 @@ test('Explore 子 Agent 只看到白名单工具，父级只收到结构化摘�
   assert.equal(allocatedMode, 'worktree');
   assert.equal(result.summary, 'explored');
   assert.deepEqual(result.changedFiles, []);
+  assert.deepEqual(result.usage, {
+    inputTokens: 20, outputTokens: 10, cachedTokens: 0, modelSteps: 2, toolCalls: 1,
+  });
+  assert.deepEqual(result.estimatedCost, { unknown: true });
   assert.equal('items' in result, false);
 });
 

@@ -8,6 +8,7 @@
     "agent-test/tests/src/credentials/gateway-token-store.test.ts",
     "agent-test/tests/src/evals/dynamic-metrics.test.ts",
     "agent-test/tests/src/orchestration/task-command.test.ts",
+    "agent-test/tests/src/orchestration/task-usage.test.ts",
     "agent-test/tests/src/orchestration/command-hooks.test.ts",
     "agent-test/tests/src/orchestration/task-queue.test.ts",
     "agent-test/tests/src/orchestration/worker-pool.test.ts",

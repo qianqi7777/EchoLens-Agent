@@ -28,7 +28,21 @@ export interface BackgroundTaskResult {
   summary: string;
   evidenceIds: string[];
   data?: unknown;
+  usage?: BackgroundTaskUsage;
+  estimatedCost?: BackgroundTaskEstimatedCost;
 }
+
+export interface BackgroundTaskUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens?: number;
+  modelSteps: number;
+  toolCalls: number;
+}
+
+export type BackgroundTaskEstimatedCost =
+  | { amount: number; currency: string }
+  | { unknown: true };
 
 export interface BackgroundTaskRecord {
   schemaVersion: 1;
@@ -45,6 +59,8 @@ export interface BackgroundTaskRecord {
   cancellationRequested?: boolean;
   waitingReason?: string;
   errorCode?: string;
+  usage?: BackgroundTaskUsage;
+  estimatedCost?: BackgroundTaskEstimatedCost;
   result?: BackgroundTaskResult;
 }
 
@@ -160,6 +176,8 @@ export class PersistentTaskQueue {
       requireWorker(task, workerId);
       task.state = task.cancellationRequested ? 'cancelled' : 'completed';
       task.result = task.cancellationRequested ? undefined : sanitizeResult(result);
+      task.usage = task.result?.usage ? { ...task.result.usage } : undefined;
+      task.estimatedCost = task.result?.estimatedCost ? { ...task.result.estimatedCost } : undefined;
       clearLease(task);
     });
   }
@@ -170,6 +188,8 @@ export class PersistentTaskQueue {
       task.state = 'waiting_approval';
       task.waitingReason = reason.slice(0, 500);
       task.result = result ? sanitizeResult(result) : undefined;
+      task.usage = task.result?.usage ? { ...task.result.usage } : undefined;
+      task.estimatedCost = task.result?.estimatedCost ? { ...task.result.estimatedCost } : undefined;
       clearLease(task);
     });
   }
@@ -328,6 +348,8 @@ function sanitizeResult(result: BackgroundTaskResult): BackgroundTaskResult {
       .slice(0, 1_000)
       .map((item) => item.slice(0, 1_000)),
     data: result.data,
+    usage: result.usage ? { ...result.usage } : undefined,
+    estimatedCost: result.estimatedCost ? { ...result.estimatedCost } : undefined,
   };
 }
 
@@ -358,6 +380,8 @@ function isTaskRecord(value: unknown): value is BackgroundTaskRecord {
   if (task.cancellationRequested !== undefined && typeof task.cancellationRequested !== 'boolean') return false;
   if (task.waitingReason !== undefined && (typeof task.waitingReason !== 'string' || task.waitingReason.length > 500)) return false;
   if (task.errorCode !== undefined && (typeof task.errorCode !== 'string' || task.errorCode.length > 128)) return false;
+  if (task.usage !== undefined && !isTaskUsage(task.usage)) return false;
+  if (task.estimatedCost !== undefined && !isEstimatedCost(task.estimatedCost)) return false;
   return task.result === undefined || isTaskResult(task.result);
 }
 
@@ -378,7 +402,31 @@ function isTaskResult(value: unknown): value is BackgroundTaskResult {
   const result = value as Partial<BackgroundTaskResult>;
   return typeof result.summary === 'string' && result.summary.length <= 20_000
     && Array.isArray(result.evidenceIds) && result.evidenceIds.length <= 1_000
-    && result.evidenceIds.every((item) => typeof item === 'string' && item.length <= 1_000);
+    && result.evidenceIds.every((item) => typeof item === 'string' && item.length <= 1_000)
+    && (result.usage === undefined || isTaskUsage(result.usage))
+    && (result.estimatedCost === undefined || isEstimatedCost(result.estimatedCost));
+}
+
+function isTaskUsage(value: unknown): value is BackgroundTaskUsage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const usage = value as Partial<BackgroundTaskUsage>;
+  return nonNegativeInteger(usage.inputTokens)
+    && nonNegativeInteger(usage.outputTokens)
+    && (usage.cachedTokens === undefined || nonNegativeInteger(usage.cachedTokens))
+    && nonNegativeInteger(usage.modelSteps)
+    && nonNegativeInteger(usage.toolCalls);
+}
+
+function isEstimatedCost(value: unknown): value is BackgroundTaskEstimatedCost {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const cost = value as Record<string, unknown>;
+  if (cost.unknown === true) return true;
+  return typeof cost.amount === 'number' && Number.isFinite(cost.amount) && cost.amount >= 0
+    && typeof cost.currency === 'string' && cost.currency.length > 0 && cost.currency.length <= 16;
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
 
 function validDate(value: unknown): value is string {

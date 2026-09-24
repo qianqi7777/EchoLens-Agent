@@ -42,7 +42,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/skill', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -59,7 +59,7 @@ export async function executeServiceCommand(
     case '/pwd': case '/cd': case '/workspace':
       if (!services.workspaceCommands) throw new Error('工作目录切换服务不可用。');
       return executeWorkspaceCommand(input, services.workspaceCommands);
-    case '/tasks': case '/task':
+    case '/tasks': case '/usage': case '/task':
       if (!services.backgroundTasks) throw new Error('后台任务服务不可用。');
       return executeBackgroundTaskCommand(input, services.backgroundTasks);
     case '/sessions': case '/session':

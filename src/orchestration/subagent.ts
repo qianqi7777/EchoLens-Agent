@@ -15,7 +15,7 @@ import { toolSuccess } from '../runtime/tool-result.js';
 import { ToolExecutor } from '../runtime/tool-executor.js';
 import { ToolRegistry } from '../runtime/tool-registry.js';
 import type { Permission, ToolContext, ToolSpec } from '../runtime/types.js';
-import type { BackgroundTaskIsolation } from './task-queue.js';
+import type { BackgroundTaskEstimatedCost, BackgroundTaskIsolation, BackgroundTaskUsage } from './task-queue.js';
 import {
   DefaultTaskWorkspaceAllocator,
   type TaskWorkspaceAllocator,
@@ -50,7 +50,10 @@ export interface SubagentResult {
   tests: Array<{ command: string; status: string; summary: string }>;
   unresolved: string[];
   evidenceIds: string[];
-  metrics: { modelSteps: number; toolCalls: number; inputTokens: number; outputTokens: number };
+  usage: BackgroundTaskUsage;
+  estimatedCost: BackgroundTaskEstimatedCost;
+  // 保留 metrics 作为既有调用方的兼容别名；新代码应读取 usage。
+  metrics: BackgroundTaskUsage;
 }
 
 export interface SubagentRegistryLease {
@@ -136,6 +139,7 @@ export class SubagentOrchestrator {
       // 仅 worktree 才回传改动文件；sandbox 是随清理丢弃的暂存副本，变更不映射回主工作区。
       const changedFiles = workspaceMode === 'worktree' ? await lease.changedFiles() : [];
       const summary = result.finalSummary.verified ? result.finalSummary.value : undefined;
+      const usage = metrics(events);
       return {
         schemaVersion: 1,
         profile: profileDefinition.id,
@@ -150,7 +154,9 @@ export class SubagentOrchestrator {
         })) ?? [],
         unresolved: summary?.unresolved ?? (result.degraded ? ['子 Agent 未正常完成'] : []),
         evidenceIds: evidenceIds(result.items),
-        metrics: metrics(events),
+        usage,
+        estimatedCost: estimateCost(taskModel, usage),
+        metrics: usage,
       };
     } finally {
       await registryLease?.close().catch(() => undefined);
@@ -277,18 +283,31 @@ function evidenceIds(items: readonly { type: string; evidenceIds?: string[] }[])
   return [...new Set(items.flatMap((item) => item.type === 'tool_result' ? item.evidenceIds ?? [] : []))];
 }
 
-function metrics(events: readonly AgentEvent[]): SubagentResult['metrics'] {
+function metrics(events: readonly AgentEvent[]): BackgroundTaskUsage {
   let inputTokens = 0;
   let outputTokens = 0;
+  let cachedTokens = 0;
   for (const event of events) {
     if (event.payload.type !== 'usage.recorded') continue;
     inputTokens += event.payload.usage.inputTokens;
     outputTokens += event.payload.usage.outputTokens;
+    cachedTokens += event.payload.usage.cachedInputTokens ?? event.payload.cachedReadTokens ?? 0;
   }
   return {
     modelSteps: events.filter((event) => event.payload.type === 'model.started').length,
     toolCalls: events.filter((event) => event.payload.type === 'tool.completed').length,
     inputTokens,
     outputTokens,
+    cachedTokens,
   };
+}
+
+function estimateCost(
+  model: ModelProvider,
+  usage: BackgroundTaskUsage,
+): BackgroundTaskEstimatedCost {
+  const estimator = model as ModelProvider & {
+    estimateUsageCost?: (value: Pick<BackgroundTaskUsage, 'inputTokens' | 'outputTokens'>) => BackgroundTaskEstimatedCost;
+  };
+  return estimator.estimateUsageCost?.(usage) ?? { unknown: true };
 }

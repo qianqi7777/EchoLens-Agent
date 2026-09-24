@@ -456,7 +456,10 @@ function backgroundTaskProxy(
   manager: WorkspaceRuntimeManager<CliWorkspaceRuntime>,
 ): BackgroundTaskCommands {
   return {
-    enqueue: (profile, objective, isolation) => manager.currentRuntime().backgroundTasks.enqueue(profile, objective, isolation),
+    enqueue: (profile, objective, isolation) => {
+      const runtime = manager.currentRuntime();
+      return runtime.backgroundTasks.enqueue(profile, objective, isolation, { sessionId: runtime.sessionId });
+    },
     list: () => manager.currentRuntime().backgroundTasks.list(),
     cancel: (taskId) => manager.currentRuntime().backgroundTasks.cancel(taskId),
     resume: (taskId) => manager.currentRuntime().backgroundTasks.resume(taskId),

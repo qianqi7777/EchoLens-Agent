@@ -34,8 +34,13 @@ export class SubagentBackgroundService {
   }
 
   // 入队或恢复后必须唤醒 Worker 轮询，否则任务会停留在 pending 无人认领。
-  async enqueue(profile: string, objective: string, isolation: BackgroundTaskIsolation = 'sandbox'): Promise<BackgroundTaskRecord> {
-    const task = await this.queue.enqueue({ isolation, payload: { profile, objective } });
+  async enqueue(
+    profile: string,
+    objective: string,
+    isolation: BackgroundTaskIsolation = 'sandbox',
+    metadata?: Record<string, string | number | boolean | null>,
+  ): Promise<BackgroundTaskRecord> {
+    const task = await this.queue.enqueue({ isolation, payload: { profile, objective, metadata } });
     await this.worker.start();
     return task;
   }
@@ -74,6 +79,8 @@ function taskResult(result: SubagentResult) {
   return {
     summary: result.summary,
     evidenceIds: result.evidenceIds,
+    usage: result.usage,
+    estimatedCost: result.estimatedCost,
     data: { subagent: result },
   };
 }

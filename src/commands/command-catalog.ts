@@ -124,6 +124,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     source: 'builtin',
   },
   {
+    name: '/usage',
+    description: '汇总后台任务的 token、步骤、工具调用和估算成本',
+    usage: '/usage [session-id]',
+    category: 'task',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
     name: '/task',
     description: '创建、取消或恢复后台任务，或调整 Worker 并发',
     usage: '/task <explore|test|review|cancel|resume|concurrency>',
