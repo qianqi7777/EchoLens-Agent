@@ -150,6 +150,11 @@ export class SessionRuntime {
     this.steeringQueue.push(normalized);
   }
 
+  async pause(): Promise<void> {
+    if (!this.activeTurnId) throw new Error('当前没有运行中的 Turn');
+    this.agent.requestPause();
+  }
+
   conversation(): ConversationItem[] {
     return structuredClone(this.history);
   }

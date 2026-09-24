@@ -133,6 +133,7 @@ export class ReactAgent {
   private readonly contextManager: ContextManager;
   private readonly toolScheduler: ToolScheduler;
   private readonly navigationResolver: NavigationResolver;
+  private pauseRequested = false;
 
   constructor(
     private readonly model: ModelProvider,
@@ -148,6 +149,11 @@ export class ReactAgent {
     this.navigationResolver = options.navigationResolver ?? navigationResolverFor(options.workspaceRoot);
   }
 
+  /** 请求在当前工具批次完成后、下一次模型调用前暂停，不打断在途工具。 */
+  requestPause(): void {
+    this.pauseRequested = true;
+  }
+
   /**
    * 发起一轮新对话。
    *
@@ -160,6 +166,7 @@ export class ReactAgent {
     signal?: AbortSignal,
     runtime: AgentRunRuntime = {},
   ): Promise<AgentRunResult> {
+    this.pauseRequested = false;
     if (isModelProviderRunLifecycle(this.model)) await this.model.beginRun(userMessage);
     const sessionId = runtime.sessionId ?? randomUUID();
     const turnId = runtime.turnId ?? randomUUID();
@@ -221,6 +228,7 @@ export class ReactAgent {
     signal?: AbortSignal,
     runtime: AgentRunRuntime = {},
   ): Promise<AgentRunResult> {
+    this.pauseRequested = false;
     if (isModelProviderRunLifecycle(this.model)) await this.model.beginResume(checkpoint.routing);
     if (runtime.sessionId && runtime.sessionId !== checkpoint.sessionId) {
       throw new Error('Checkpoint 不属于当前 Session');
@@ -298,10 +306,18 @@ export class ReactAgent {
         machine.phase = 'model';
         machine.step += 1;
         await this.saveCheckpoint(machine, eventSink);
+        if (this.pauseRequested) {
+          this.pauseRequested = false;
+          return this.pause(machine, eventSink, 'user_paused');
+        }
         continue;
       }
 
       await this.applySteering(machine, itemId, eventSink);
+      if (this.pauseRequested) {
+        this.pauseRequested = false;
+        return this.pause(machine, eventSink, 'user_paused');
+      }
 
       // 首轮强制只读只持续到首次工具结果。成功结果可作为证据；失败结果也必须交还模型解释或
       // 修正，不能再次强制工具调用并覆盖 permission_denied 等确定性结论。
@@ -878,7 +894,7 @@ export class ReactAgent {
   private async pause(
     machine: RunMachine,
     eventSink: AgentEventSink | undefined,
-    reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed',
+    reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed' | 'user_paused',
   ): Promise<AgentRunResult> {
     const checkpoint = await this.saveCheckpoint(machine, eventSink, 'paused');
     await emit(machine, eventSink, { payload: { type: 'run.paused', reason } });

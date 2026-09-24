@@ -139,7 +139,7 @@ export type AgentEventPayload =
   | { type: 'goal.closed'; goalId: string; status: 'met' | 'dropped' }
   | { type: 'usage.recorded'; model: string; usage: TokenUsage; cachedReadTokens?: number }
   | { type: 'run.completed'; answer: string; degraded: boolean }
-  | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed' }
+  | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed' | 'user_paused' }
   | { type: 'run.cancelled'; reason: string }
   | { type: 'run.failed'; code: string; retryable: boolean };
 

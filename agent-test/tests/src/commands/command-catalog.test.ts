@@ -21,7 +21,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/diff', '/steer', '/clear', '/help', '/exit'],
+    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/pause', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/diff', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
@@ -47,7 +47,7 @@ test('主名称优先，别名、界面和依赖能力独立处理', () => {
   const names = getCommandCatalog({ ...context, workspaceAvailable: false, interface: 'line' }).map((item) => item.name);
   assert.ok(names.includes('/verify') && names.includes('/rollback'));
   assert.ok(!names.includes('/clear') && !names.includes('/cd'));
-  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/plan', '/goal', '/steer']);
+  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/plan', '/goal', '/pause', '/steer']);
   assert.ok(getCommandCatalog({ ...context, sessionDeletionAvailable: true }).some((item) => item.name === '/session'));
 });
 
@@ -211,4 +211,19 @@ test('/rollback 支持按文件恢复和按检查点索引回退', async () => {
     ['已回滚 checkpoint=c1，恢复 1 个文件']);
   assert.match((await executeServiceCommand('/rollback --to 0', services, session)).lines[0] ?? '', /checkpoint\[0\]/u);
   assert.match((await executeServiceCommand('/rollback --to bad', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/pause 委托暂停服务并拒绝参数', async () => {
+  let paused = 0;
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    pause: async () => { paused += 1; },
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/pause', services, session)).lines,
+    ['已请求暂停，将在当前工具批次完成后暂停。']);
+  assert.equal(paused, 1);
+  assert.match((await executeServiceCommand('/pause now', services, session)).lines[0] ?? '', /用法/u);
 });

@@ -99,6 +99,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     source: 'builtin',
   },
   {
+    name: '/pause',
+    description: '在当前工具批次完成后安全暂停 Turn',
+    usage: '/pause',
+    category: 'session',
+    acceptsArguments: false,
+    availableDuringTask: true,
+    source: 'builtin',
+  },
+  {
     name: '/sessions',
     description: '列出当前工作目录的历史 Session',
     category: 'session',

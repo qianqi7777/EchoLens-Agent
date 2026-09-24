@@ -25,6 +25,7 @@ export interface CommandServices {
   restoreFiles?(checkpoint: EditCheckpoint, paths: readonly string[]): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   rollbackTo?(index: number): Promise<RollbackToResult>;
   listCheckpoints?(): Promise<readonly string[]>;
+  pause?(): Promise<void>;
   loadCheckpoint(id: string): Promise<EditCheckpoint>;
   diff?(turnId?: string): Promise<ChangeSet | undefined>;
   backgroundTasks?: BackgroundTaskCommands;
@@ -47,7 +48,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/diff', '/skill', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/diff', '/pause', '/skill', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -79,6 +80,12 @@ export async function executeServiceCommand(
       ];
       return { handled: true, lines, changeSet };
     }
+    case '/pause':
+      if (args.length > 0) return { handled: true, lines: ['用法：/pause'] };
+      if (!services.pause) throw new Error('暂停服务不可用。');
+      await services.pause();
+      lines = ['已请求暂停，将在当前工具批次完成后暂停。'];
+      break;
     case '/sessions': case '/session':
       lines = await executeSessionCommand(input, {
         ...session, list: services.listSessions,

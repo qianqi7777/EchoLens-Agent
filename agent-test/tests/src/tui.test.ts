@@ -15,7 +15,7 @@ function createUi(overrides: Partial<TuiOptions> = {}) {
     model: 'mock', route: 'local', sessionId: 'active', workspaceRoot: process.cwd(),
     run: async () => result, resume: async () => result, steer: async () => undefined,
     listSessions: async () => [{ sessionId: 'old', modifiedAt: 'date', bytes: 1 }],
-    verify: async () => [], rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    verify: async () => [], rollback: async () => ({ restoredPaths: [], skippedPaths: [] }), pause: async () => undefined,
     loadCheckpoint: async () => { throw new Error('not found'); },
     ...overrides,
   });
@@ -128,7 +128,7 @@ test('TUI 运行中 steering 不并发启动 Turn，暂停后 steering 会恢复
   key(ui, 'start');
   key(ui, '', { return: true });
   assert.equal(ui['store'].get().busy, true);
-  assert.deepEqual(ui.commandMenu('/').items.map((item) => item.name), ['/steer']);
+  assert.deepEqual(ui.commandMenu('/').items.map((item) => item.name), ['/pause', '/steer']);
   key(ui, '/steer new direction');
   key(ui, '', { return: true });
   await delay(5);

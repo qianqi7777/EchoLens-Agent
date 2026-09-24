@@ -16,6 +16,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 执行 `list_files`、`read_file`、`grep`、`workspace_search` 只读工具
 - 使用带跨进程锁的单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
+- 支持 `/pause` 在工具批次完成后的安全点暂停，重启后用 `/resume` 继续且不重复执行已完成工具
 - 支持在 TUI/行模式中查看和切换工作目录，并为目标目录重建隔离的 Session 与运行时资源
 - TUI 支持输入 `/` 打开命令候选菜单，按说明过滤并用方向键、Tab、Enter、Esc 操作
 - 分层加载 `AGENTS.md`，项目规则只能收紧权限，不能提升到 System
@@ -253,7 +254,8 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 后台任务用量按子 Agent 实际收到的 usage 事件累计；成本只复用已配置模型 Profile 的公开单价，任一单价缺失会记录并展示 `unknown`，不会把未知成本当作 0。CLI 入队时自动写入当前 Session ID；未提供该 metadata 的历史或外部入队任务归入 `unknown`。
 任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
 按索引回退使用当前工作区检查点目录中按 `createdAt` 排序的检查点，索引从 0 开始；中途失败会停止并报告已处理范围，不提供跨工作区或强制覆盖用户后续修改的回退。
-当前全量 `src/` 覆盖率实测为行 84.91%、函数 89.63%、分支 77.57%（20,574 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+手动暂停只在工具批次完成后、下一次模型调用前生效；模型请求或工具执行中不会被硬中断。命令行非交互执行不能在已阻塞的同步输入期间注入 `/pause`，TUI 支持运行中输入该命令。
+当前全量 `src/` 覆盖率实测为行 84.92%、函数 89.65%、分支 77.60%（20,612 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和

@@ -119,6 +119,7 @@ if (!connectedModel) {
       return rollbackTo(items.map((item) => item.checkpoint), index);
     },
     listCheckpoints: () => listEditCheckpoints(manager.currentRuntime().workspaceRoot).then((items) => items.map((item) => item.id)),
+    pause: () => manager.currentRuntime().session.pause(),
     loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
     diff: (turnId) => manager.currentRuntime().session.changeSet(turnId),
     backgroundTasks,
