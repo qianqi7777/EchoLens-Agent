@@ -15,6 +15,7 @@ import { ChatCompletionsCodec } from '../../../../src/providers/openai-compatibl
 import { ResponsesCodec } from '../../../../src/providers/openai-compatible/responses-codec.js';
 import { ContextManager } from '../../../../src/context/context-manager.js';
 import { InstructionLoader } from '../../../../src/context/instruction-loader.js';
+import { SkillLoader } from '../../../../src/skills/loader.js';
 
 const granted = new Set<Permission>([
   'workspace.read',
@@ -105,6 +106,22 @@ test('Context Manager 保持稳定前缀并用仓库规则收紧权限', async (
   assert.deepEqual(first.items.slice(0, 2).map((item) => item.id), second.items.slice(0, 2).map((item) => item.id));
   assert.equal(first.items[0]?.type === 'message' && first.items[0].role === 'system', true);
   assert.equal(first.items[1]?.type === 'message' && first.items[1].role === 'user', true);
+});
+
+test('Context Manager 在 System Policy 后注入有预算的 Skill catalog', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-context-skills-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, '.echolens', 'skills', 'code-search');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'SKILL.md'), '---\nname: code-search\ndescription: search source when investigating a code question\n---\n# Search\n');
+  const skillLoader = new SkillLoader({ workspaceRoot: root, userSkillRoot: join(root, 'missing-user'), builtinSkillRoot: join(root, 'missing-builtin') });
+  const manager = new ContextManager({ workspaceRoot: root, skillLoader, skillCatalogBudgetTokens: 64 });
+  const built = await manager.build([systemPolicyMessage(), textMessage('user', 'user', 'search source')], {
+    privacy: 'full-context', providerMaxContextTokens: 8_192, runtimePermissions: granted,
+  });
+  assert.equal(built.items[0]?.type === 'message' && built.items[0].role === 'system', true);
+  assert.equal(built.items[1]?.type === 'message' && built.items[1].content[0]?.text.includes('code-search'), true);
+  assert.equal(JSON.stringify(built.items).includes('# Search'), false);
 });
 
 test('evidence 与 metadata 投影不发送原始工具内容', async (context) => {

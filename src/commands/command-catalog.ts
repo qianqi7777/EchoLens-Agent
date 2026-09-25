@@ -19,6 +19,7 @@ export interface CommandCatalogContext {
   interface?: 'tui' | 'line';
   sessionDeletionAvailable?: boolean;
   skillImportAvailable?: boolean;
+  skillsAvailable?: boolean;
   modelRoutingAvailable?: boolean;
   hooksAvailable?: boolean;
   verificationAvailable?: boolean;
@@ -65,10 +66,18 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
   },
   {
     name: '/skill',
-    description: '导入本地 Skill 包',
-    usage: '/skill import <path>',
+    description: '加载指定 Skill 或导入本地 Skill 包',
+    usage: '/skill <name> | /skill import <path>',
     category: 'skill',
     acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
+    name: '/skills',
+    description: '列出当前可用的 Agent Skills',
+    category: 'skill',
+    acceptsArguments: false,
     availableDuringTask: false,
     source: 'builtin',
   },
@@ -217,6 +226,7 @@ export function getCommandCatalog(context: CommandCatalogContext): CommandDescri
   return BUILTIN_COMMANDS.filter((command) => {
     if (!context.workspaceAvailable && ['/pwd', '/cd'].includes(command.name)) return false;
     if (command.name === '/skill' && !context.skillImportAvailable) return false;
+    if (command.name === '/skills' && !context.skillsAvailable) return false;
     if (command.name === '/model' && context.modelRoutingAvailable === false) return false;
     if (command.name === '/plan' && context.modelRoutingAvailable === false) return false;
     if (command.name === '/goal' && context.goalAvailable === false) return false;

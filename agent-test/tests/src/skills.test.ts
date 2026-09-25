@@ -6,9 +6,9 @@ import test from 'node:test';
 import { SkillManager, parseManifest } from '../../../src/skills/skill-manager.js';
 test('导入 Skill 包并解析 front matter', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-skill-')); context.after(() => rm(root, { recursive: true, force: true }));
-  const source = join(root, 'my-skill'); await mkdir(source); await writeFile(join(source, 'SKILL.md'), '---\nname: Review Helper\ndescription: review code\n---\n# Rules\n'); await writeFile(join(source, 'extra.txt'), 'ok');
+  const source = join(root, 'my-skill'); await mkdir(source); await writeFile(join(source, 'SKILL.md'), '---\nname: my-skill\ndescription: review code when reviewing a pull request\n---\n# Rules\n'); await writeFile(join(source, 'extra.txt'), 'ok');
   const imported = await new SkillManager({ workspaceRoot: root }).import(source);
-  assert.equal(imported.name, 'review-helper'); assert.equal(await readFile(join(root, '.echolens', 'skills', 'review-helper', 'extra.txt'), 'utf8'), 'ok');
+  assert.equal(imported.name, 'my-skill'); assert.equal(await readFile(join(root, '.echolens', 'skills', 'my-skill', 'extra.txt'), 'utf8'), 'ok');
 });
 test('Skill 导入拒绝缺少入口和超大入口', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-skill-')); context.after(() => rm(root, { recursive: true, force: true }));

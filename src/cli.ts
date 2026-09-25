@@ -29,6 +29,7 @@ import { formatBackgroundTask, type BackgroundTaskCommands } from './orchestrati
 import { resolveWorkspaceDirectory, WorkspaceRuntimeManager, type ManagedWorkspaceRuntime, type WorkspaceCommandService } from './runtime/workspace-manager.js';
 import { isModelProviderRunLifecycle, type ModelProvider } from './providers/types.js';
 import { SkillManager } from './skills/skill-manager.js';
+import { SkillLoader } from './skills/loader.js';
 import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
 import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
@@ -125,6 +126,8 @@ if (!connectedModel) {
     backgroundTasks,
     workspaceCommands,
       importSkill: (source) => new SkillManager({ workspaceRoot: manager.currentRuntime().workspaceRoot }).import(source),
+      listSkills: async () => (await new SkillLoader({ workspaceRoot: manager.currentRuntime().workspaceRoot }).catalog()).entries,
+      loadSkill: (name) => new SkillLoader({ workspaceRoot: manager.currentRuntime().workspaceRoot }).load(name),
       modelRouting: {
         configure: (mode, phase) => manager.currentRuntime().session.configureModelRouting(mode, phase),
         status: () => manager.currentRuntime().session.modelRoutingStatus(),
@@ -214,7 +217,7 @@ if (!connectedModel) {
         let prompt = (await lineTerminal!.question('\n> ')).trim();
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
-          sessionDeletionAvailable: true, skillImportAvailable: true, modelRoutingAvailable: true,
+          sessionDeletionAvailable: true, skillImportAvailable: true, skillsAvailable: true, modelRoutingAvailable: true,
           hooksAvailable: true, goalAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }

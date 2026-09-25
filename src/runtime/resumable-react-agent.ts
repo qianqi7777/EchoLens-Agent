@@ -60,6 +60,7 @@ import type { NavigationHint } from '../navigation/types.js';
 import type { AgentGoal } from './goal.js';
 import type { ExecutionPhase } from './model-routing.js';
 import { selectVerificationPlan, type EditVerificationResult } from './verification.js';
+import { SkillLoader } from '../skills/loader.js';
 
 /**
  * 一次 run/resume 的完整结果。
@@ -105,6 +106,7 @@ export interface ReactAgentOptions {
   navigationMode?: 'auto' | 'off';
   navigationResolver?: NavigationResolver;
   verificationGate?: 'off' | 'auto' | 'strict';
+  skillLoader?: SkillLoader;
 }
 
 interface RunMachine {
@@ -144,6 +146,11 @@ export class ReactAgent {
     this.contextManager = options.contextManager ?? new ContextManager({
       workspaceRoot: options.workspaceRoot,
       maxHistoryTurns: options.maxHistoryTurns,
+      skillLoader: options.skillLoader ?? new SkillLoader({
+        workspaceRoot: options.workspaceRoot,
+        toolRegistry: registry,
+        allowedPermissions: options.permissions,
+      }),
     });
     this.toolScheduler = options.toolScheduler ?? new ToolScheduler();
     this.navigationResolver = options.navigationResolver ?? navigationResolverFor(options.workspaceRoot);

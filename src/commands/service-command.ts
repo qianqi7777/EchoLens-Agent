@@ -4,6 +4,7 @@ import { executeWorkspaceCommand, type WorkspaceCommandService, type WorkspaceCo
 import type { EditCheckpoint, RollbackToResult } from '../runtime/structured-patch.js';
 import type { EditVerificationResult } from '../runtime/verification.js';
 import type { ImportedSkill } from '../skills/skill-manager.js';
+import type { LoadedSkill, SkillCatalogEntry } from '../skills/loader.js';
 import type { HookStatus } from '../orchestration/command-hooks.js';
 import type { AgentGoal } from '../runtime/goal.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
@@ -31,6 +32,8 @@ export interface CommandServices {
   backgroundTasks?: BackgroundTaskCommands;
   workspaceCommands?: WorkspaceCommandService;
   importSkill?(source: string): Promise<ImportedSkill>;
+  listSkills?(): Promise<SkillCatalogEntry[]>;
+  loadSkill?(name: string): Promise<LoadedSkill>;
   modelRouting?: {
     configure(mode?: string, phase?: string): Promise<string[]>;
     status(): string[];
@@ -48,7 +51,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/diff', '/pause', '/skill', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/diff', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -86,6 +89,13 @@ export async function executeServiceCommand(
       await services.pause();
       lines = ['已请求暂停，将在当前工具批次完成后暂停。'];
       break;
+    case '/skills': {
+      if (args.length > 0) return { handled: true, lines: ['用法：/skills'] };
+      if (!services.listSkills) throw new Error('Skill 列表服务不可用');
+      const skills = await services.listSkills();
+      lines = skills.length ? skills.map((skill) => `${skill.name} [${skill.source}]：${skill.description}`) : ['当前没有可用 Skill'];
+      break;
+    }
     case '/sessions': case '/session':
       lines = await executeSessionCommand(input, {
         ...session, list: services.listSessions,
@@ -121,12 +131,18 @@ export async function executeServiceCommand(
     }
     case '/skill': {
       const match = /^\/skill\s+import\s+(.+)$/u.exec(input);
-      if (!match) return { handled: true, lines: ['用法：/skill import <path>'] };
-      if (!services.importSkill) throw new Error('Skill 导入服务不可用');
-      const raw = match[1]!.trim();
-      const source = /^(".*"|'.*')$/u.test(raw) ? raw.slice(1, -1) : raw;
-      const result = await services.importSkill(source);
-      lines = [`已导入 Skill：${result.name} -> ${result.destinationPath}`];
+      if (match) {
+        if (!services.importSkill) throw new Error('Skill 导入服务不可用');
+        const raw = match[1]!.trim();
+        const source = /^(".*"|'.*')$/u.test(raw) ? raw.slice(1, -1) : raw;
+        const result = await services.importSkill(source);
+        lines = [`已导入 Skill：${result.name} -> ${result.destinationPath}`];
+        break;
+      }
+      const name = args[0];
+      if (!name || args.length !== 1 || !services.loadSkill) return { handled: true, lines: ['用法：/skill <name> 或 /skill import <path>'] };
+      const result = await services.loadSkill(name);
+      lines = [`Skill：${result.name}`, result.description, result.body];
       break;
     }
     case '/model': {

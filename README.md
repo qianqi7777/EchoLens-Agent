@@ -48,6 +48,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - TypeScript 启用未使用代码、数组越界、隐式返回、Switch 穿透和 Override 等额外静态检查
 - 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
 - 支持用户级与项目级可执行命令 Hook；项目 Hook 按配置和脚本内容指纹显式信任
+- 支持按 Agent Skills 开放规范发现、校验和渐进式加载 Skill catalog；`/skills` 列表与 `/skill <name>` 手动查看可用 Skill
 
 ## 快速开始
 
@@ -200,7 +201,7 @@ npm run audit
 
 测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
 由 `package.json` 和 `.github/workflows/ci.yml` 定义。
-Security 当前为 11 个已登记测试；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
+Security 当前为 22 个已登记测试；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
 `npm run eval:fixed` 运行 6 项固定版本地静态 Candidate 套件，并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；该套件验证本地 Grader/结构化 Patch/安全事件判据，不代表真实模型完成率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
 CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage 分为独立 job；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
 
@@ -258,8 +259,8 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 当前全量 `src/` 覆盖率实测为行 84.92%、函数 89.65%、分支 77.60%（20,612 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
-回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和
-HTTP/MCP/Prompt/Agent 型 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
+回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，
+仍必须由后续运行时通过 ToolExecutor/Sandbox 接入；Skill 级评测与自动激活属于后续 T-13/T-14。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现。
 固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`

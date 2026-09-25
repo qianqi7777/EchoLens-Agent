@@ -227,3 +227,17 @@ test('/pause 委托暂停服务并拒绝参数', async () => {
   assert.equal(paused, 1);
   assert.match((await executeServiceCommand('/pause now', services, session)).lines[0] ?? '', /用法/u);
 });
+
+test('/skills 列表与 /skill 手动加载共享 Skill 服务', async () => {
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    listSkills: async () => [{ name: 'code-search', description: 'search source when investigating code', source: 'builtin' as const, path: '/builtin/code-search' }],
+    loadSkill: async () => ({ name: 'code-search', description: 'search source when investigating code', source: 'builtin' as const, path: '/builtin/code-search', body: '# rules', references: [], scripts: [] }),
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.match((await executeServiceCommand('/skills', services, session)).lines[0] ?? '', /code-search/u);
+  assert.deepEqual((await executeServiceCommand('/skill code-search', services, session)).lines, ['Skill：code-search', 'search source when investigating code', '# rules']);
+  assert.match((await executeServiceCommand('/skill nope extra', services, session)).lines[0] ?? '', /用法/u);
+});

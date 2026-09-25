@@ -714,6 +714,7 @@ export class TerminalUi {
       backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
       sessionDeletionAvailable: Boolean(this.options.deleteSession),
       skillImportAvailable: Boolean(this.options.importSkill),
+      skillsAvailable: Boolean(this.options.listSkills),
       modelRoutingAvailable: Boolean(this.options.modelRouting),
       hooksAvailable: Boolean(this.options.hooks),
       goalAvailable: Boolean(this.options.goals),
