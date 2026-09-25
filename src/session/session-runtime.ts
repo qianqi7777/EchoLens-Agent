@@ -5,6 +5,7 @@ import type { AgentCheckpoint, AgentEvent } from './events.js';
 import { JsonlEventStore, type JsonlEventStoreOptions } from './jsonl-event-store.js';
 import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
+import type { ContextBuildResult } from '../context/context-manager.js';
 import { createGoal, createGoalEvidence, type AgentGoal, type GoalEvidence } from '../runtime/goal.js';
 import { buildChangeSet, type ChangeSet } from '../runtime/change-set.js';
 import { loadEditCheckpoint, rollbackCheckpoint } from '../runtime/structured-patch.js';
@@ -158,6 +159,10 @@ export class SessionRuntime {
 
   conversation(): ConversationItem[] {
     return structuredClone(this.history);
+  }
+
+  contextReport(): ContextBuildResult | undefined {
+    return this.agent.contextReport();
   }
 
   /** 返回最近的会话检查点；index 保持事件时间顺序，便于命令回显后再次选择。 */

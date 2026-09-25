@@ -12,6 +12,7 @@ import { systemPolicyMessage } from '../core/system-policy.js';
 import {
   ContextManager,
   type ContextPrivacyLevel,
+  type ContextBuildResult,
 } from '../context/context-manager.js';
 import {
   isModelProviderRunLifecycle,
@@ -64,6 +65,7 @@ import { SkillLoader } from '../skills/loader.js';
 import type { LoadedSkill } from '../skills/loader.js';
 import { SkillRuntime } from '../skills/skill-runtime.js';
 import type { PermissionProfile } from './permission-profile.js';
+import type { GitHistoryProvider } from '../navigation/git-history.js';
 
 /**
  * 一次 run/resume 的完整结果。
@@ -112,6 +114,7 @@ export interface ReactAgentOptions {
   skillLoader?: SkillLoader;
   skillRuntime?: SkillRuntime;
   permissionProfile?: PermissionProfile;
+  gitHistory?: GitHistoryProvider;
 }
 
 interface RunMachine {
@@ -159,6 +162,7 @@ export class ReactAgent {
       workspaceRoot: options.workspaceRoot,
       maxHistoryTurns: options.maxHistoryTurns,
       skillLoader,
+      gitHistory: options.gitHistory,
     });
     this.toolScheduler = options.toolScheduler ?? new ToolScheduler();
     this.navigationResolver = options.navigationResolver ?? navigationResolverFor(options.workspaceRoot);
@@ -168,6 +172,11 @@ export class ReactAgent {
   /** 请求在当前工具批次完成后、下一次模型调用前暂停，不打断在途工具。 */
   requestPause(): void {
     this.pauseRequested = true;
+  }
+
+  /** 返回最近一次模型请求实际使用的上下文来源报告。 */
+  contextReport(): ContextBuildResult | undefined {
+    return this.contextManager.report();
   }
 
   /**
@@ -375,6 +384,10 @@ export class ReactAgent {
             ? (machine.getActiveGoal?.() ?? machine.activeGoal)
             : undefined,
           activeSkills: machine.activeSkills,
+          gitHistoryPaths: uniquePaths([
+            ...(navigationPending ? machine.navigationHint?.candidatePaths ?? [] : []),
+            ...(this.options.instructionTarget ? [this.options.instructionTarget] : []),
+          ]),
         });
         response = await this.completeModel(machine, eventSink, {
           items: prepared.items,
@@ -745,6 +758,7 @@ export class ReactAgent {
         ? call.arguments.path : this.options.instructionTarget,
       hookContexts: machine.hookContexts,
       activeSkills: machine.activeSkills,
+      gitHistoryPaths: typeof call.arguments.path === 'string' ? [call.arguments.path] : [],
     });
     // 工具可执行的权限完全来自 ContextManager 构建的权限规则；
     // 工具输出/MCP 内容只能作为不可信证据回填，不能反向修改权限集合或 System Policy。
@@ -1268,4 +1282,8 @@ function latestInstructionTarget(
   return call?.type === 'tool_call' && typeof call.arguments.path === 'string'
     ? call.arguments.path
     : fallback;
+}
+
+function uniquePaths(paths: readonly string[]): string[] {
+  return [...new Set(paths.map((value) => value.trim()).filter(Boolean))].slice(0, 8);
 }

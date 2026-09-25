@@ -10,6 +10,7 @@ import type { HookStatus } from '../orchestration/command-hooks.js';
 import type { AgentGoal } from '../runtime/goal.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
 import type { ChangeSet } from '../runtime/change-set.js';
+import type { ContextBuildResult } from '../context/context-manager.js';
 import type { RewindMode, RewindResult, SessionCheckpointSummary } from '../session/session-runtime.js';
 
 export interface HookCommands {
@@ -33,6 +34,7 @@ export interface CommandServices {
   pause?(): Promise<void>;
   loadCheckpoint(id: string): Promise<EditCheckpoint>;
   diff?(turnId?: string): Promise<ChangeSet | undefined>;
+  context?(): ContextBuildResult | undefined;
   backgroundTasks?: BackgroundTaskCommands;
   workspaceCommands?: WorkspaceCommandService;
   importSkill?(source: string): Promise<ImportedSkill>;
@@ -56,7 +58,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/context', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -87,6 +89,18 @@ export async function executeServiceCommand(
         changeSet.diff || '[info] 没有可见差异',
       ];
       return { handled: true, lines, changeSet };
+    }
+    case '/context': {
+      if (args.length > 0) return { handled: true, lines: ['用法：/context'] };
+      const report = services.context?.();
+      if (!report) return { handled: true, lines: ['当前还没有可用的上下文报告，请先运行一个 Turn。'] };
+      const used = Math.max(1, report.estimatedTokens);
+      lines = [
+        `上下文：${report.estimatedTokens}/${report.budgetTokens} tokens${report.compacted ? '（已压缩）' : ''} privacy=${report.privacy}`,
+        ...report.sourceUsage.map((item) => `${item.source}: ${item.estimatedTokens} tokens (${((item.estimatedTokens / used) * 100).toFixed(1)}%)，${item.itemCount} items`),
+        ...report.warnings.map((warning) => `警告：${warning}`),
+      ];
+      break;
     }
     case '/pause':
       if (args.length > 0) return { handled: true, lines: ['用法：/pause'] };

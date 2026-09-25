@@ -27,6 +27,9 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 通过结构化 Patch、审批、Checkpoint 和后状态哈希完成安全编辑与回滚
 - 支持 `/rollback <checkpoint-id> [文件路径...]` 的按文件恢复，以及 `/rollback --to <检查点索引>` 的多步逆序回退；用户后续修改会被保护并明确列为 skipped
 - 支持 `/rewind` 查看最近会话检查点，并用 `--code`、`--conversation` 或默认双回退分别恢复代码与会话状态；用户后续修改仍会被跳过并提示
+- 支持 `/context` 查看最近一次模型请求实际注入的来源、token 估算、预算比例和压缩状态
+- 上下文压缩保留用户约束、当前请求和带证据的工具结果；白名单内容超出预算时显式失败，不静默丢弃
+- 首轮导航可按相对 import 构建有界依赖/被依赖候选（默认最多 2 跳），并可选装配受限 Git 历史候选信息
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
 - 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
@@ -266,7 +269,9 @@ Security 的符号链接验证受当前运行账户权限影响：在不允许�
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，
 仍必须由后续运行时通过 ToolExecutor/Sandbox 接入。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现；`/rewind` 的检查点索引按当前 Session 事件顺序，仅覆盖已持久化的 Agent 检查点。
-固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。
+固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。断点恢复基准可用 `npm run eval:resume-soak -- --rounds 3` 复现，结果包含分母、成功数、逐轮故障明细；工具执行中途故障通过真实子进程终止注入，其余故障使用本地 Provider 注入，不代表真实模型服务或宿主进程 kill 的成功率。
+`/context` 报告只反映最近一次已构建的模型上下文；尚未运行 Turn 时没有报告，token 仍是现有字节近似值，不等同于任一具体模型 tokenizer 的精确计数。
+Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

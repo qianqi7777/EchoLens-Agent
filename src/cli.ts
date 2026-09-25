@@ -36,6 +36,7 @@ import { executeServiceCommand, isServiceCommand, type CommandServices } from '.
 import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
 import { parseAgentPlan, type AgentPlan } from './runtime/structured-output.js';
 import { parsePermissionProfile, type PermissionProfile } from './runtime/permission-profile.js';
+import { GitHistoryProvider } from './navigation/git-history.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -128,6 +129,7 @@ if (!connectedModel) {
     pause: () => manager.currentRuntime().session.pause(),
     loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
     diff: (turnId) => manager.currentRuntime().session.changeSet(turnId),
+    context: () => manager.currentRuntime().session.contextReport(),
     backgroundTasks,
     workspaceCommands,
       importSkill: (source) => new SkillManager({ workspaceRoot: manager.currentRuntime().workspaceRoot }).import(source),
@@ -407,6 +409,7 @@ async function createCliWorkspaceRuntime(
       verificationGate: parseVerificationGate(process.env.AGENT_VERIFY_GATE),
       hooks,
       permissionProfile: options.permissionProfile,
+      gitHistory: process.env.AGENT_GIT_HISTORY === 'true' ? new GitHistoryProvider(workspaceRoot) : undefined,
     });
     const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
     session = await SessionRuntime.open(agent, {

@@ -128,7 +128,7 @@ test('TUI 运行中 steering 不并发启动 Turn，暂停后 steering 会恢复
   key(ui, 'start');
   key(ui, '', { return: true });
   assert.equal(ui['store'].get().busy, true);
-  assert.deepEqual(ui.commandMenu('/').items.map((item) => item.name), ['/pause', '/steer']);
+  assert.deepEqual(ui.commandMenu('/').items.map((item) => item.name), ['/pause', '/context', '/steer']);
   key(ui, '/steer new direction');
   key(ui, '', { return: true });
   await delay(5);

@@ -195,6 +195,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     source: 'builtin',
   },
   {
+    name: '/context',
+    description: '查看最近一次模型请求的上下文来源、占用和预算比例',
+    usage: '/context',
+    category: 'session',
+    acceptsArguments: false,
+    availableDuringTask: true,
+    source: 'builtin',
+  },
+  {
     name: '/steer',
     description: '追加要求并从当前检查点继续运行',
     usage: '/steer <要求>',

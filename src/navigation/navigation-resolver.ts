@@ -1,6 +1,7 @@
 import type { FeatureIndexEntry, FeatureMatch, NavigationHint, WorkspaceIndexSnapshot } from './types.js';
 import { ECHOLENS_FEATURES } from './feature-index.js';
 import { WorkspaceIndex } from './workspace-index.js';
+import { DependencyGraph } from './dependency-graph.js';
 
 const workspaceIntent = /修复|调试|测试|实现|修改|检查|审查|排查|优化|重构|代码|文件|配置|仓库|路由|会话|工具|审批|沙箱|工作区|评测|mcp|agent|review|bug|debug|test|implement|edit|fix|refactor|file|config|repository|code/iu;
 const answerOnlyIntent = /解释|说明|摘要|总结|翻译|是什么|为什么|explain|summari[sz]e|translate|what is|why/iu;
@@ -11,9 +12,11 @@ const maxCachedResolvers = 8;
 
 export class NavigationResolver {
   readonly workspaceIndex: WorkspaceIndex;
+  readonly dependencyGraph: DependencyGraph;
 
   constructor(workspaceRoot: string, private readonly features: readonly FeatureIndexEntry[] = ECHOLENS_FEATURES) {
     this.workspaceIndex = new WorkspaceIndex(workspaceRoot);
+    this.dependencyGraph = new DependencyGraph(workspaceRoot, this.workspaceIndex);
   }
 
   async resolve(userMessage: string): Promise<NavigationHint | undefined> {
@@ -34,7 +37,11 @@ export class NavigationResolver {
       .filter((match): match is FeatureMatch => Boolean(match)).sort((left, right) => right.confidence - left.confidence).slice(0, 3);
     const directPaths = explicitPaths(userMessage).filter((candidate) => available.has(candidate));
     const confidence = directPaths.length ? 1 : matches[0]?.confidence ?? 0;
-    const candidatePaths = unique([...directPaths, ...matches.flatMap((match) => match.paths)]).slice(0, 5);
+    const directCandidates = unique([...directPaths, ...matches.flatMap((match) => match.paths)]);
+    const dependencies = directCandidates.length
+      ? this.dependencyGraph.fromSnapshot(snapshot, directCandidates, { maxHops: 2, maxNodes: 32 })
+      : { paths: [] as string[] };
+    const candidatePaths = unique([...directCandidates, ...dependencies.paths]).slice(0, 8);
     const hashes = new Map(snapshot.files.map((file) => [file.path, file.contentHash]));
     const symbols = unique(matches.flatMap((match) => match.symbols)).slice(0, 8);
     const searchHints = unique(matches.flatMap((match) => match.searchHints)).slice(0, 8);

@@ -5,6 +5,8 @@
     "agent-test/tests/src/skills.test.ts",
     "agent-test/tests/src/config/startup-config.test.ts",
     "agent-test/tests/src/context/context-manager.test.ts",
+    "agent-test/tests/src/context/context-report.test.ts",
+    "agent-test/tests/src/context/compaction.test.ts",
     "agent-test/tests/src/credentials/gateway-token-store.test.ts",
     "agent-test/tests/src/evals/dynamic-metrics.test.ts",
     "agent-test/tests/src/orchestration/task-command.test.ts",
@@ -20,6 +22,8 @@
     "agent-test/tests/src/runtime/edit-loop.test.ts",
     "agent-test/tests/src/runtime/file-lock.test.ts",
     "agent-test/tests/src/runtime/navigation.test.ts",
+    "agent-test/tests/src/navigation/dependency-graph.test.ts",
+    "agent-test/tests/src/navigation/git-history.test.ts",
     "agent-test/tests/src/runtime/plan-goal.test.ts",
     "agent-test/tests/src/runtime/runtime.test.ts",
     "agent-test/tests/src/runtime/sandbox-tools.test.ts",
@@ -65,6 +69,7 @@
     "agent-test/tests/src/runtime/tool-output.test.ts"
   ],
   "performance": [
+    "agent-test/tests/src/navigation/dependency-graph.performance.test.ts",
     "agent-test/tests/src/runtime/workspace-tools.performance.test.ts",
     "agent-test/tests/src/orchestration/worker-pool.performance.test.ts"
   ]

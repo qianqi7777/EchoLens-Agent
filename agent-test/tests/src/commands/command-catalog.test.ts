@@ -13,6 +13,7 @@ import { executeSessionCommand } from '../../../../src/commands/session-command.
 import { executeServiceCommand } from '../../../../src/commands/service-command.js';
 import type { EditCheckpoint } from '../../../../src/runtime/structured-patch.js';
 import type { AgentCheckpoint } from '../../../../src/session/events.js';
+import type { ContextBuildResult } from '../../../../src/context/context-manager.js';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -22,7 +23,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/pause', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/rewind', '/diff', '/steer', '/clear', '/help', '/exit'],
+    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/pause', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/rewind', '/diff', '/context', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
@@ -48,7 +49,7 @@ test('主名称优先，别名、界面和依赖能力独立处理', () => {
   const names = getCommandCatalog({ ...context, workspaceAvailable: false, interface: 'line' }).map((item) => item.name);
   assert.ok(names.includes('/verify') && names.includes('/rollback'));
   assert.ok(!names.includes('/clear') && !names.includes('/cd'));
-  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/plan', '/goal', '/pause', '/steer']);
+  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/plan', '/goal', '/pause', '/context', '/steer']);
   assert.ok(getCommandCatalog({ ...context, sessionDeletionAvailable: true }).some((item) => item.name === '/session'));
 });
 
@@ -232,6 +233,21 @@ test('/rewind 列出检查点并按模式委托正交回退', async () => {
   assert.match(result.lines[0] ?? '', /conversation/u);
   assert.deepEqual(calls, [[2, 'conversation']]);
   assert.match((await executeServiceCommand('/rewind nope', services, { currentSessionId: 's', confirm: async () => true })).lines[0] ?? '', /用法/u);
+});
+
+test('/context 展示最近一次实际上下文的来源占用', async () => {
+  const services = {
+    listSessions: async () => [], verify: async () => [], rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => ({ version: 1, workspaceRoot: 'root', workspaceRevision: { value: 'r', capturedAt: 'now', fileCount: 0 }, createdAt: 'now', files: [] } as EditCheckpoint),
+    context: () => ({
+      items: [], instructions: [], permissions: { effectivePermissions: [], deniedPermissions: [], reasons: [], approvalRequests: [], rejectedDirectiveIds: [] },
+      privacy: 'full-context' as const, estimatedTokens: 100, budgetTokens: 200, compacted: false, warnings: [],
+      sourceUsage: [{ source: 'conversation' as const, itemCount: 2, estimatedTokens: 80, itemIds: ['a', 'b'] }],
+    } as ContextBuildResult),
+  };
+  const result = await executeServiceCommand('/context', services, { currentSessionId: 's', confirm: async () => true });
+  assert.match(result.lines[0] ?? '', /100\/200/u);
+  assert.match(result.lines[1] ?? '', /conversation/u);
 });
 
 test('/pause 委托暂停服务并拒绝参数', async () => {

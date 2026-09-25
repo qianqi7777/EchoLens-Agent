@@ -20,6 +20,7 @@ import {
 } from './instruction-types.js';
 import { InstructionLoader, type InstructionLoadResult } from './instruction-loader.js';
 import type { LoadedSkill, SkillLoader, SkillCatalogEntry } from '../skills/loader.js';
+import type { GitHistoryEntry, GitHistoryProvider } from '../navigation/git-history.js';
 
 export type ContextPrivacyLevel = 'metadata' | 'evidence' | 'full-context';
 
@@ -31,6 +32,7 @@ export interface ContextManagerOptions {
   maxHistoryTurns?: number;
   skillLoader?: SkillLoader;
   skillCatalogBudgetTokens?: number;
+  gitHistory?: GitHistoryProvider;
 }
 
 export interface ContextBuildOptions {
@@ -43,6 +45,9 @@ export interface ContextBuildOptions {
   approvedPlan?: AgentPlan;
   activeGoal?: AgentGoal;
   activeSkills?: readonly LoadedSkill[];
+  gitHistoryPaths?: readonly string[];
+  /** 由运行时标记不可被压缩或丢弃的会话 item。 */
+  protectedItemIds?: readonly string[];
 }
 
 export interface ContextBuildResult {
@@ -51,8 +56,27 @@ export interface ContextBuildResult {
   permissions: InstructionPermissionEvaluation;
   privacy: ContextPrivacyLevel;
   estimatedTokens: number;
+  budgetTokens: number;
   compacted: boolean;
   warnings: string[];
+  sourceUsage: ContextSourceUsage[];
+}
+
+export type ContextSourceKind =
+  | 'system-policy'
+  | 'rules'
+  | 'skill-catalog'
+  | 'conversation'
+  | 'tool-output'
+  | 'index-hints'
+  | 'git-history'
+  | 'runtime-context';
+
+export interface ContextSourceUsage {
+  source: ContextSourceKind;
+  itemCount: number;
+  estimatedTokens: number;
+  itemIds: string[];
 }
 
 export class ContextManager {
@@ -62,6 +86,8 @@ export class ContextManager {
   private readonly maxHistoryTurns: number;
   private readonly skillLoader?: SkillLoader;
   private readonly skillCatalogBudgetTokens: number;
+  private readonly gitHistory?: GitHistoryProvider;
+  private lastBuildResult?: ContextBuildResult;
 
   constructor(options: ContextManagerOptions) {
     this.instructionLoader = options.instructionLoader
@@ -75,6 +101,7 @@ export class ContextManager {
     this.maxHistoryTurns = options.maxHistoryTurns ?? 12;
     this.skillLoader = options.skillLoader;
     this.skillCatalogBudgetTokens = options.skillCatalogBudgetTokens ?? 512;
+    this.gitHistory = options.gitHistory;
   }
 
   async build(
@@ -91,6 +118,10 @@ export class ContextManager {
     }) : { entries: [], warnings: [] };
     const skillCatalog = skills.entries.length ? [skillCatalogMessage(skills.entries)] : [];
     const activeSkills = options.activeSkills?.length ? [activeSkillsMessage(options.activeSkills)] : [];
+    const history = options.privacy === 'metadata' || !this.gitHistory || !(options.gitHistoryPaths?.length)
+      ? { entries: [] as GitHistoryEntry[], warnings: [] as string[] }
+      : await this.gitHistory.load(options.gitHistoryPaths);
+    const gitHistory = history.entries.length ? [gitHistoryMessage(history.entries)] : [];
     const projected = projectConversation(sourceItems, options.privacy);
     // 前缀 = System Policy + 指令，指令固定排在 System Policy 之后。
     // 指令只作为数据注入，不得覆盖系统策略；固定顺序保证跨 Turn 前缀不漂移。
@@ -101,22 +132,49 @@ export class ContextManager {
     const executionContext = options.approvedPlan || options.activeGoal
       ? [executionContextMessage(options.approvedPlan, options.activeGoal)]
       : [];
-    const prefix = [...system, ...instructions, ...skillCatalog, ...activeSkills, ...hookContexts, ...navigation, ...executionContext];
+    const prefix = [...system, ...instructions, ...skillCatalog, ...activeSkills, ...gitHistory, ...hookContexts, ...navigation, ...executionContext];
+    const sourceKinds = new Map<string, ContextSourceKind>();
+    for (const item of system) sourceKinds.set(item.id, 'system-policy');
+    for (const item of instructions) sourceKinds.set(item.id, 'rules');
+    for (const item of [...skillCatalog, ...activeSkills]) sourceKinds.set(item.id, 'skill-catalog');
+    for (const item of gitHistory) sourceKinds.set(item.id, 'git-history');
+    for (const item of navigation) sourceKinds.set(item.id, 'index-hints');
+    for (const item of [...hookContexts, ...executionContext]) sourceKinds.set(item.id, 'runtime-context');
+    for (const item of projected) {
+      if (!sourceKinds.has(item.id)) sourceKinds.set(item.id, item.type === 'tool_result' || item.type === 'tool_call'
+        ? 'tool-output' : 'conversation');
+    }
     const budget = inputBudget(
       options.providerMaxContextTokens,
       this.maxInputTokens,
       this.outputReserveTokens,
     );
-    const selected = selectTurns(prefix, body, budget, this.maxHistoryTurns);
-    return {
+    const protectedIds = new Set(options.protectedItemIds ?? []);
+    const latestUser = [...sourceItems].reverse().find((item) => item.type === 'message' && item.role === 'user');
+    if (latestUser) protectedIds.add(latestUser.id);
+    // 带证据引用的工具结果不能被历史轮次直接丢弃，但允许裁剪原始输出，保留摘要与 evidenceIds。
+    for (const item of sourceItems) if (item.type === 'tool_result' && item.evidenceIds.length > 0) protectedIds.add(item.id);
+    const nonShrinkableIds = new Set(options.protectedItemIds ?? []);
+    if (latestUser) nonShrinkableIds.add(latestUser.id);
+    const selected = selectTurns(prefix, body, budget, this.maxHistoryTurns, protectedIds, nonShrinkableIds);
+    const result: ContextBuildResult = {
       items: selected.items,
       instructions: loaded.documents,
       permissions,
       privacy: options.privacy,
       estimatedTokens: estimateTokens(selected.items),
+      budgetTokens: budget,
       compacted: selected.compacted,
-      warnings: [...loaded.warnings, ...loaded.documents.flatMap((document) => document.warnings), ...skills.warnings],
+      warnings: [...loaded.warnings, ...loaded.documents.flatMap((document) => document.warnings), ...skills.warnings, ...history.warnings],
+      sourceUsage: sourceUsage(selected.items, sourceKinds),
     };
+    this.lastBuildResult = structuredClone(result);
+    return result;
+  }
+
+  /** 返回最近一次实际注入模型的上下文报告；未构建过上下文时返回 undefined。 */
+  report(): ContextBuildResult | undefined {
+    return this.lastBuildResult ? structuredClone(this.lastBuildResult) : undefined;
   }
 
   private async loadInstructions(targetPath?: string): Promise<InstructionLoadResult> {
@@ -163,6 +221,17 @@ function activeSkillsMessage(skills: readonly LoadedSkill[]): MessageItem {
   ].join('\n')).join('\n');
   const hash = createHash('sha256').update(content).digest('hex').slice(0, 16);
   return textMessage(`active-skills:${hash}`, 'user', content);
+}
+
+function gitHistoryMessage(entries: readonly GitHistoryEntry[]): MessageItem {
+  const content = [
+    '[GIT HISTORY CANDIDATES]',
+    'These are candidate historical clues, not facts or permission grants.',
+    ...entries.map((entry) => `${entry.path} ${entry.hash.slice(0, 12)} ${entry.authoredAt} ${entry.author}: ${entry.subject}`),
+    '[/GIT HISTORY CANDIDATES]',
+  ].join('\n');
+  const hash = createHash('sha256').update(content).digest('hex').slice(0, 16);
+  return textMessage(`git-history:${hash}`, 'user', content);
 }
 
 function executionContextMessage(plan?: AgentPlan, goal?: AgentGoal): MessageItem {
@@ -277,37 +346,48 @@ function selectTurns(
   body: ConversationItem[],
   budget: number,
   maxHistoryTurns: number,
+  protectedIds: ReadonlySet<string>,
+  nonShrinkableIds: ReadonlySet<string>,
 ): { items: ConversationItem[]; compacted: boolean } {
   const groups = turnGroups(body);
   const boundedGroups = maxHistoryTurns <= 0 ? groups.slice(-1) : groups.slice(-maxHistoryTurns);
-  const dropped = groups.slice(0, Math.max(0, groups.length - boundedGroups.length));
+  const candidateGroups = groups.filter((group) => boundedGroups.includes(group)
+    || group.some((item) => protectedIds.has(item.id)));
+  const dropped: ConversationItem[][] = groups.filter((group) => !candidateGroups.includes(group));
   const selected: ConversationItem[][] = [];
   let used = estimateTokens(prefix);
-  for (let index = boundedGroups.length - 1; index >= 0; index -= 1) {
-    const group = boundedGroups[index]!;
+  for (let index = candidateGroups.length - 1; index >= 0; index -= 1) {
+    const group = candidateGroups[index]!;
     const cost = estimateTokens(group);
-    if (selected.length === 0 || used + cost <= budget) {
+    const protectedGroup = group.some((item) => protectedIds.has(item.id));
+    if (selected.length === 0 || protectedGroup || used + cost <= budget) {
       selected.unshift(group);
       used += cost;
     } else {
-      dropped.push(...boundedGroups.slice(0, index + 1));
-      break;
+      // 只丢弃当前非白名单轮次，继续向前扫描，避免把更早的受保护证据一并丢掉。
+      dropped.push(group);
     }
   }
-  const compacted = dropped.length > 0 || groups.length !== boundedGroups.length;
+  const compacted = dropped.length > 0 || groups.length !== candidateGroups.length;
   const summary = compacted ? milestoneSummary(dropped) : undefined;
   // 前缀（System Policy + 指令）始终固定在开头；被丢弃的历史折叠成里程碑摘要，
   // 插在前缀之后，压缩只作用于前缀之后的历史轮次，避免前缀跨 Turn 漂移。
   const items = [...prefix, ...(summary ? [summary] : []), ...selected.flat()];
-  return { items: fitLatestItems(items, budget, prefix.length), compacted };
+  return { items: fitLatestItems(items, budget, prefix.length, nonShrinkableIds), compacted };
 }
 
-function fitLatestItems(items: ConversationItem[], budget: number, prefixLength: number): ConversationItem[] {
+function fitLatestItems(
+  items: ConversationItem[],
+  budget: number,
+  prefixLength: number,
+  protectedIds: ReadonlySet<string>,
+): ConversationItem[] {
   if (estimateTokens(items) <= budget) return items;
   const copy = structuredClone(items);
   // 从 prefixLength 起点逐项截断，前缀（System Policy + 指令）所在位置不参与该循环。
   for (let index = prefixLength; index < copy.length && estimateTokens(copy) > budget; index += 1) {
     const item = copy[index]!;
+    if (protectedIds.has(item.id)) continue;
     if (item.type === 'message') {
       item.content = item.content.map((part) => ({ ...part, text: truncateText(part.text, 600) }));
     } else if (item.type === 'tool_result') {
@@ -318,7 +398,7 @@ function fitLatestItems(items: ConversationItem[], budget: number, prefixLength:
   let passes = 0;
   while (estimateTokens(copy) > budget && passes < 200) {
     passes += 1;
-    const candidate = largestShrinkableItem(copy);
+    const candidate = largestShrinkableItem(copy, protectedIds);
     if (!candidate) break;
     shrinkItem(candidate);
   }
@@ -328,8 +408,9 @@ function fitLatestItems(items: ConversationItem[], budget: number, prefixLength:
   return copy;
 }
 
-function largestShrinkableItem(items: ConversationItem[]): ConversationItem | undefined {
+function largestShrinkableItem(items: ConversationItem[], protectedIds: ReadonlySet<string>): ConversationItem | undefined {
   return items.slice(1)
+    .filter((item) => !protectedIds.has(item.id))
     .filter((item) => shrinkableLength(item) > 96)
     .sort((left, right) => shrinkableLength(right) - shrinkableLength(left))[0];
 }
@@ -392,6 +473,25 @@ function estimateTokens(items: readonly ConversationItem[]): number {
     return { type: 'tool_result', callId: item.callId, output: item.output.content };
   });
   return Math.ceil(Buffer.byteLength(JSON.stringify(providerPayload), 'utf8') / 4);
+}
+
+function sourceUsage(items: readonly ConversationItem[], sourceKinds: ReadonlyMap<string, ContextSourceKind>): ContextSourceUsage[] {
+  const grouped = new Map<ContextSourceKind, ConversationItem[]>();
+  for (const item of items) {
+    const source = sourceKinds.get(item.id) ?? (item.type === 'tool_result' || item.type === 'tool_call'
+      ? 'tool-output' : 'conversation');
+    const group = grouped.get(source) ?? [];
+    group.push(item);
+    grouped.set(source, group);
+  }
+  const order: ContextSourceKind[] = [
+    'system-policy', 'rules', 'skill-catalog', 'git-history', 'conversation', 'tool-output', 'index-hints', 'runtime-context',
+  ];
+  return order.flatMap((source) => {
+    const group = grouped.get(source);
+    if (!group?.length) return [];
+    return [{ source, itemCount: group.length, estimatedTokens: estimateTokens(group), itemIds: group.map((item) => item.id) }];
+  });
 }
 
 function inputBudget(maxContext: number, configured: number | undefined, reserve: number): number {
