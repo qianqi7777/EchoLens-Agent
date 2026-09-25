@@ -18,6 +18,7 @@ import { type ApprovalDecision, type ApprovalRequest } from './runtime/approval.
 import { parseAgentPlan, type AgentPlan, type FinalSummary } from './runtime/structured-output.js';
 import type { ExecutionPhase } from './runtime/model-routing.js';
 import type { AgentGoal } from './runtime/goal.js';
+import type { PermissionProfile } from './runtime/permission-profile.js';
 import { type ToolExecutionStatus } from './core/messages.js';
 import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 import {
@@ -52,6 +53,7 @@ export interface TuiOptions extends CommandServices {
   model: string;
   route: string;
   privacy?: string;
+  permissionProfile?: PermissionProfile;
   sessionId: string;
   workspaceRoot: string;
   maxContextTokens?: number;
@@ -118,6 +120,7 @@ interface TuiState {
   model: string;
   route: string;
   privacy?: string;
+  permissionProfile?: PermissionProfile;
   workspaceRoot: string;
   sessionId: string;
   phase?: ExecutionPhase | 'auto';
@@ -433,7 +436,7 @@ function Header({ state }: { state: TuiState }): React.JSX.Element {
     <Box justifyContent="space-between">
       <Text>
         <Text color={BRAND} bold>◆ EchoLens Agent</Text>
-        <Text color={DIM}>  ·  {state.route}{state.privacy ? `  ·  ${state.privacy}` : ''}{phaseBadge}</Text>
+        <Text color={DIM}>  ·  {state.route}{state.privacy ? `  ·  ${state.privacy}` : ''}{state.permissionProfile ? `  ·  ${state.permissionProfile}` : ''}{phaseBadge}</Text>
       </Text>
       <Text color={DIM}>{truncateDisplayText(state.workspaceRoot, 40)}</Text>
     </Box>
@@ -683,6 +686,7 @@ export class TerminalUi {
       model: options.model,
       route: options.route,
       privacy: options.privacy,
+      permissionProfile: options.permissionProfile,
       workspaceRoot: options.workspaceRoot,
       sessionId: options.sessionId,
       phase: 'auto',
@@ -934,6 +938,7 @@ export class TerminalUi {
         listSessions: this.options.listSessions,
         listTasks: this.options.backgroundTasks ? () => this.options.backgroundTasks!.list() : undefined,
         listCheckpoints: this.options.listCheckpoints,
+        listRewindCheckpoints: this.options.listRewindCheckpoints,
         listHooks: this.options.hooks ? () => this.options.hooks!.list() : undefined,
       }).then((candidates) => {
         if (this.stopped || generation !== this.completionGeneration || this.store.get().input !== input) return;

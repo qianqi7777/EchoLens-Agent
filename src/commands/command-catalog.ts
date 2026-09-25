@@ -177,6 +177,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     source: 'builtin',
   },
   {
+    name: '/rewind',
+    description: '选择会话检查点并分别回退代码或会话状态',
+    usage: '/rewind [检查点索引] [--code|--conversation]',
+    category: 'workspace',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
     name: '/diff',
     description: '查看当前或指定 Turn 基于检查点重建的任务变更包',
     usage: '/diff [turn-id]',

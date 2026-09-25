@@ -14,6 +14,7 @@ export interface ArgumentCompletionContext {
   listSessions(): Promise<readonly { sessionId: string }[]>;
   listTasks?(): Promise<readonly { id: string; state: string }[]>;
   listCheckpoints?(): Promise<readonly string[]>;
+  listRewindCheckpoints?(): Promise<readonly { index: number; state: string }[]>;
   listHooks?(): readonly { id: string; scope: string; trusted: boolean }[];
 }
 
@@ -63,6 +64,18 @@ export async function completeArguments(input: string, context: ArgumentCompleti
     if (target) {
       const count = (await context.listCheckpoints()).length;
       return values('--to ', Array.from({ length: count }, (_, index) => [String(index), '检查点索引']), target[1]!);
+    }
+  }
+  if (command === '/rewind' && (context.listRewindCheckpoints || context.listCheckpoints)) {
+    if (!args.includes(' ')) {
+      const count = context.listRewindCheckpoints
+        ? (await context.listRewindCheckpoints()).length
+        : (await context.listCheckpoints!()).length;
+      return values('', Array.from({ length: count }, (_, index) => [String(index), '会话检查点索引']), args);
+    }
+    if (/^\d+\s+--?[^\s]*$/u.test(args)) {
+      const mode = args.replace(/^\d+\s+/u, '');
+      return values('', [['--code', '只回代码'], ['--conversation', '只回会话状态']], mode);
     }
   }
   return [];

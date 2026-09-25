@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "skill": "git-workflow",
+  "version": "1.0.0",
+  "assertions": [
+    { "id": "entrypoint", "type": "file_exists", "path": "SKILL.md" },
+    { "id": "reference", "type": "file_contains", "path": "references/workflow.md", "text": "explicit user confirmation" },
+    { "id": "manifest", "type": "manifest_valid", "name": "git-workflow", "descriptionIncludes": "preparing a safe commit" }
+  ]
+}

@@ -26,6 +26,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 对模型声明提供独立 Verifier 基础类型
 - 通过结构化 Patch、审批、Checkpoint 和后状态哈希完成安全编辑与回滚
 - 支持 `/rollback <checkpoint-id> [文件路径...]` 的按文件恢复，以及 `/rollback --to <检查点索引>` 的多步逆序回退；用户后续修改会被保护并明确列为 skipped
+- 支持 `/rewind` 查看最近会话检查点，并用 `--code`、`--conversation` 或默认双回退分别恢复代码与会话状态；用户后续修改仍会被跳过并提示
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
 - 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
@@ -42,6 +43,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 支持版本锁定的 Eval Suite（静态任务 + 固定 seed 动态变体），归档逐任务原始结果与汇总报告；复现命令 `npm run eval:fixed`
 - 提供带跨进程锁的持久后台任务队列、可配置 Worker 池并发、工作区互斥、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
+- 子 Agent profile 支持独立模型路由与 `$ECHOLENS_HOME/agent-memory/<profile>/` 记忆，读取/写入均有行数、大小和路径边界
 - 后台任务持久化 input/output/cached tokens、模型步数和工具调用；`/tasks` 展示单任务用量，`/usage` 按任务与会话汇总估算成本
 - 任务结束持久化 `change.set.completed` 变更包；`/diff [turn-id]` 从检查点字节重建多轮、多文件统一 diff，TUI 以聚合 Patch 视图展示并对超长 diff 做有界截断
 - Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
@@ -49,6 +51,9 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
 - 支持用户级与项目级可执行命令 Hook；项目 Hook 按配置和脚本内容指纹显式信任
 - 支持按 Agent Skills 开放规范发现、校验和渐进式加载 Skill catalog；`/skills` 列表与 `/skill <name>` 手动查看可用 Skill
+- Skill 支持基于 prompt 的一层受控自动激活、`requires` 组合和 `disable-model-invocation` 约束；递归引用与加载总量超限会拒绝
+- 支持 `read-only`、`auto`、`full` 三档权限配置（`AGENT_PERMISSION_PROFILE`），越界路径和网络/外部副作用审批边界不因档位放宽
+- 内置 `code-search`、`git-workflow`、`test-runner` 三个 Skill，并提供只检查客观文件/frontmatter/资源断言的 Skill Eval CLI（`npm run eval -- --skill <目录>`）
 
 ## 快速开始
 
@@ -95,7 +100,7 @@ npm run dev -- --resume latest
 - `Ctrl+C`：只取消当前 Turn，不删除 Session
 - `/exit`：退出 CLI
 
-TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚和 steering 命令。
+TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚、rewind 和 steering 命令。
 TUI 可用 `Shift+Tab` 循环 `plan → execute → auto`；终端无法区分 Shift+Tab 时使用 `Ctrl+P`。
 
 规划阶段结束后，TUI 或行模式会要求批准、修改或拒绝计划，也可批准并转为目标。批准计划只注入
@@ -260,7 +265,7 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，
-仍必须由后续运行时通过 ToolExecutor/Sandbox 接入；Skill 级评测与自动激活属于后续 T-13/T-14。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现。
+仍必须由后续运行时通过 ToolExecutor/Sandbox 接入。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现；`/rewind` 的检查点索引按当前 Session 事件顺序，仅覆盖已持久化的 Agent 检查点。
 固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`

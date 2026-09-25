@@ -61,6 +61,9 @@ import type { AgentGoal } from './goal.js';
 import type { ExecutionPhase } from './model-routing.js';
 import { selectVerificationPlan, type EditVerificationResult } from './verification.js';
 import { SkillLoader } from '../skills/loader.js';
+import type { LoadedSkill } from '../skills/loader.js';
+import { SkillRuntime } from '../skills/skill-runtime.js';
+import type { PermissionProfile } from './permission-profile.js';
 
 /**
  * 一次 run/resume 的完整结果。
@@ -107,6 +110,8 @@ export interface ReactAgentOptions {
   navigationResolver?: NavigationResolver;
   verificationGate?: 'off' | 'auto' | 'strict';
   skillLoader?: SkillLoader;
+  skillRuntime?: SkillRuntime;
+  permissionProfile?: PermissionProfile;
 }
 
 interface RunMachine {
@@ -128,6 +133,7 @@ interface RunMachine {
   getActiveGoal?: () => AgentGoal | undefined;
   lastResponsePhase?: ExecutionPhase;
   internalVerificationCallIds: Set<string>;
+  activeSkills: LoadedSkill[];
 }
 
 /** 显式、可检查点恢复的 model -> tools -> model 状态机。 */
@@ -135,6 +141,7 @@ export class ReactAgent {
   private readonly contextManager: ContextManager;
   private readonly toolScheduler: ToolScheduler;
   private readonly navigationResolver: NavigationResolver;
+  private readonly skillRuntime?: SkillRuntime;
   private pauseRequested = false;
 
   constructor(
@@ -143,17 +150,19 @@ export class ReactAgent {
     private readonly executor: ToolExecutor,
     private readonly options: ReactAgentOptions,
   ) {
+    const skillLoader = options.skillLoader ?? new SkillLoader({
+      workspaceRoot: options.workspaceRoot,
+      toolRegistry: registry,
+      allowedPermissions: options.permissions,
+    });
     this.contextManager = options.contextManager ?? new ContextManager({
       workspaceRoot: options.workspaceRoot,
       maxHistoryTurns: options.maxHistoryTurns,
-      skillLoader: options.skillLoader ?? new SkillLoader({
-        workspaceRoot: options.workspaceRoot,
-        toolRegistry: registry,
-        allowedPermissions: options.permissions,
-      }),
+      skillLoader,
     });
     this.toolScheduler = options.toolScheduler ?? new ToolScheduler();
     this.navigationResolver = options.navigationResolver ?? navigationResolverFor(options.workspaceRoot);
+    this.skillRuntime = options.skillRuntime ?? new SkillRuntime(skillLoader);
   }
 
   /** 请求在当前工具批次完成后、下一次模型调用前暂停，不打断在途工具。 */
@@ -205,6 +214,7 @@ export class ReactAgent {
       activeGoal: runtime.activeGoal,
       getActiveGoal: runtime.getActiveGoal,
       internalVerificationCallIds: new Set(),
+      activeSkills: [],
     };
     this.executor.resetBudget();
     await emit(machine, runtime.eventSink, { payload: { type: 'turn.started', userMessage } });
@@ -261,6 +271,7 @@ export class ReactAgent {
       internalVerificationCallIds: pendingAutomaticVerificationCallIds(
         checkpoint.items, checkpoint.internalVerificationCallIds ?? [],
       ),
+      activeSkills: [],
     };
     // A resume is an explicit request for another bounded execution slice.
     // Completed tool results stay in the checkpoint, while runtime budgets are
@@ -334,6 +345,14 @@ export class ReactAgent {
       const discovery = navigationPending && Boolean(discoveryTools?.length);
       const tools = discovery ? discoveryTools : providerTools(this.model, this.registry, runtimePermissions);
       const toolChoice = requestToolChoice(this.model, machine.navigationHint, discovery, tools);
+      if (this.skillRuntime) {
+        try {
+          machine.activeSkills = [...(await this.skillRuntime.activateForPrompt(latestUserText(machine.items))).skills];
+        } catch (error) {
+          machine.activeSkills = [];
+          machine.trace.push({ type: 'warning', message: `Skill 自动激活被拒绝：${error instanceof Error ? error.message : String(error)}` });
+        }
+      }
       await emit(machine, eventSink, {
         payload: {
           type: 'model.started',
@@ -355,6 +374,7 @@ export class ReactAgent {
           activeGoal: requestPhase === 'execute'
             ? (machine.getActiveGoal?.() ?? machine.activeGoal)
             : undefined,
+          activeSkills: machine.activeSkills,
         });
         response = await this.completeModel(machine, eventSink, {
           items: prepared.items,
@@ -724,6 +744,7 @@ export class ReactAgent {
       targetPath: typeof call.arguments.path === 'string'
         ? call.arguments.path : this.options.instructionTarget,
       hookContexts: machine.hookContexts,
+      activeSkills: machine.activeSkills,
     });
     // 工具可执行的权限完全来自 ContextManager 构建的权限规则；
     // 工具输出/MCP 内容只能作为不可信证据回填，不能反向修改权限集合或 System Policy。
@@ -732,6 +753,7 @@ export class ReactAgent {
       internalOperation: call.name === 'verify_changes' && machine.internalVerificationCallIds.has(call.callId)
         ? 'automatic_verification' : undefined,
       allowedPermissions: new Set(prepared.permissions.effectivePermissions),
+      permissionProfile: this.options.permissionProfile,
       approvalRequiredPermissions: new Set(
         prepared.permissions.approvalRequests.map((request) => request.permission),
       ),

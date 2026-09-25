@@ -5,10 +5,12 @@ import type { EditCheckpoint, RollbackToResult } from '../runtime/structured-pat
 import type { EditVerificationResult } from '../runtime/verification.js';
 import type { ImportedSkill } from '../skills/skill-manager.js';
 import type { LoadedSkill, SkillCatalogEntry } from '../skills/loader.js';
+import type { SkillActivation } from '../skills/skill-runtime.js';
 import type { HookStatus } from '../orchestration/command-hooks.js';
 import type { AgentGoal } from '../runtime/goal.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
 import type { ChangeSet } from '../runtime/change-set.js';
+import type { RewindMode, RewindResult, SessionCheckpointSummary } from '../session/session-runtime.js';
 
 export interface HookCommands {
   list(): HookStatus[];
@@ -26,6 +28,8 @@ export interface CommandServices {
   restoreFiles?(checkpoint: EditCheckpoint, paths: readonly string[]): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
   rollbackTo?(index: number): Promise<RollbackToResult>;
   listCheckpoints?(): Promise<readonly string[]>;
+  listRewindCheckpoints?(): Promise<readonly SessionCheckpointSummary[]>;
+  rewind?(targetIndex: number, mode: RewindMode): Promise<RewindResult>;
   pause?(): Promise<void>;
   loadCheckpoint(id: string): Promise<EditCheckpoint>;
   diff?(turnId?: string): Promise<ChangeSet | undefined>;
@@ -34,6 +38,7 @@ export interface CommandServices {
   importSkill?(source: string): Promise<ImportedSkill>;
   listSkills?(): Promise<SkillCatalogEntry[]>;
   loadSkill?(name: string): Promise<LoadedSkill>;
+  activateSkill?(name: string): Promise<SkillActivation>;
   modelRouting?: {
     configure(mode?: string, phase?: string): Promise<string[]>;
     status(): string[];
@@ -51,7 +56,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/diff', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -129,6 +134,32 @@ export async function executeServiceCommand(
         ...result.skippedPaths.map((file) => `警告：跳过后续修改：${file}`)];
       break;
     }
+    case '/rewind': {
+      if (!services.rewind || !services.listRewindCheckpoints) throw new Error('rewind 服务不可用');
+      if (args.length === 0) {
+        const checkpoints = await services.listRewindCheckpoints();
+        lines = checkpoints.length === 0
+          ? ['当前没有可回退的会话检查点。']
+          : ['最近会话检查点（使用 /rewind <索引> [--code|--conversation]）：',
+            ...checkpoints.map((item) => `checkpoint[${item.index}] turn=${item.turnId} step=${item.step} phase=${item.phase} state=${item.state} time=${item.timestamp}`)];
+        break;
+      }
+      const modeArgs = args.filter((arg): arg is '--code' | '--conversation' => arg === '--code' || arg === '--conversation');
+      if (modeArgs.length > 1 || args.some((arg) => arg.startsWith('--') && !['--code', '--conversation'].includes(arg))) {
+        return { handled: true, lines: ['用法：/rewind [检查点索引] [--code|--conversation]'] };
+      }
+      const indexArg = args.find((arg) => !arg.startsWith('--'));
+      if (!indexArg || !/^\d+$/u.test(indexArg) || args.filter((arg) => !arg.startsWith('--')).length !== 1) {
+        return { handled: true, lines: ['用法：/rewind [检查点索引] [--code|--conversation]'] };
+      }
+      const mode: RewindMode = modeArgs[0] === '--code' ? 'code'
+        : modeArgs[0] === '--conversation' ? 'conversation' : 'both';
+      const result = await services.rewind(Number(indexArg), mode);
+      lines = [`已 rewind checkpoint[${result.targetIndex}]（${mode}），恢复会话 step=${result.checkpoint.step}`,
+        `代码恢复 ${result.restoredPaths.length} 个文件`,
+        ...result.skippedPaths.map((file) => `警告：跳过用户后续修改：${file}`)];
+      break;
+    }
     case '/skill': {
       const match = /^\/skill\s+import\s+(.+)$/u.exec(input);
       if (match) {
@@ -140,9 +171,14 @@ export async function executeServiceCommand(
         break;
       }
       const name = args[0];
-      if (!name || args.length !== 1 || !services.loadSkill) return { handled: true, lines: ['用法：/skill <name> 或 /skill import <path>'] };
-      const result = await services.loadSkill(name);
-      lines = [`Skill：${result.name}`, result.description, result.body];
+      if (!name || args.length !== 1 || (!services.loadSkill && !services.activateSkill)) return { handled: true, lines: ['用法：/skill <name> 或 /skill import <path>'] };
+      if (services.activateSkill) {
+        const activation = await services.activateSkill(name);
+        lines = activation.skills.flatMap((skill) => [`Skill：${skill.name}`, skill.description, skill.body]);
+      } else {
+        const result = await services.loadSkill!(name);
+        lines = [`Skill：${result.name}`, result.description, result.body];
+      }
       break;
     }
     case '/model': {

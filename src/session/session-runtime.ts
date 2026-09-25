@@ -7,6 +7,7 @@ import type { LifecycleHookRunner } from '../orchestration/lifecycle-hooks.js';
 import type { AgentPlan } from '../runtime/structured-output.js';
 import { createGoal, createGoalEvidence, type AgentGoal, type GoalEvidence } from '../runtime/goal.js';
 import { buildChangeSet, type ChangeSet } from '../runtime/change-set.js';
+import { loadEditCheckpoint, rollbackCheckpoint } from '../runtime/structured-patch.js';
 
 export interface SessionRuntimeOptions {
   rootDirectory: string;
@@ -157,6 +158,63 @@ export class SessionRuntime {
 
   conversation(): ConversationItem[] {
     return structuredClone(this.history);
+  }
+
+  /** 返回最近的会话检查点；index 保持事件时间顺序，便于命令回显后再次选择。 */
+  async listRewindCheckpoints(limit = 5): Promise<SessionCheckpointSummary[]> {
+    const events = await this.store.read();
+    const checkpoints = events
+      .filter((event) => event.payload.type === 'checkpoint.saved')
+      .map((event, index) => {
+        if (event.payload.type !== 'checkpoint.saved') throw new Error('unreachable');
+        return {
+          index,
+          eventId: event.eventId,
+          timestamp: event.timestamp,
+          turnId: event.payload.checkpoint.turnId,
+          step: event.payload.checkpoint.step,
+          phase: event.payload.checkpoint.phase,
+          state: event.payload.checkpoint.state,
+        } satisfies SessionCheckpointSummary;
+      });
+    const count = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 20)) : 5;
+    return checkpoints.slice(-count).reverse();
+  }
+
+  /** 回退会话检查点；代码与会话状态由 mode 正交控制。 */
+  async rewind(targetIndex: number, mode: RewindMode = 'both'): Promise<RewindResult> {
+    if (this.activeTurnId) throw new Error('当前 Turn 正在运行，无法 rewind');
+    if (!['code', 'conversation', 'both'].includes(mode)) throw new Error(`rewind 模式无效：${mode}`);
+    const events = await this.store.read();
+    const checkpointEvents = events.filter((event) => event.payload.type === 'checkpoint.saved');
+    if (!Number.isSafeInteger(targetIndex) || targetIndex < 0 || targetIndex >= checkpointEvents.length) {
+      throw new Error(`rewind 检查点索引无效：${targetIndex}`);
+    }
+    const event = checkpointEvents[targetIndex]!;
+    if (event.payload.type !== 'checkpoint.saved') throw new Error('rewind 检查点类型无效');
+    const checkpoint = structuredClone(event.payload.checkpoint);
+    const restoredPaths: string[] = [];
+    const skippedPaths: string[] = [];
+    if (mode === 'code' || mode === 'both') {
+      const editIds = [...new Set(events.slice(events.indexOf(event) + 1)
+        .filter((item) => item.payload.type === 'tool.completed' && item.payload.status === 'ok'
+          && ['apply_patch', 'apply_sandbox_patch'].includes(item.payload.toolName))
+        .flatMap((item) => item.payload.type === 'tool.completed' ? editCheckpointId(item.payload.result?.data) : []))];
+      for (const id of editIds.reverse()) {
+        const result = await rollbackCheckpoint(await loadEditCheckpoint(this.workspaceRoot, id));
+        restoredPaths.push(...result.restoredPaths);
+        skippedPaths.push(...result.skippedPaths);
+      }
+    }
+    if (mode === 'conversation' || mode === 'both') {
+      await this.store.append({
+        turnId: checkpoint.turnId,
+        runId: checkpoint.runId,
+        payload: { type: 'session.rewound', checkpoint, mode, targetIndex },
+      });
+      this.history = structuredClone(checkpoint.items);
+    }
+    return { targetIndex, mode, checkpoint, restoredPaths, skippedPaths };
   }
 
   async configureModelRouting(mode?: string, phase?: string): Promise<string[]> {
@@ -356,10 +414,30 @@ export class SessionRuntime {
   }
 }
 
+export type RewindMode = 'code' | 'conversation' | 'both';
+
+export interface SessionCheckpointSummary {
+  index: number;
+  eventId: string;
+  timestamp: string;
+  turnId: string;
+  step: number;
+  phase: AgentCheckpoint['phase'];
+  state: AgentCheckpoint['state'];
+}
+
+export interface RewindResult {
+  targetIndex: number;
+  mode: RewindMode;
+  checkpoint: AgentCheckpoint;
+  restoredPaths: string[];
+  skippedPaths: string[];
+}
+
 function checkpointFrom(payload: unknown): AgentCheckpoint | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const candidate = payload as { type?: unknown; checkpoint?: unknown };
-  if (candidate.type !== 'checkpoint.saved' || !candidate.checkpoint
+  if (!['checkpoint.saved', 'session.rewound'].includes(String(candidate.type)) || !candidate.checkpoint
     || typeof candidate.checkpoint !== 'object') return undefined;
   return candidate.checkpoint as AgentCheckpoint;
 }
@@ -367,7 +445,8 @@ function checkpointFrom(payload: unknown): AgentCheckpoint | undefined {
 function recoverCheckpoint(
   events: Awaited<ReturnType<JsonlEventStore['read']>>,
 ): AgentCheckpoint | undefined {
-  const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved');
+  const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved'
+    || event.payload.type === 'session.rewound');
   if (checkpointIndex < 0) return undefined;
   const checkpoint = checkpointFrom(events[checkpointIndex]?.payload);
   // 仅 tools 阶段需要回填已完成工具结果；model 阶段说明该批次已进入模型步骤。
@@ -393,9 +472,16 @@ function recoverCheckpoint(
 
 // 重建未消费的 steering：只有最后一个检查点之后记录的 turn.steered 才需要交给恢复后的 run。
 function pendingSteering(events: Awaited<ReturnType<JsonlEventStore['read']>>): string[] {
-  const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved');
+  const checkpointIndex = events.findLastIndex((event) => event.payload.type === 'checkpoint.saved'
+    || event.payload.type === 'session.rewound');
   return events.slice(checkpointIndex + 1)
     .flatMap((event) => event.payload.type === 'turn.steered' ? [event.payload.message] : []);
+}
+
+function editCheckpointId(data: unknown): string[] {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return [];
+  const id = (data as { checkpointId?: unknown }).checkpointId;
+  return typeof id === 'string' && /^[a-f0-9]{24}$/u.test(id) ? [id] : [];
 }
 
 function recoverGoal(events: Awaited<ReturnType<JsonlEventStore['read']>>): AgentGoal | undefined {

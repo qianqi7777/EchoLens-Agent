@@ -193,6 +193,20 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
     return copy;
   }
 
+  /** 为子 Agent 复制并固定到指定模型 Profile，保留独立的熔断、用量和回退状态。 */
+  forkProfile(profileId: string): RoutedModelProvider {
+    if (!profileById(this.profiles, profileId)) throw new Error(`固定模型 Profile 不存在：${profileId}`);
+    return new RoutedModelProvider(this.profiles, {
+      mode: `pinned:${profileId}`,
+      defaultProfileId: profileId,
+      allowTierDowngrade: this.allowTierDowngrade,
+      maxFallbacks: this.maxFallbacks,
+      now: this.now,
+      circuitFailureThreshold: this.circuitFailureThreshold,
+      circuitCooldownMs: this.circuitCooldownMs,
+    });
+  }
+
   markToolsStarted(): void { this.toolsStarted = true; }
 
   configure(mode?: string, phase?: string): string[] {

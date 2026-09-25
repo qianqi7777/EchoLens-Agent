@@ -3,14 +3,23 @@
 import path from 'node:path';
 import { runEvalFiles } from './evals/file-runner.js';
 import { runEvalSuite } from './evals/suite-runner.js';
+import { runSkillEval } from './evals/skill-runner.js';
 
 try {
   const args = parseArgs(process.argv.slice(2));
-  if (args.suite && (args.task || args.template || args.candidate || args.seed || args.suiteId)) {
+  if (args.skill && (args.suite || args.task || args.template || args.candidate || args.seed || args.suiteId)) {
+    throw new Error('--skill 不能与其它评测参数同时使用');
+  }
+  if (args.suite && (args.task || args.template || args.candidate || args.seed || args.suiteId || args.skill)) {
     throw new Error('--suite 不能与单项任务参数或 --suite-id 同时使用');
   }
   if (args.help) {
     printHelp();
+  } else if (args.skill) {
+    const report = await runSkillEval(path.resolve(args.skill));
+    console.log(`skill=${report.skill}@${report.version} status=${report.passed ? 'passed' : 'failed'} assertions=${report.assertions.length}`);
+    for (const assertion of report.assertions) console.log(`${assertion.passed ? 'PASS' : 'FAIL'} ${assertion.id}: ${assertion.summary}`);
+    if (!report.passed) process.exitCode = 1;
   } else if (args.suite) {
     const resultPath = path.resolve(args.results ?? defaultSuiteResultPath(args.suite));
     const result = await runEvalSuite(args.suite, resultPath, args.docker ? {
@@ -68,6 +77,7 @@ interface ParsedArgs {
   results?: string;
   suite?: string;
   suiteId?: string;
+  skill?: string;
   docker: boolean;
   retainFailed: boolean;
   help: boolean;
@@ -88,6 +98,7 @@ function parseArgs(args: string[]): ParsedArgs {
     else if (current === '--results') result.results = nextValue(args, ++index, current);
     else if (current === '--suite') result.suite = nextValue(args, ++index, current);
     else if (current === '--suite-id') result.suiteId = nextValue(args, ++index, current);
+    else if (current === '--skill') result.skill = nextValue(args, ++index, current);
     else throw new Error(`未知参数：${current}`);
   }
   return result;
@@ -111,6 +122,7 @@ function printHelp(): void {
   console.log([
     'EchoLens Eval（只读取本地任务与候选结果，不调用模型）',
     '  --suite <name> [--results <jsonl>] [--docker]',
+    '  --skill <skill-directory>',
     '  --task <file> | --template <file> --seed <seed>',
     '  --candidate <file> [--results <jsonl>] [--suite-id <id>]',
     '  [--docker] [--retain-failed]',

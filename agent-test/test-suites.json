@@ -10,6 +10,7 @@
     "agent-test/tests/src/orchestration/task-command.test.ts",
     "agent-test/tests/src/orchestration/task-usage.test.ts",
     "agent-test/tests/src/orchestration/command-hooks.test.ts",
+    "agent-test/tests/src/orchestration/agent-memory.test.ts",
     "agent-test/tests/src/orchestration/task-queue.test.ts",
     "agent-test/tests/src/orchestration/worker-pool.test.ts",
     "agent-test/tests/src/runtime/approval.test.ts",
@@ -25,6 +26,7 @@
     "agent-test/tests/src/runtime/structured-output.test.ts",
     "agent-test/tests/src/runtime/test-output.test.ts",
     "agent-test/tests/src/runtime/structured-patch.test.ts",
+    "agent-test/tests/src/runtime/rewind.test.ts",
     "agent-test/tests/src/runtime/tool-errors.test.ts",
     "agent-test/tests/src/runtime/tool-scheduler.test.ts",
     "agent-test/tests/src/runtime/tool-schema.test.ts",
@@ -35,6 +37,8 @@
     "agent-test/tests/src/tui.test.ts"
   ],
   "contract": [
+    "agent-test/tests/src/skills/builtin-evals.test.ts",
+    "agent-test/tests/src/skills/activation.test.ts",
     "agent-test/tests/src/code-intelligence/code-intelligence.test.ts",
     "agent-test/tests/src/context/instruction-contract.test.ts",
     "agent-test/tests/src/evals/eval-harness.test.ts",
@@ -53,6 +57,7 @@
     "agent-test/tests/server/model-gateway/src/server.test.ts"
   ],
   "security": [
+    "agent-test/tests/src/runtime/permission-profile.test.ts",
     "agent-test/tests/src/skills/loader.test.ts",
     "agent-test/tests/src/runtime/automatic-verification.test.ts",
     "agent-test/tests/src/runtime/guardrail.test.ts",

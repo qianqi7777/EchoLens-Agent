@@ -12,6 +12,7 @@ import { completeArguments } from '../../../../src/commands/argument-completion.
 import { executeSessionCommand } from '../../../../src/commands/session-command.js';
 import { executeServiceCommand } from '../../../../src/commands/service-command.js';
 import type { EditCheckpoint } from '../../../../src/runtime/structured-patch.js';
+import type { AgentCheckpoint } from '../../../../src/session/events.js';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -21,7 +22,7 @@ const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
 test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
   assert.deepEqual(
     filterCommandCandidates('/', context).map((command) => command.name),
-    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/pause', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/diff', '/steer', '/clear', '/help', '/exit'],
+    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/pause', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/rewind', '/diff', '/steer', '/clear', '/help', '/exit'],
   );
   assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
   assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
@@ -211,6 +212,26 @@ test('/rollback 支持按文件恢复和按检查点索引回退', async () => {
     ['已回滚 checkpoint=c1，恢复 1 个文件']);
   assert.match((await executeServiceCommand('/rollback --to 0', services, session)).lines[0] ?? '', /checkpoint\[0\]/u);
   assert.match((await executeServiceCommand('/rollback --to bad', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/rewind 列出检查点并按模式委托正交回退', async () => {
+  const checkpoint = { version: 1, workspaceRoot: 'root', workspaceRevision: { value: 'r', capturedAt: 'now', fileCount: 0 }, createdAt: 'now', files: [] } as EditCheckpoint;
+  const calls: Array<[number, string]> = [];
+  const services = {
+    listSessions: async () => [], verify: async () => [], rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => checkpoint,
+    listRewindCheckpoints: async () => [{ index: 2, eventId: 'event', timestamp: 'now', turnId: 'turn', step: 3, phase: 'finished' as const, state: 'completed' as const }],
+    rewind: async (index: number, mode: 'code' | 'conversation' | 'both') => {
+      calls.push([index, mode]);
+      const agentCheckpoint: AgentCheckpoint = { version: 1, sessionId: 's', turnId: 'turn', runId: 'run', step: 3, phase: 'finished', toolCallsUsed: 0, state: 'completed', items: [] };
+      return { targetIndex: index, mode, checkpoint: agentCheckpoint, restoredPaths: ['a.ts'], skippedPaths: ['b.ts'] };
+    },
+  };
+  assert.match((await executeServiceCommand('/rewind', services, { currentSessionId: 's', confirm: async () => true })).lines[1] ?? '', /checkpoint\[2\]/u);
+  const result = await executeServiceCommand('/rewind 2 --conversation', services, { currentSessionId: 's', confirm: async () => true });
+  assert.match(result.lines[0] ?? '', /conversation/u);
+  assert.deepEqual(calls, [[2, 'conversation']]);
+  assert.match((await executeServiceCommand('/rewind nope', services, { currentSessionId: 's', confirm: async () => true })).lines[0] ?? '', /用法/u);
 });
 
 test('/pause 委托暂停服务并拒绝参数', async () => {

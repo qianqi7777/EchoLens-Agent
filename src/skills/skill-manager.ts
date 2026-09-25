@@ -7,6 +7,8 @@ export interface SkillManifest {
   compatibility?: string;
   license?: string;
   metadata?: Record<string, string>;
+  disableModelInvocation?: boolean;
+  requires?: string[];
 }
 export interface ImportedSkill extends SkillManifest { sourcePath: string; destinationPath: string; entrypoint: string }
 export interface SkillImportOptions { workspaceRoot: string; maxBytes?: number }
@@ -47,9 +49,9 @@ export function parseManifest(content: string, fallbackName: string, options: Pa
     if (separator < 1) continue;
     const key = line.slice(0, separator).trim();
     const value = unquote(line.slice(separator + 1).trim());
-    currentList = key === 'allowed-tools' ? key : undefined;
+    currentList = key === 'allowed-tools' || key === 'requires' ? key : undefined;
     if (value) fields.set(key, value);
-    if (key === 'allowed-tools' && value) {
+    if ((key === 'allowed-tools' || key === 'requires') && value) {
       listFields.set(key, value.replace(/^\[|\]$/gu, '').split(/[,\s]+/u).filter(Boolean));
     }
   }
@@ -74,11 +76,18 @@ export function parseManifest(content: string, fallbackName: string, options: Pa
   const result: SkillManifest = { name, description: description || undefined };
   const allowedTools = listFields.get('allowed-tools');
   if (allowedTools?.length) result.allowedTools = allowedTools;
+  const requires = listFields.get('requires');
+  if (requires?.length) result.requires = requires;
+  const disableModelInvocation = fields.get('disable-model-invocation');
+  if (disableModelInvocation !== undefined) {
+    if (!/^(?:true|false)$/iu.test(disableModelInvocation)) throw new Error('disable-model-invocation 必须是 true 或 false');
+    result.disableModelInvocation = disableModelInvocation.toLowerCase() === 'true';
+  }
   if (fields.has('compatibility')) result.compatibility = fields.get('compatibility');
   if (fields.has('license')) result.license = fields.get('license');
   return result;
 }
 
 function unquote(value: string): string { return value.replace(/^['"]|['"]$/gu, ''); }
-function describesWhen(value: string): boolean { return /\b(?:when|whenever|if|during|for)\b|当|在.+时|用于|适合|触发/u.test(value); }
-function describesWhat(value: string): boolean { return /\b(?:search|run|test|review|manage|find|analy[sz]e|edit|git)\b|帮助|执行|查找|管理|分析|编辑|搜索|测试/u.test(value); }
+function describesWhen(value: string): boolean { return /(?:when|whenever|if|during|for)|当|在.+时|用于|适合|触发/iu.test(value); }
+function describesWhat(value: string): boolean { return /(?:search|run|test|review|manage|find|analy[sz]e|edit|git)|帮助|执行|查找|管理|分析|编辑|搜索|测试/iu.test(value); }

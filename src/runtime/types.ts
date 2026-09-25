@@ -4,6 +4,7 @@ import type {
   ToolOutputMetadata,
 } from '../core/messages.js';
 import type { Permission } from '../core/permissions.js';
+import type { PermissionProfile } from './permission-profile.js';
 export type { Permission } from '../core/permissions.js';
 
 /**
@@ -74,6 +75,7 @@ export interface ToolContext {
   /** Trusted runtime-only marker for an explicitly configured automatic verification call. */
   internalOperation?: 'automatic_verification';
   allowedPermissions: ReadonlySet<Permission>;
+  permissionProfile?: PermissionProfile;
   approvalRequiredPermissions?: ReadonlySet<Permission>;
   approvalContext?: {
     sessionId?: string;

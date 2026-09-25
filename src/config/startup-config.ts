@@ -2,6 +2,7 @@ import { chmod, mkdir, rename, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
+import { parsePermissionProfile } from '../runtime/permission-profile.js';
 
 export interface SetupTerminal {
   question(prompt: string): Promise<string>;
@@ -26,6 +27,7 @@ export async function ensureStartupConfiguration(
   options: StartupConfigurationOptions,
 ): Promise<StartupConfigurationResult> {
   const env = options.env ?? process.env;
+  parsePermissionProfile(env.AGENT_PERMISSION_PROFILE);
   const configPath = resolve(options.projectRoot ?? process.cwd(), '.env.local');
 
   if (!options.force && existsSync(configPath)) {
@@ -127,6 +129,7 @@ async function directConfiguration(
     AGENT_DIRECT_PRIVACY: 'full-context',
     AGENT_DIRECT_STREAMING: 'true',
     AGENT_VERIFY_GATE: env.AGENT_VERIFY_GATE ?? 'auto',
+    AGENT_PERMISSION_PROFILE: env.AGENT_PERMISSION_PROFILE ?? 'auto',
     AGENT_DIRECT_API_KEY: apiKey,
     AGENT_WORKSPACE_ROOT: env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   };
@@ -162,6 +165,7 @@ async function gatewayConfiguration(
     AGENT_GATEWAY_PRIVACY: 'metadata',
     AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
     AGENT_VERIFY_GATE: env.AGENT_VERIFY_GATE ?? 'auto',
+    AGENT_PERMISSION_PROFILE: env.AGENT_PERMISSION_PROFILE ?? 'auto',
     AGENT_WORKSPACE_ROOT: env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   };
 }

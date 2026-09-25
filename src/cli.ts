@@ -30,10 +30,12 @@ import { resolveWorkspaceDirectory, WorkspaceRuntimeManager, type ManagedWorkspa
 import { isModelProviderRunLifecycle, type ModelProvider } from './providers/types.js';
 import { SkillManager } from './skills/skill-manager.js';
 import { SkillLoader } from './skills/loader.js';
+import { SkillRuntime } from './skills/skill-runtime.js';
 import { formatCommandHelp, parseCommandInput } from './commands/command-catalog.js';
 import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
 import { parseAgentPlan, type AgentPlan } from './runtime/structured-output.js';
+import { parsePermissionProfile, type PermissionProfile } from './runtime/permission-profile.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -93,6 +95,7 @@ if (!connectedModel) {
         lineTerminal,
         getTui: () => tui,
         sessionId,
+        permissionProfile: parsePermissionProfile(process.env.AGENT_PERMISSION_PROFILE),
       },
     );
     const initialRuntime = await createRuntime(initialWorkspaceRoot, requestedSession);
@@ -120,6 +123,8 @@ if (!connectedModel) {
       return rollbackTo(items.map((item) => item.checkpoint), index);
     },
     listCheckpoints: () => listEditCheckpoints(manager.currentRuntime().workspaceRoot).then((items) => items.map((item) => item.id)),
+    listRewindCheckpoints: () => manager.currentRuntime().session.listRewindCheckpoints(),
+    rewind: (targetIndex, mode) => manager.currentRuntime().session.rewind(targetIndex, mode),
     pause: () => manager.currentRuntime().session.pause(),
     loadCheckpoint: (id) => loadEditCheckpoint(manager.currentRuntime().workspaceRoot, id),
     diff: (turnId) => manager.currentRuntime().session.changeSet(turnId),
@@ -128,6 +133,7 @@ if (!connectedModel) {
       importSkill: (source) => new SkillManager({ workspaceRoot: manager.currentRuntime().workspaceRoot }).import(source),
       listSkills: async () => (await new SkillLoader({ workspaceRoot: manager.currentRuntime().workspaceRoot }).catalog()).entries,
       loadSkill: (name) => new SkillLoader({ workspaceRoot: manager.currentRuntime().workspaceRoot }).load(name),
+      activateSkill: (name) => new SkillRuntime(new SkillLoader({ workspaceRoot: manager.currentRuntime().workspaceRoot })).activateBundle(name, { manual: true }),
       modelRouting: {
         configure: (mode, phase) => manager.currentRuntime().session.configureModelRouting(mode, phase),
         status: () => manager.currentRuntime().session.modelRoutingStatus(),
@@ -151,6 +157,7 @@ if (!connectedModel) {
         model: status.model ?? 'unknown',
         route: status.route ?? 'unknown',
         privacy: status.privacy,
+        permissionProfile: current.permissionProfile,
         maxContextTokens: model.capabilities.maxContextTokens,
         sessionId: current.sessionId,
         workspaceRoot: current.workspaceRoot,
@@ -324,6 +331,7 @@ interface CliWorkspaceRuntime extends ManagedWorkspaceRuntime {
   backgroundTasks: SubagentBackgroundService;
   startupMessages: string[];
   hooks: LifecycleHookRunner;
+  permissionProfile: PermissionProfile;
 }
 
 interface CreateCliWorkspaceRuntimeOptions {
@@ -333,6 +341,7 @@ interface CreateCliWorkspaceRuntimeOptions {
   lineTerminal?: readline.Interface;
   getTui(): TerminalUi | undefined;
   sessionId?: string;
+  permissionProfile: PermissionProfile;
 }
 
 async function createCliWorkspaceRuntime(
@@ -351,7 +360,13 @@ async function createCliWorkspaceRuntime(
     const hooks = await LifecycleHookRunner.load(workspaceRoot);
     extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
     const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
-    const subagents = new SubagentOrchestrator(runtimeModel, registry, workspaceRoot);
+    const subagents = new SubagentOrchestrator(runtimeModel, registry, workspaceRoot,
+      undefined, undefined, undefined, {
+        modelResolver: (modelId) => {
+          const provider = runtimeModel as ModelProvider & { forkProfile?: (id: string) => ModelProvider };
+          return provider.forkProfile?.(modelId);
+        },
+      });
     registerSubagentTool(registry, subagents);
     backgroundTasks = new SubagentBackgroundService(
       new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
@@ -391,6 +406,7 @@ async function createCliWorkspaceRuntime(
       navigationMode: parseNavigationMode(process.env.AGENT_NAVIGATION_MODE),
       verificationGate: parseVerificationGate(process.env.AGENT_VERIFY_GATE),
       hooks,
+      permissionProfile: options.permissionProfile,
     });
     const sessionRoot = resolve(workspaceRoot, '.echolens', 'sessions');
     session = await SessionRuntime.open(agent, {
@@ -414,6 +430,7 @@ async function createCliWorkspaceRuntime(
       backgroundTasks,
       startupMessages,
       hooks,
+      permissionProfile: options.permissionProfile,
       close: () => closeWorkspaceResources(session, backgroundTasks!, extensions!),
     };
   } catch (error) {

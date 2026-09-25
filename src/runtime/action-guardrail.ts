@@ -30,6 +30,11 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
     args: Record<string, unknown>,
     context: ToolContext,
   ): Promise<ProposedActionDecision> {
+    const effect = tool.effect ?? effectForPermission(tool.permission);
+    const profile = context.permissionProfile ?? 'auto';
+    if (profile === 'read-only' && effect !== 'read') {
+      return outcome('deny', 'permission_profile_read_only', '当前权限档位只允许只读工具', args);
+    }
     if (context.approvalRequiredPermissions?.has(tool.permission)) {
       return outcome(
         'require_approval',
@@ -44,11 +49,13 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
     if (hasDangerousObjectKey(args)) {
       return outcome('deny', 'dangerous_argument_key', '工具参数包含危险对象键', args);
     }
-    const effect = tool.effect ?? effectForPermission(tool.permission);
     // Auto-verification is an explicit runtime configuration. It may run only the
     // registered verifier, whose implementation delegates commands to Sandbox.
     if (context.internalOperation === 'automatic_verification' && tool.name === 'verify_changes') {
       return outcome('allow', 'automatic_verification_allowed', '自动验证由 Sandbox 闸门授权', args);
+    }
+    if (profile === 'full' && (effect === 'write' || effect === 'process')) {
+      return outcome('allow', 'permission_profile_full', 'full 档位自动放行工作区写入和命令执行', args);
     }
     if (effect !== 'read') {
       return outcome(

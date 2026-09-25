@@ -123,6 +123,7 @@ export type AgentEventPayload =
       callId: string;
     }
   | { type: 'checkpoint.saved'; checkpoint: AgentCheckpoint }
+  | { type: 'session.rewound'; checkpoint: AgentCheckpoint; mode: 'conversation' | 'both'; targetIndex: number }
   | {
       type: 'change.set.completed';
       files: string[];

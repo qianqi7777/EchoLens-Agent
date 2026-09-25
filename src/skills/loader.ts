@@ -15,6 +15,8 @@ export interface SkillCatalogEntry {
   source: SkillSource;
   path: string;
   allowedTools?: string[];
+  disableModelInvocation?: boolean;
+  requires?: string[];
 }
 
 export interface LoadedSkill extends SkillCatalogEntry {
@@ -172,6 +174,8 @@ export class SkillLoader {
           source,
           path: resolve(root, relativeDirectory),
           allowedTools,
+          disableModelInvocation: manifest.disableModelInvocation,
+          requires: manifest.requires,
           root,
           relativeDirectory,
         });
@@ -203,7 +207,15 @@ export class SkillLoader {
 }
 
 function publicEntry(record: SkillRecord): SkillCatalogEntry {
-  return { name: record.name, description: record.description, source: record.source, path: record.path, ...(record.allowedTools ? { allowedTools: [...record.allowedTools] } : {}) };
+  return {
+    name: record.name,
+    description: record.description,
+    source: record.source,
+    path: record.path,
+    ...(record.allowedTools ? { allowedTools: [...record.allowedTools] } : {}),
+    ...(record.disableModelInvocation !== undefined ? { disableModelInvocation: record.disableModelInvocation } : {}),
+    ...(record.requires ? { requires: [...record.requires] } : {}),
+  };
 }
 
 function estimateCatalogTokens(entry: SkillCatalogEntry): number {
