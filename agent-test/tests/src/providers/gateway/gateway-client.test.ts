@@ -237,3 +237,65 @@ test('GatewayClient preserves stable token and upstream error codes', async () =
     await upstreamMock.close();
   }
 });
+
+test('GatewayClient fails closed on malformed payloads and preserves Device Flow states', async () => {
+  const json = (value: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(value), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  });
+  const clientFor = (response: Response | (() => Response)) => new GatewayClient({
+    gatewayUrl: 'https://gateway.example.test/',
+    accessToken: 'gateway-token',
+    fetch: async () => typeof response === 'function' ? response() : response,
+  });
+
+  await assert.rejects(clientFor(json({ device_code: 'only-partial' })).createDeviceAuthorization(), (error: unknown) => error instanceof GatewayClientError && error.code === 'invalid_gateway_response');
+  await assert.rejects(clientFor(new Response('', { status: 200 })).account(), (error: unknown) => error instanceof GatewayClientError && error.code === 'invalid_gateway_response');
+  await assert.rejects(clientFor(new Response('{bad-json', { status: 200 })).authStatus(), (error: unknown) => error instanceof GatewayClientError && error.code === 'invalid_gateway_response');
+  await assert.rejects(clientFor(json({ data: [{ id: 'broken', protocols: ['chat_completions'], default_protocol: 'chat_completions' }] })).listModels(), (error: unknown) => error instanceof GatewayClientError && error.code === 'invalid_gateway_response');
+  await assert.rejects(clientFor(json({ access_token: 'only-access', token_type: 'Bearer' })).refreshToken('refresh'), (error: unknown) => error instanceof GatewayClientError && error.code === 'invalid_gateway_response');
+
+  const pending = await clientFor(json({ error: 'authorization_pending', interval: 7 }, 400)).pollDeviceToken('device');
+  assert.deepEqual(pending, { pending: true, interval: 7 });
+  const slowed = await clientFor(json({ error: 'slow_down' }, 400)).pollDeviceToken('device');
+  assert.deepEqual(slowed, { pending: true, interval: 5 });
+  await assert.rejects(clientFor(json({ error: 'expired_token' }, 400)).pollDeviceToken('device'), (error: unknown) => error instanceof GatewayClientError && error.code === 'token_expired');
+  await assert.rejects(clientFor(json({ error: 'access_denied' }, 400)).pollDeviceToken('device'), (error: unknown) => error instanceof GatewayClientError && error.code === 'authentication_required');
+
+  await assert.rejects(clientFor(new Response('not-json', { status: 200 })).revokeToken('token'), (error: unknown) => error instanceof GatewayClientError && error.code === 'invalid_gateway_response');
+});
+
+test('GatewayClient maps request cancellation and timeout without leaking causes', async () => {
+  const controller = new AbortController();
+  controller.abort('Bearer sk-gateway-secret');
+  const cancelled = new GatewayClient({
+    gatewayUrl: 'https://gateway.example.test',
+    accessToken: 'gateway-token',
+    fetch: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (init?.signal?.aborted) abort();
+      else init?.signal?.addEventListener('abort', abort, { once: true });
+    }),
+  });
+  await assert.rejects(cancelled.authStatus(controller.signal), (error: unknown) => (
+    error instanceof GatewayClientError
+      && error.code === 'request_cancelled'
+      && error.retryable === false
+      && !JSON.stringify(error).includes('sk-gateway-secret')
+  ));
+
+  const timeout = new GatewayClient({
+    gatewayUrl: 'https://gateway.example.test',
+    accessToken: 'gateway-token',
+    requestTimeoutMs: 5,
+    fetch: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (init?.signal?.aborted) abort();
+      else init?.signal?.addEventListener('abort', abort, { once: true });
+    }),
+  });
+  await assert.rejects(timeout.authStatus(), (error: unknown) => error instanceof GatewayClientError
+    && error.code === 'gateway_unreachable'
+    && error.retryable
+    && error.message.includes('超时'));
+});

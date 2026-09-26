@@ -6,6 +6,7 @@ import test from 'node:test';
 import { textMessage } from '../../../../../src/core/messages.js';
 import { ProviderError } from '../../../../../src/providers/provider-error.js';
 import { redactHeaders, redactUrl, redactValue } from '../../../../../src/providers/redaction.js';
+import { parseRetryAfter, runWithRetry } from '../../../../../src/providers/retry-policy.js';
 import { OpenAICompatibleProvider } from '../../../../../src/providers/openai-compatible/client.js';
 import type { OpenAICompatibleProviderOptions } from '../../../../../src/providers/openai-compatible/types.js';
 
@@ -269,6 +270,51 @@ test('request deadlines are classified as retryable timeouts', async () => {
   );
 });
 
+test('Provider rejects unsupported request capabilities before network access', async () => {
+  let calls = 0;
+  const provider = providerFor('https://provider.invalid/v1', { fetch: async () => { calls += 1; return new Response(); } });
+  await assert.rejects(provider.complete({ items: [], toolChoice: 'required' }), (error: unknown) => error instanceof ProviderError && error.code === 'tool_choice_without_tools');
+  await assert.rejects(provider.complete({ items: [], responseFormat: { name: 'result', schema: { type: 'object', additionalProperties: false }, strict: true } }), (error: unknown) => error instanceof ProviderError && error.code === 'structured_output_unsupported');
+  const streaming = provider.stream?.({ items: [] });
+  assert.ok(streaming);
+  await assert.rejects((async () => { for await (const _event of streaming) { /* unsupported */ } })(), (error: unknown) => error instanceof ProviderError && error.code === 'streaming_unsupported');
+  assert.equal(calls, 0);
+});
+
+test('Provider maps HTTP status and malformed response classes without leaking body text', async () => {
+  const cases: Array<[number, string | undefined, string | undefined, string]> = [
+    [402, undefined, undefined, 'billing'],
+    [403, undefined, undefined, 'permission'],
+    [404, undefined, undefined, 'not_found'],
+    [408, undefined, undefined, 'timeout'],
+    [409, undefined, undefined, 'invalid_request'],
+    [413, undefined, undefined, 'context_length'],
+    [422, undefined, undefined, 'invalid_request'],
+    [451, undefined, undefined, 'unknown'],
+    [400, 'moderation', 'blocked by safety policy', 'content_filter'],
+  ];
+  for (const [status, code, message, expected] of cases) {
+    const provider = providerFor('https://provider.invalid/v1', {
+      fetch: async () => new Response(JSON.stringify({ error: { code, message } }), {
+        status, headers: { 'content-type': 'application/json', 'retry-after': '0' },
+      }),
+      retry: { maxRetries: 0 },
+    });
+    await assert.rejects(provider.complete({ items: [textMessage('user-1', 'user', 'hello')] }), (error: unknown) => {
+      assert.ok(error instanceof ProviderError);
+      assert.equal(error.kind, expected);
+      assert.equal(error.status, status);
+      return true;
+    });
+  }
+
+  const malformed = providerFor('https://provider.invalid/v1', {
+    fetch: async () => new Response('not-json', { status: 200 }),
+    retry: { maxRetries: 0 },
+  });
+  await assert.rejects(malformed.complete({ items: [] }), (error: unknown) => error instanceof ProviderError && error.code === 'invalid_provider_response');
+});
+
 test('redaction handles headers, query strings, nested values, and errors', () => {
   const secret = 'sk-another-secret-value';
   const headers = redactHeaders({
@@ -288,6 +334,97 @@ test('redaction handles headers, query strings, nested values, and errors', () =
   assert.equal(serialized.includes(secret), false);
   assert.equal(serialized.includes('short-secret'), false);
   assert.equal(serialized.includes('[REDACTED]') || serialized.includes('%5BREDACTED%5D'), true);
+});
+
+test('retry policy parses bounded seconds, HTTP dates, and malformed Retry-After values', () => {
+  assert.equal(parseRetryAfter(null), undefined);
+  assert.equal(parseRetryAfter('0'), 0);
+  assert.equal(parseRetryAfter('1.25'), 1250);
+  assert.equal(parseRetryAfter('-1'), undefined);
+  assert.equal(parseRetryAfter('not-a-date'), undefined);
+  assert.equal(parseRetryAfter('Thu, 01 Jan 1970 00:00:01 GMT', 0), 1000);
+  assert.equal(parseRetryAfter('Thu, 01 Jan 1970 00:00:01 GMT', 2000), 0);
+});
+
+test('retry policy reports retry metadata and stops at the retry budget', async () => {
+  let calls = 0;
+  const notifications: Array<{ failedAttempt: number; nextAttempt: number; delayMs: number; code: string }> = [];
+  const result = await runWithRetry(
+    async (attempt) => {
+      calls += 1;
+      if (attempt === 1) {
+        throw new ProviderError({ kind: 'network', message: 'temporary', retryable: true, code: 'network' });
+      }
+      return 'ok';
+    },
+    {
+      baseDelayMs: 10,
+      random: () => 0,
+      sleep: async () => {},
+    },
+    undefined,
+    async (notification) => { notifications.push(notification); },
+  );
+
+  assert.equal(result.value, 'ok');
+  assert.equal(result.attempts, 2);
+  assert.equal(calls, 2);
+  assert.deepEqual(notifications, [{ failedAttempt: 1, nextAttempt: 2, delayMs: 5, code: 'network' }]);
+
+  let nowCalls = 0;
+  await assert.rejects(
+    runWithRetry(
+      async () => { throw new ProviderError({ kind: 'network', message: 'still down', retryable: true }); },
+      {
+        totalBudgetMs: 20,
+        baseDelayMs: 100,
+        random: () => 1,
+        now: () => [0, 5, 5][Math.min(nowCalls++, 2)] ?? 5,
+        sleep: async () => { throw new Error('budget should avoid sleeping'); },
+      },
+    ),
+    (error: unknown) => error instanceof ProviderError
+      && error.kind === 'network'
+      && error.attempts === 1,
+  );
+});
+
+test('retry policy fails closed for unknown errors, exhausted budgets, and cancellation', async () => {
+  await assert.rejects(
+    runWithRetry(async () => { throw new Error('unexpected'); }, { maxRetries: 3, sleep: async () => {} }),
+    (error: unknown) => error instanceof ProviderError
+      && error.kind === 'unknown'
+      && error.retryable === false
+      && error.code === 'unknown_provider_error'
+      && error.attempts === 1,
+  );
+
+  let nowCalls = 0;
+  await assert.rejects(
+    runWithRetry(async () => 'unreachable', {
+      totalBudgetMs: 1,
+      now: () => [0, 2][Math.min(nowCalls++, 1)] ?? 2,
+    }),
+    (error: unknown) => error instanceof ProviderError && error.code === 'request_budget_exhausted',
+  );
+
+  const controller = new AbortController();
+  controller.abort('user cancelled');
+  await assert.rejects(
+    runWithRetry(async () => 'unreachable', {}, controller.signal),
+    (error: unknown) => error instanceof ProviderError && error.kind === 'cancelled',
+  );
+});
+
+test('default retry sleep responds to cancellation during backoff', async () => {
+  const controller = new AbortController();
+  const completion = runWithRetry(
+    async () => { throw new ProviderError({ kind: 'network', message: 'temporary', retryable: true }); },
+    { baseDelayMs: 50, random: () => 0 },
+    controller.signal,
+  );
+  setTimeout(() => controller.abort(), 1);
+  await assert.rejects(completion, (error: unknown) => error instanceof ProviderError && error.kind === 'cancelled');
 });
 
 function providerFor(baseUrl: string, overrides: Partial<OpenAICompatibleProviderOptions> = {}) {

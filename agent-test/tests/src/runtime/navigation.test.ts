@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ECHOLENS_FEATURES } from '../../../../src/navigation/feature-index.js';
-import { NavigationResolver, parseNavigationMode } from '../../../../src/navigation/navigation-resolver.js';
+import { NavigationResolver, navigationResolverFor, parseNavigationMode } from '../../../../src/navigation/navigation-resolver.js';
 import type { FeatureIndexEntry } from '../../../../src/navigation/types.js';
 import { WorkspaceIndex } from '../../../../src/navigation/workspace-index.js';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
@@ -154,6 +154,104 @@ test('workspace_search and list_files expose bounded indexed evidence through To
   assert.equal(docs.status, 'ok');
   assert.match(docs.content, /README\.md/u);
   assert.doesNotMatch(docs.content, /model-routing\.ts/u);
+});
+
+test('workspace read, grep, and list tools enforce bounded ranges and text kinds', async (context) => {
+  const root = await fixture(context);
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const executor = new ToolExecutor(registry);
+  const toolContext = {
+    workspaceRoot: root,
+    allowedPermissions: new Set<'workspace.read'>(['workspace.read']),
+    signal: new AbortController().signal,
+  };
+
+  const read = await executor.invoke('read_file', { path: 'src/model-routing.ts', start: 1, end: 1 }, toolContext);
+  assert.equal(read.status, 'ok');
+  assert.match(read.content, /^1: export class RouteEngine/u);
+  const contentHash = (read.data as { contentHash?: string }).contentHash;
+  assert.match(String(contentHash), /^[a-f0-9]{64}$/u);
+
+  const reversed = await executor.invoke('read_file', { path: 'src/model-routing.ts', start: 2, end: 1 }, toolContext);
+  assert.equal(reversed.status, 'invalid');
+  assert.equal(reversed.error?.code, 'invalid_arguments');
+  const missing = await executor.invoke('read_file', { path: 'missing.ts' }, toolContext);
+  assert.equal(missing.status, 'denied');
+  assert.equal(missing.error?.code, 'permission_denied');
+
+  const grep = await executor.invoke('grep', { pattern: 'RouteEngine', path: 'src' }, toolContext);
+  assert.equal(grep.status, 'ok');
+  assert.match(grep.content, /src\/model-routing\.ts:1:/u);
+  const noGrep = await executor.invoke('grep', { pattern: 'not-present', path: 'src' }, toolContext);
+  assert.equal(noGrep.status, 'ok');
+  assert.match(noGrep.content, /未找到/u);
+
+  const sources = await executor.invoke('list_files', { kind: 'source' }, toolContext);
+  assert.equal(sources.status, 'ok');
+  assert.match(sources.content, /src\/model-routing\.ts/u);
+  const tests = await executor.invoke('list_files', { path: 'tests', kind: 'tests' }, toolContext);
+  assert.equal(tests.status, 'ok');
+  assert.match(tests.content, /tests\/model-routing\.test\.ts/u);
+  const readme = await executor.invoke('list_files', { path: 'README.md', kind: 'all-text' }, toolContext);
+  assert.equal(readme.status, 'ok');
+  assert.equal(readme.content, 'README.md');
+
+  const invalidDirectory = await executor.invoke('list_files', { path: 'missing', kind: 'all-text' }, toolContext);
+  assert.equal(invalidDirectory.status, 'denied');
+  assert.equal(invalidDirectory.error?.code, 'permission_denied');
+});
+
+test('workspace apply_patch returns a checkpoint and classifies patch conflicts', async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'echolens-apply-patch-'));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'src'), { recursive: true });
+  await writeFile(path.join(root, 'src', 'model-routing.ts'), 'export class RouteEngine {}\n');
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const executor = new ToolExecutor(registry, {
+    approvalDecider: async () => ({ decision: 'allow', scope: 'once', decidedAt: new Date().toISOString() }),
+  });
+  const toolContext = {
+    workspaceRoot: root,
+    allowedPermissions: new Set<'workspace.write'>(['workspace.write']),
+    signal: new AbortController().signal,
+  };
+
+  const created = await executor.invoke('apply_patch', {
+    patch: { version: 1, operations: [{ op: 'create', path: 'src/new-note.ts', content: 'export const note = true;\n' }] },
+  }, toolContext);
+  assert.equal(created.status, 'ok');
+  assert.match(created.summary, /checkpoint=/u);
+  assert.deepEqual((created.data as { changedFiles: string[] }).changedFiles, ['src/new-note.ts']);
+  assert.match(await readFile(path.join(root, 'src/new-note.ts'), 'utf8'), /note = true/u);
+
+  const conflict = await executor.invoke('apply_patch', {
+    patch: { version: 1, operations: [{ op: 'replace', path: 'src/model-routing.ts', oldString: 'missing', newString: 'different' }] },
+  }, toolContext);
+  assert.equal(conflict.status, 'invalid');
+  assert.equal(conflict.error?.code, 'patch_context_mismatch');
+});
+
+test('workspace_search falls back to bounded literal scanning when the index is unavailable', async (context) => {
+  const root = await fixture(context);
+  await writeFile(path.join(root, 'notes.txt'), 'RouteEngine visible fallback\n');
+  await writeFile(path.join(root, 'credentials.txt'), 'RouteEngine secret should not be read\n');
+  await writeFile(path.join(root, 'AGENTS.md'), 'RouteEngine instructions are private\n');
+  const resolver = navigationResolverFor(root);
+  resolver.workspaceIndex.search = async () => { throw new Error('index unavailable'); };
+
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ToolExecutor(registry).invoke('workspace_search', { query: 'RouteEngine', limit: 10 }, {
+    workspaceRoot: root,
+    allowedPermissions: new Set<'workspace.read'>(['workspace.read']),
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal((result.data as { fallbackReason?: string }).fallbackReason, 'workspace_index_unavailable');
+  assert.match(result.content, /notes\.txt:1/iu);
+  assert.doesNotMatch(result.content, /credentials|AGENTS/iu);
 });
 
 async function fixture(context: test.TestContext): Promise<string> {

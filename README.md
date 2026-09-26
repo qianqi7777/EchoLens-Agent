@@ -34,6 +34,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 方案竞争可复用持久 Worker 池并行生成候选，必须提供显式评分函数后才会选优
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
 - 提供 `git_status`、`git_diff`、`git_log` 三个受限 Git 只读工具，以及 `apply_unified_diff`（转换为结构化 Patch 后复用审批、哈希、检查点与回滚管线）
+- 当前固定工具注册表共 21 个（含 Git 只读工具、统一 Diff 和三类受限子 Agent 委派工具）；MCP 工具按用户配置动态增加，不计入固定数
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
 - 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
 - 自动验证可将 TAP、Jest、pytest、Go test 和 Cargo test 的失败输出解析为有界结构化摘要；未知格式仍保留脱敏后的原始输出
@@ -218,7 +219,7 @@ npm run audit
 
 测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
 由 `package.json` 和 `.github/workflows/ci.yml` 定义。
-Security 当前为 22 个已登记测试；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
+Security 当前为 31 个已登记测试用例；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
 `npm run eval:fixed` 运行 6 项固定版本地静态 Candidate 套件，并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；该套件验证本地 Grader/结构化 Patch/安全事件判据，不代表真实模型完成率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
 CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage 分为独立 job；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
 
@@ -273,7 +274,7 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
 按索引回退使用当前工作区检查点目录中按 `createdAt` 排序的检查点，索引从 0 开始；中途失败会停止并报告已处理范围，不提供跨工作区或强制覆盖用户后续修改的回退。
 手动暂停只在工具批次完成后、下一次模型调用前生效；模型请求或工具执行中不会被硬中断。命令行非交互执行不能在已阻塞的同步输入期间注入 `/pause`，TUI 支持运行中输入该命令。
-当前全量 `src/` 覆盖率实测为行 84.92%、函数 89.65%、分支 77.60%（20,612 行计数；LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+当前全量 `src/` 覆盖率实测为 Statements/Lines 87.28%、Functions 92.28%、Branches 79.99%（LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）；覆盖率门禁按行 84%、函数 88%、分支 76% 设置，尚不支持“核心模块覆盖率 95%”的表述。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，
@@ -284,7 +285,7 @@ A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/T
 Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
 事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝。
 审计导出只接受完整链，导出包可由 `verifyAuditExport` 离线校验；本地审计文件可被整体替换，因此哈希链不提供不可抵赖性。工作区外授权根默认为空，只能由用户控制的 `.echolens/roots.json` 配置，且每次写入都必须单独审批，不支持永久放行整个根。
-并发压测与路由基准使用本地 Provider，报告的是实际运行参数与结果，不等同于真实模型服务的长期可用性或质量保证。
+并发压测与路由基准使用本地 Provider，压测脚本允许显式设置最多 50 个并发任务；长期运行时报告保留全部尝试的分母与观测计数，仅保留失败详情，避免把成功样本无限累积到内存。结果仍只代表实际运行参数，不等同于真实模型服务的长期可用性或质量保证；未实际运行 24 小时就不能写成 24 小时稳定性结论。
 可复现命令：`npm run eval:concurrency-soak -- --seconds 10 --concurrency 4`、`npm run eval:routing-benchmark`；无头执行使用 `npx tsx src/cli.ts --json --prompt "..."`，无模型配置时 fail-closed。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`

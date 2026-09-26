@@ -29,37 +29,62 @@ interface Attempt {
   error?: string;
 }
 
+interface AttemptAccumulator {
+  denominator: number;
+  userModificationPreserved: number;
+  duplicateToolExecution: number;
+  taskRecoverable: number;
+  failures: Attempt[];
+}
+
 async function main(): Promise<void> {
-  const concurrency = positiveOption('--concurrency', 4, 32);
+  // 压测脚本允许复现实验声明中的 50 并发；这只是本地探针并不改变后台 Worker
+  // 的生产上限（仍由 WorkerPool 独立限制为 1-32）。运行时长必须由调用方显式给出，
+  // 结果报告会保留实际 elapsedMs，不把配置时长冒充已执行时长。
+  const concurrency = positiveOption('--concurrency', 4, 50);
   const seconds = positiveOption('--seconds', 1, 86_400);
   const rounds = positiveOption('--rounds', 0, 100_000);
   const output = option('--output') ?? join(process.cwd(), '.echolens', 'evals', 'results', `concurrency-${new Date().toISOString().replace(/[:.]/gu, '-')}.json`);
   const rawOutput = option('--raw-log') ?? output.replace(/\.json$/u, '.jsonl');
   const startedAt = Date.now();
-  const attempts: Attempt[] = [];
-  await Promise.all(Array.from({ length: concurrency }, (_, worker) => runWorker(worker, startedAt, seconds * 1_000, rounds, attempts)));
+  // 长时间运行时不能把每个成功样本永久留在内存中：只累计可核验计数，并保留失败详情。
+  // 这样分母和三项观测仍覆盖全部尝试，失败样本也能通过 JSONL 复查。
+  const accumulator: AttemptAccumulator = {
+    denominator: 0, userModificationPreserved: 0, duplicateToolExecution: 0,
+    taskRecoverable: 0, failures: [],
+  };
+  await Promise.all(Array.from({ length: concurrency }, (_, worker) => runWorker(worker, startedAt, seconds * 1_000, rounds, accumulator)));
   const report = {
     version: 1, suite: 'concurrency-soak', generatedAt: new Date().toISOString(),
     requested: { concurrency, seconds, rounds: rounds || 'until-duration' },
-    elapsedMs: Date.now() - startedAt, denominator: attempts.length,
+    elapsedMs: Date.now() - startedAt, denominator: accumulator.denominator,
     observations: {
-      userModificationPreserved: attempts.filter((item) => item.userModificationPreserved).length,
-      duplicateToolExecution: attempts.filter((item) => item.duplicateToolExecution).length,
-      taskRecoverable: attempts.filter((item) => item.taskRecoverable).length,
+      userModificationPreserved: accumulator.userModificationPreserved,
+      duplicateToolExecution: accumulator.duplicateToolExecution,
+      taskRecoverable: accumulator.taskRecoverable,
     },
-    attempts,
+    failureCount: accumulator.failures.length,
+    failures: accumulator.failures,
   };
   await mkdir(resolve(output, '..'), { recursive: true });
   await writeFile(output, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  await writeFile(rawOutput, attempts.map((item) => JSON.stringify(item)).join('\n') + (attempts.length ? '\n' : ''), { encoding: 'utf8', mode: 0o600 });
-  console.log(JSON.stringify({ output, rawOutput, elapsedMs: report.elapsedMs, denominator: report.denominator, observations: report.observations }));
+  await writeFile(rawOutput, accumulator.failures.map((item) => JSON.stringify(item)).join('\n') + (accumulator.failures.length ? '\n' : ''), { encoding: 'utf8', mode: 0o600 });
+  console.log(JSON.stringify({ output, rawOutput, elapsedMs: report.elapsedMs, denominator: report.denominator, failureCount: report.failureCount, observations: report.observations }));
 }
 
-async function runWorker(worker: number, startedAt: number, durationMs: number, maxRounds: number, sink: Attempt[]): Promise<void> {
+async function runWorker(worker: number, startedAt: number, durationMs: number, maxRounds: number, sink: AttemptAccumulator): Promise<void> {
   let round = 0;
   while (maxRounds > 0 ? round < maxRounds : Date.now() - startedAt < durationMs) {
     round += 1;
-    sink.push(await runAttempt(worker, round));
+    const attempt = await runAttempt(worker, round);
+    sink.denominator += 1;
+    if (attempt.userModificationPreserved) sink.userModificationPreserved += 1;
+    if (attempt.duplicateToolExecution) sink.duplicateToolExecution += 1;
+    if (attempt.taskRecoverable) sink.taskRecoverable += 1;
+    if (attempt.error !== undefined || attempt.state === 'failed'
+      || !attempt.userModificationPreserved || attempt.duplicateToolExecution || !attempt.taskRecoverable) {
+      sink.failures.push(attempt);
+    }
     if (maxRounds > 0 && round >= maxRounds) break;
   }
 }

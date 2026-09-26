@@ -3,7 +3,17 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { applyPatch, PatchError, previewPatch, rollbackCheckpoint } from '../../../../src/runtime/structured-patch.js';
+import {
+  applyPatch,
+  listEditCheckpointIds,
+  loadEditCheckpoint,
+  normalizePatch,
+  PatchError,
+  previewPatch,
+  restoreFiles,
+  rollbackCheckpoint,
+  saveEditCheckpoint,
+} from '../../../../src/runtime/structured-patch.js';
 
 async function workspace(context: test.TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'echolens-patch-'));
@@ -76,4 +86,47 @@ test('回滚不会覆盖 Patch 完成后产生的用户修改', async (context) 
   const rollback = await rollbackCheckpoint(applied.checkpoint);
   assert.deepEqual(rollback.skippedPaths, ['file.txt']);
   assert.equal(await readFile(join(root, 'file.txt'), 'utf8'), 'user-change\n');
+});
+
+test('Patch schema validation rejects malformed operations and configured limits', async () => {
+  const invalidCases: unknown[] = [
+    undefined,
+    { version: 2, operations: [] },
+    { version: 1, operations: [] },
+    { version: 1, operations: [{ op: 'replace', path: 'a.txt' }] },
+    { version: 1, operations: [{ op: 'overwrite', path: 'a.txt', content: 'x' }] },
+    { version: 1, operations: [{ op: 'delete', path: 'a.txt' }] },
+    { version: 1, operations: [{ op: 'unknown', path: 'a.txt' }] },
+    { version: 1, operations: [{ op: 'create', path: '../outside.txt', content: 'x' }] },
+    { version: 1, operations: [{ op: 'create', path: 'a.txt', content: 'x' }, { op: 'create', path: './a.txt', content: 'y' }] },
+  ];
+  for (const value of invalidCases) assert.throws(() => normalizePatch(value));
+  assert.throws(() => normalizePatch({ version: 1, operations: [{ op: 'create', path: 'a.txt', content: 'x' }, { op: 'create', path: 'b.txt', content: 'y' }] }, { maxFiles: 1 }), /文件数/u);
+  assert.throws(() => normalizePatch({ version: 1, operations: [{ op: 'create', path: 'a.txt', content: 'x' }] }, { maxOperations: 0 }), /操作数/u);
+});
+
+test('Patch persists checkpoints, enforces context, and rejects binary text', async (context) => {
+  const root = await workspace(context);
+  await writeFile(join(root, 'file.txt'), 'before\nanchor\nafter\n');
+  const applied = await applyPatch(root, {
+    version: 1,
+    operations: [{ op: 'replace', path: 'file.txt', oldString: 'anchor', newString: 'changed', expectedContext: { before: 'before\n', after: '\nafter' } }],
+  });
+  const checkpointId = await saveEditCheckpoint(root, applied.checkpoint);
+  assert.equal((await listEditCheckpointIds(root)).includes(checkpointId), true);
+  assert.equal((await loadEditCheckpoint(root, checkpointId)).workspaceRoot, applied.checkpoint.workspaceRoot);
+  await writeFile(join(root, 'file.txt'), 'user\n');
+  await assert.rejects(restoreFiles(root, checkpointId, []), (error) => error instanceof PatchError && error.code === 'patch_invalid');
+  await assert.rejects(restoreFiles(root, checkpointId, ['unknown.txt']), (error) => error instanceof PatchError && error.code === 'patch_invalid');
+
+  await assert.rejects(previewPatch(root, {
+    version: 1,
+    operations: [{ op: 'replace', path: 'file.txt', oldString: 'user', newString: 'x', expectedContext: { before: 'wrong' } }],
+  }), (error) => error instanceof PatchError && error.code === 'patch_context_mismatch');
+
+  await writeFile(join(root, 'binary.bin'), Buffer.from([0xff, 0xfe, 0xfd]));
+  await assert.rejects(previewPatch(root, {
+    version: 1,
+    operations: [{ op: 'replace', path: 'binary.bin', oldString: 'x', newString: 'y' }],
+  }), (error) => error instanceof PatchError && error.code === 'patch_binary_unsupported');
 });

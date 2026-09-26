@@ -265,6 +265,58 @@ test('routing configuration rejects invalid values instead of silently changing 
   );
 });
 
+test('routing environment parser validates optional profile fields and scalar bounds', async () => {
+  assert.equal(routingMode(' fast '), 'fast');
+  assert.equal(routingMode('pinned:profile_1'), 'pinned:profile_1');
+  const primary = new StubProvider('primary-model', () => answer('primary'));
+  const validProfiles = JSON.stringify([
+    {
+      id: 'direct-extra', tier: 1, route: 'direct', model: 'direct-model',
+      providerUrl: 'http://localhost:3000', protocol: 'chat_completions', streaming: false,
+      credentialRef: 'env:DIRECT_KEY', privacy: 'metadata', estimatedInputCostPer1k: 0.1,
+      estimatedOutputCostPer1k: 0.2, latencyHintMs: 50,
+      capabilities: { supportsStreaming: false, supportsToolCalls: true, maxContextTokens: 4096 },
+    },
+    {
+      id: 'gateway-extra', tier: 3, route: 'gateway', model: 'gateway-model',
+      gatewayUrl: 'http://localhost:3001', credentialRef: 'env:GATEWAY_KEY', privacy: 'evidence',
+      capabilities: { supportsStructuredOutput: true },
+    },
+  ]);
+  const connection = await connectRoutedModelProviderFromEnv(primary, primaryStatus, {
+    AGENT_ROUTING_MODE: 'balanced', AGENT_ROUTING_DEFAULT_TIER: '1',
+    AGENT_ROUTING_DEFAULT_INPUT_COST_PER_1K: '0.5', AGENT_ROUTING_DEFAULT_OUTPUT_COST_PER_1K: '1.5',
+    AGENT_ROUTING_DEFAULT_LATENCY_MS: '25', AGENT_ROUTING_ALLOW_TIER_DOWNGRADE: '0',
+    AGENT_ROUTING_MAX_FALLBACKS: '0', AGENT_MODEL_PROFILES: validProfiles,
+  });
+  assert.equal(connection.profiles[0]?.tier, 1);
+  assert.equal(connection.profiles[0]?.estimatedInputCostPer1k, 0.5);
+  assert.equal(connection.profiles[0]?.latencyHintMs, 25);
+  assert.equal(connection.profiles.length, 1);
+  assert.equal(connection.notices.length, 2);
+
+  const invalidEnvs: Array<[string, string]> = [
+    ['AGENT_ROUTING_DEFAULT_TIER', '4'],
+    ['AGENT_ROUTING_DEFAULT_INPUT_COST_PER_1K', '-1'],
+    ['AGENT_ROUTING_DEFAULT_LATENCY_MS', '0'],
+    ['AGENT_ROUTING_ALLOW_TIER_DOWNGRADE', 'yes'],
+    ['AGENT_ROUTING_MAX_FALLBACKS', '-1'],
+  ];
+  for (const [key, value] of invalidEnvs) {
+    await assert.rejects(connectRoutedModelProviderFromEnv(primary, primaryStatus, { [key]: value }), new RegExp(key));
+  }
+
+  const invalidProfiles: unknown[] = [
+    { id: 'bad-route', tier: 1, route: 'other', model: 'm', credentialRef: 'env:K', privacy: 'metadata' },
+    { id: 'missing-model', tier: 1, route: 'direct', providerUrl: 'http://localhost', protocol: 'responses', credentialRef: 'env:K', privacy: 'metadata' },
+    { id: 'bad-protocol', tier: 1, route: 'direct', model: 'm', providerUrl: 'http://localhost', protocol: 'chat', credentialRef: 'env:K', privacy: 'metadata' },
+    { id: 'bad-capabilities', tier: 1, route: 'direct', model: 'm', providerUrl: 'http://localhost', protocol: 'responses', credentialRef: 'env:K', privacy: 'metadata', capabilities: { supportsToolCalls: 'yes' } },
+  ];
+  for (const profile of invalidProfiles) {
+    await assert.rejects(connectRoutedModelProviderFromEnv(primary, primaryStatus, { AGENT_MODEL_PROFILES: JSON.stringify([profile]) }));
+  }
+});
+
 test('unavailable extra profiles leave the primary route usable and report a notice', async () => {
   const primary = new StubProvider('primary-model', () => answer('primary'));
   const connection = await connectRoutedModelProviderFromEnv(primary, primaryStatus, {
