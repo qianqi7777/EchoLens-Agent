@@ -161,6 +161,23 @@ test('事件日志中的空行、非法结构和不存在文件读取均失败�
   assert.deepEqual(await JsonlEventStore.list(join(root, 'not-created')), []);
 });
 
+test('事件序号缺口和混合哈希链均失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-seq-gap-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'gap.jsonl'), `${JSON.stringify(event(1))}\n${JSON.stringify(event(3))}\n`);
+  await assert.rejects(new JsonlEventStore(root, 'gap').read(), EventStoreCorruptionError);
+  const chained = new JsonlEventStore(root, 'mixed-chain', { flushEachEvent: false });
+  await chained.append({ payload: { type: 'session.created', workspaceRoot: root } });
+  await chained.append({ payload: { type: 'turn.started', userMessage: 'second' } });
+  await chained.append({ payload: { type: 'turn.started', userMessage: 'third' } });
+  await chained.close();
+  const lines = (await readFile(join(root, 'mixed-chain.jsonl'), 'utf8')).trim().split('\n');
+  const third = JSON.parse(lines[2]!) as Record<string, unknown>;
+  delete third.prevHash;
+  await writeFile(join(root, 'mixed-chain.jsonl'), `${lines[0]}\n${lines[1]}\n${JSON.stringify(third)}\n`);
+  await assert.rejects(new JsonlEventStore(root, 'mixed-chain').read(), EventStoreCorruptionError);
+});
+
 test('同一 Session 拒绝第二个写者，关闭后可以重新打开', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-events-lock-'));
   context.after(() => rm(root, { recursive: true, force: true }));

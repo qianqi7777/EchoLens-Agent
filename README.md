@@ -274,7 +274,7 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
 按索引回退使用当前工作区检查点目录中按 `createdAt` 排序的检查点，索引从 0 开始；中途失败会停止并报告已处理范围，不提供跨工作区或强制覆盖用户后续修改的回退。
 手动暂停只在工具批次完成后、下一次模型调用前生效；模型请求或工具执行中不会被硬中断。命令行非交互执行不能在已阻塞的同步输入期间注入 `/pause`，TUI 支持运行中输入该命令。
-当前全量 `src/` 覆盖率实测为 Statements/Lines 89.03%、Functions 94.15%、Branches 81.47%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）为 Statements/Lines 94.85%（14372/15153）、Functions 97.34%、Branches 83.27%（LCOV 仅包含 `src/`，排除 Eval Harness 与 Gateway 源码）。覆盖率门禁按行 84%、函数 88%、分支 76% 设置；核心语句覆盖率距离 95% 仍差 24 条，不能写成已达成 95%。复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+最近一次完整且全绿的覆盖率实测为全量 `src/` Statements/Lines 89.03%、Functions 94.15%、Branches 81.47%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）为 Statements/Lines 94.91%（14382/15153），距离 95% 仍差 14 条。之后新增测试尚未完成一次全绿覆盖率重跑（Windows 并发锁用例曾两次以 EPERM 中断），不能把未验证结果写成达标。覆盖率门禁按行 84%、函数 88%、分支 76% 设置；复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，

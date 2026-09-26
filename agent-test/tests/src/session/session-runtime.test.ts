@@ -361,6 +361,56 @@ test('Session 检查点列表保持时间索引并对请求数量设上限', asy
   assert.ok(all.every((item) => item.eventId && item.turnId && Number.isInteger(item.step)));
 });
 
+test('批准计划可直接转为目标，目标证据可恢复并在关闭后清空', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-session-goal-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const registry = new ToolRegistry();
+  const session = await SessionRuntime.open(
+    new ReactAgent(finalProvider([]), registry, new ToolExecutor(registry), { workspaceRoot: root }),
+    { rootDirectory: join(root, 'sessions'), workspaceRoot: root, sessionId: 'goal-session' },
+  );
+  const plan = {
+    objective: '完成安全审计',
+    steps: [{ id: 'step-1', objective: '检查边界', verification: '测试通过', evidenceRequired: ['test'] }],
+    risks: [], completionCriteria: ['结果可复现'],
+  };
+  const goal = await session.approvePlanAsGoal('plan-1', plan);
+  assert.equal(goal.statement, '完成安全审计');
+  assert.deepEqual(session.goalStatus()?.criteria, ['检查边界']);
+  const evidence = await session.appendGoalEvidence('note', 'test:goal', '  已通过  ');
+  assert.equal(evidence.summary, '已通过');
+  assert.equal(session.goalStatus()?.evidence.length, 1);
+  await session.closeGoal('met');
+  assert.equal(session.goalStatus(), undefined);
+  await session.close();
+  const reopened = await SessionRuntime.open(
+    new ReactAgent(finalProvider([]), registry, new ToolExecutor(registry), { workspaceRoot: root }),
+    { rootDirectory: join(root, 'sessions'), workspaceRoot: root, sessionId: 'goal-session' },
+  );
+  assert.equal(reopened.goalStatus(), undefined);
+  await reopened.close();
+});
+
+test('Session 恢复拒绝缺少创建事件，并暴露当前上下文报告接口', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-session-invalid-history-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new JsonlEventStore(join(root, 'sessions'), 'missing-created');
+  await store.append({ payload: { type: 'turn.started', userMessage: 'orphan event' } });
+  await store.close();
+  const registry = new ToolRegistry();
+  const agent = new ReactAgent(finalProvider([]), registry, new ToolExecutor(registry), { workspaceRoot: root });
+  await assert.rejects(SessionRuntime.open(agent, {
+    rootDirectory: join(root, 'sessions'), workspaceRoot: root, sessionId: 'missing-created',
+  }), /缺少创建事件/u);
+
+  const fresh = await SessionRuntime.open(
+    new ReactAgent(finalProvider([]), registry, new ToolExecutor(registry), { workspaceRoot: root }),
+    { rootDirectory: join(root, 'sessions'), workspaceRoot: root, sessionId: 'context-report' },
+  );
+  assert.equal(fresh.contextReport(), undefined);
+  await fresh.close();
+});
+
 function toolCallingProvider(): ModelProvider {
   return {
     model: 'tool-caller',
