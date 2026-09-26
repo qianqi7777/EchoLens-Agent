@@ -153,6 +153,8 @@ export interface AgentEvent {
   // seq 由 Event Store 单写者按 1 起始连续分配，恢复时要求严格递增（不能有缺口或乱序）。
   seq: number;
   timestamp: string;
+  /** 前一事件的 canonical SHA-256；首事件没有前置哈希。 */
+  prevHash?: string;
   parentEventId?: string;
   payload: AgentEventPayload;
 }

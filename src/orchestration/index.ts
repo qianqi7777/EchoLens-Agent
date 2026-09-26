@@ -7,3 +7,4 @@ export * from './subagent-background.js';
 export * from './lifecycle-hooks.js';
 export * from './task-command.js';
 export * from './agent-memory.js';
+export * from './plan-competition.js';

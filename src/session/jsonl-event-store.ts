@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, realpath, stat, truncate, unlink, type FileHandle } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { redactValueWithReport } from '../providers/redaction.js';
@@ -51,6 +51,7 @@ export class JsonlEventStore implements AgentEventSink {
   private lock?: FileLock;
   private writeQueue: Promise<unknown> = Promise.resolve();
   private lastSeq = 0;
+  private lastHash?: string;
   private closed = false;
 
   constructor(rootDirectory: string, sessionId: string, options: JsonlEventStoreOptions = {}) {
@@ -78,12 +79,14 @@ export class JsonlEventStore implements AgentEventSink {
         runId: intent.runId,
         seq: this.lastSeq + 1,
         timestamp: this.now().toISOString(),
+        ...(this.lastHash ? { prevHash: this.lastHash } : {}),
         parentEventId: intent.parentEventId,
         payload: sanitizePayload(intent.payload),
       };
       await this.handle.appendFile(`${JSON.stringify(event)}\n`, 'utf8');
       if (this.flushEachEvent || isDurableEvent(event.payload.type)) await this.handle.datasync();
       this.lastSeq = event.seq;
+      this.lastHash = hashEvent(event);
       return event;
     });
     this.writeQueue = operation;
@@ -194,6 +197,7 @@ export class JsonlEventStore implements AgentEventSink {
       await recoverTail(this.filePath);
       const events = await readCompleteEvents(this.filePath);
       this.lastSeq = events.at(-1)?.seq ?? 0;
+      this.lastHash = events.at(-1) ? hashEvent(events.at(-1)!) : undefined;
       this.handle = await open(this.filePath, 'a+');
     } catch (error) {
       this.lock = undefined;
@@ -255,7 +259,33 @@ async function readCompleteEvents(filePath: string): Promise<AgentEvent[]> {
     }
     events.push(value);
   }
+  verifyEventChain(events);
   return events;
+}
+
+function verifyEventChain(events: readonly AgentEvent[]): void {
+  // 兼容升级前的无链日志：整条日志都没有 prevHash 时保留原有读取能力；
+  // 一旦日志包含链字段，则后续每一条都必须连续校验，混合形态视为篡改或损坏。
+  if (!events.some((event) => event.prevHash !== undefined)) return;
+  let previousHash: string | undefined;
+  let chainStarted = false;
+  for (const [index, event] of events.entries()) {
+    if (event.prevHash !== undefined) {
+      if (index === 0 || event.prevHash !== previousHash) {
+        throw new EventStoreCorruptionError(`Event Store 哈希链断裂：第 ${index + 1} 条事件`);
+      }
+      chainStarted = true;
+    } else if (chainStarted) {
+      throw new EventStoreCorruptionError(`Event Store 哈希链字段缺失：第 ${index + 1} 条事件`);
+    }
+    previousHash = hashEvent(event);
+  }
+}
+
+function hashEvent(event: AgentEvent): string {
+  const copy = { ...event };
+  delete copy.prevHash;
+  return createHash('sha256').update(JSON.stringify(copy), 'utf8').digest('hex');
 }
 
 function isAgentEvent(value: unknown): value is AgentEvent {

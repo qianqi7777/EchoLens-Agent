@@ -30,6 +30,8 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 支持 `/context` 查看最近一次模型请求实际注入的来源、token 估算、预算比例和压缩状态
 - 上下文压缩保留用户约束、当前请求和带证据的工具结果；白名单内容超出预算时显式失败，不静默丢弃
 - 首轮导航可按相对 import 构建有界依赖/被依赖候选（默认最多 2 跳），并可选装配受限 Git 历史候选信息
+- 事件日志带连续 SHA-256 前置哈希，可检测中间事件篡改；提供并发恢复压测、路由对照基准与无头 JSON 入口
+- 方案竞争可复用持久 Worker 池并行生成候选，必须提供显式评分函数后才会选优
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
 - 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
@@ -272,6 +274,9 @@ A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/T
 固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。断点恢复基准可用 `npm run eval:resume-soak -- --rounds 3` 复现，结果包含分母、成功数、逐轮故障明细；工具执行中途故障通过真实子进程终止注入，其余故障使用本地 Provider 注入，不代表真实模型服务或宿主进程 kill 的成功率。
 `/context` 报告只反映最近一次已构建的模型上下文；尚未运行 Turn 时没有报告，token 仍是现有字节近似值，不等同于任一具体模型 tokenizer 的精确计数。
 Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
+事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝。
+并发压测与路由基准使用本地 Provider，报告的是实际运行参数与结果，不等同于真实模型服务的长期可用性或质量保证。
+可复现命令：`npm run eval:concurrency-soak -- --seconds 10 --concurrency 4`、`npm run eval:routing-benchmark`；无头执行使用 `npx tsx src/cli.ts --json --prompt "..."`，无模型配置时 fail-closed。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

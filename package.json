@@ -25,6 +25,8 @@
     "eval:smoke": "tsx agent-test/src/eval-cli.ts --suite smoke",
     "eval:fixed": "tsx agent-test/src/eval-cli.ts --suite fixed-core",
     "eval:resume-soak": "tsx agent-test/scripts/soak-resume.ts",
+    "eval:concurrency-soak": "tsx agent-test/scripts/soak-concurrency.ts",
+    "eval:routing-benchmark": "tsx agent-test/scripts/routing-benchmark.ts",
     "test:classification": "tsx agent-test/scripts/run-tests.ts --check",
     "test:unit": "tsx agent-test/scripts/run-tests.ts unit",
     "test:contract": "tsx agent-test/scripts/run-tests.ts contract",

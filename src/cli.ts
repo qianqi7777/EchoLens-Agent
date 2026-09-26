@@ -1,6 +1,7 @@
 // 交互式 CLI 入口：负责装配运行时组件（工具、模型路由、审批、会话、TUI/行模式），
 // 自身不包含任何业务逻辑。--setup 只执行初始化，不进入对话循环。
 import * as readline from 'node:readline/promises';
+import { existsSync } from 'node:fs';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { createEventRenderer } from './cli-event-renderer.js';
@@ -37,9 +38,16 @@ import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
 import { parseAgentPlan, type AgentPlan } from './runtime/structured-output.js';
 import { parsePermissionProfile, type PermissionProfile } from './runtime/permission-profile.js';
 import { GitHistoryProvider } from './navigation/git-history.js';
+import { headlessExitCode, headlessFailure, headlessPrompt, headlessSuccess } from './headless.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
+const headlessMode = process.argv.includes('--json') || process.argv.includes('-p');
+if (headlessMode && !forceSetup && !process.env.AGENT_MODEL_ROUTE && !existsSync(resolve(process.cwd(), '.env.local'))) {
+  console.log(JSON.stringify({ version: 1, ok: false, error: { code: 'startup_config_required', message: '无头模式需要已有模型配置或显式环境变量' } }));
+  setupTerminal.close();
+  process.exit(1);
+}
 try {
   await ensureStartupConfiguration({ terminal: setupTerminal, force: forceSetup });
 } catch (error) {
@@ -52,7 +60,7 @@ setupTerminal.close();
 // 只有两端都是 TTY 且支持原始模式才启用 TUI；管道/重定向场景退化为纯行交互，
 // 避免 TUI 在非交互环境里刷屏或阻塞。
 const configuredWorkspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
-const useTui = Boolean(input.isTTY && output.isTTY && input.setRawMode);
+const useTui = Boolean(!headlessMode && input.isTTY && output.isTTY && input.setRawMode);
 const lineTerminal = useTui ? undefined : readline.createInterface({ input, output });
 let sandbox: DockerSandboxAdapter;
 try {
@@ -153,7 +161,18 @@ if (!connectedModel) {
       },
     };
 
-    if (useTui) {
+    if (headlessMode) {
+      try {
+        const result = await manager.currentRuntime().session.run(headlessPrompt(process.argv));
+        const outputValue = headlessSuccess(result);
+        console.log(JSON.stringify(outputValue));
+        process.exitCode = headlessExitCode(outputValue);
+      } catch (error) {
+        const outputValue = headlessFailure(error);
+        console.log(JSON.stringify(outputValue));
+        process.exitCode = headlessExitCode(outputValue);
+      }
+    } else if (useTui) {
       const current = manager.currentRuntime();
       tui = new TerminalUi({
         model: status.model ?? 'unknown',
