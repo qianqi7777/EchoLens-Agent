@@ -61,9 +61,17 @@ export type AgentEventPayload =
       phase?: string;
       phaseOverride?: 'plan' | 'execute' | 'verify';
       suggestedModel?: string;
+      excluded?: Array<{ id: string; reason: string }>;
     }
   | { type: 'route.fallback'; fromModel: string; toModel: string; reason: string }
   | { type: 'route.fallback_rejected'; model: string; reason: string }
+  | {
+      type: 'mcp.quota.exceeded';
+      serverId: string;
+      reasonCode: string;
+      callsPerSession: number;
+      callsThisTurn?: number;
+    }
   | { type: 'model.started'; step: number; toolChoice?: ToolChoice; navigationMode?: string }
   | { type: 'model.output.delta'; step: number; delta: string }
   | { type: 'model.retry'; step: number; attempt: number; delayMs: number; code: string }

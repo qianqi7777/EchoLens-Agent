@@ -312,6 +312,7 @@ function isDurableEvent(type: AgentEventPayload['type']): boolean {
   return type === 'checkpoint.saved'
     || type === 'session.rewound'
     || type === 'route.configured'
+    || type === 'mcp.quota.exceeded'
     || type === 'plan.decided'
     || type === 'goal.set'
     || type === 'goal.progress'

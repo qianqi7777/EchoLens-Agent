@@ -721,6 +721,8 @@ export class TerminalUi {
       skillsAvailable: Boolean(this.options.listSkills),
       modelRoutingAvailable: Boolean(this.options.modelRouting),
       hooksAvailable: Boolean(this.options.hooks),
+      mcpAvailable: Boolean(this.options.mcpUsage),
+      pluginAvailable: Boolean(this.options.plugins),
       goalAvailable: Boolean(this.options.goals),
       busy: this.store.get().busy,
       interface: 'tui' as const,
@@ -1311,6 +1313,7 @@ export class TerminalUi {
           this.autoPlanNoticeShown = true;
           this.pushNotice('已按任务特征进入规划阶段（只读），/plan off 可退出', 'info');
         }
+        if (payload.excluded?.length) this.pushNotice(`排除模型：${payload.excluded.map((item) => `${item.id}（${item.reason}）`).join('、')}`, 'info');
         break;
       case 'route.fallback':
         this.pushNotice(`模型切换：${payload.fromModel} -> ${payload.toModel}（${payload.reason}）`, 'warn');

@@ -165,6 +165,49 @@ test('真实 localhost Streamable HTTP Transport 完成能力发现和工具调�
   assert.match(JSON.stringify(result.content), /http:ok/u);
 });
 
+test('MCP Server 配额按会话原子计数、超限拒绝并持久化恢复', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-mcp-quota-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = testServer(); await server.connect(serverTransport); context.after(() => server.close());
+  const events: string[] = [];
+  const manager = new McpClientManager(root, { transportFactory: () => clientTransport, onQuotaExceeded: (event) => { events.push(event.reasonCode); } });
+  await manager.connect({ ...config(), quota: { maxCallsPerSession: 1 } });
+  await manager.callTool('local', 'echo', { value: 'first' });
+  const rejected = await Promise.allSettled([
+    manager.callTool('local', 'echo', { value: 'second' }),
+    manager.callTool('local', 'echo', { value: 'third' }),
+  ]);
+  assert.equal(rejected.filter((item) => item.status === 'rejected').length, 2);
+  assert.ok(events.includes('mcp_quota_calls_per_session'));
+  assert.equal(manager.quotaUsage()[0]?.callsPerSession, 1);
+  await manager.close();
+  const [clientTransport2, serverTransport2] = InMemoryTransport.createLinkedPair();
+  const server2 = testServer(); await server2.connect(serverTransport2); context.after(() => server2.close());
+  const restored = new McpClientManager(root, { transportFactory: () => clientTransport2 });
+  context.after(() => restored.close());
+  await restored.connect({ ...config(), quota: { maxCallsPerSession: 1 } });
+  await assert.rejects(() => restored.callTool('local', 'echo', { value: 'after-resume' }), (error: unknown) => error instanceof Error && error.message.includes('配额'));
+});
+
+test('MCP 回合配额与输出配额明确拒绝，未配置配额保持原行为', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-mcp-turn-quota-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = testServer(); await server.connect(serverTransport); context.after(() => server.close());
+  const manager = new McpClientManager(root, { transportFactory: () => clientTransport }); context.after(() => manager.close());
+  await manager.connect({ ...config(), quota: { maxCallsPerTurn: 1, maxOutputBytes: 256 } });
+  await manager.callTool('local', 'echo', { value: 'first' }, undefined, undefined, 'turn-a');
+  await assert.rejects(() => manager.callTool('local', 'echo', { value: 'again' }, undefined, undefined, 'turn-a'), (error: unknown) => error instanceof Error && error.message.includes('Turn 调用配额'));
+  await assert.rejects(() => manager.callTool('local', 'echo', { value: 'x'.repeat(300) }, undefined, undefined, 'turn-b'), (error: unknown) => error instanceof Error && error.message.includes('输出超过配额'));
+  const [clientTransport2, serverTransport2] = InMemoryTransport.createLinkedPair();
+  const server2 = testServer(); await server2.connect(serverTransport2); context.after(() => server2.close());
+  const noQuota = new McpClientManager(root, { transportFactory: () => clientTransport2 }); context.after(() => noQuota.close());
+  await noQuota.connect({ ...config(), id: 'unlimited' });
+  await noQuota.callTool('unlimited', 'echo', { value: 'one' });
+  await noQuota.callTool('unlimited', 'echo', { value: 'two' });
+});
+
 function testServer(): Server {
   const server = new Server({ name: 'test-mcp', version: '1.0.0' }, {
     capabilities: { tools: {}, resources: {}, prompts: {} },

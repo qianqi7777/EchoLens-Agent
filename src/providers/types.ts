@@ -146,6 +146,7 @@ export type ModelRouteEvent =
       phase?: string;
       phaseOverride?: 'plan' | 'execute' | 'verify';
       suggestedModel?: string;
+      excluded?: Array<{ id: string; reason: string }>;
     }
   | {
       type: 'fallback';

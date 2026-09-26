@@ -2,6 +2,7 @@
 // 自身不包含任何业务逻辑。--setup 只执行初始化，不进入对话循环。
 import * as readline from 'node:readline/promises';
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { createEventRenderer } from './cli-event-renderer.js';
@@ -38,7 +39,11 @@ import { LifecycleHookRunner } from './orchestration/lifecycle-hooks.js';
 import { parseAgentPlan, type AgentPlan } from './runtime/structured-output.js';
 import { parsePermissionProfile, type PermissionProfile } from './runtime/permission-profile.js';
 import { GitHistoryProvider } from './navigation/git-history.js';
+import { registerGitTools } from './runtime/git-tools.js';
+import { registerUnifiedDiffTool } from './runtime/unified-diff.js';
 import { headlessExitCode, headlessFailure, headlessPrompt, headlessSuccess } from './headless.js';
+import type { McpClientManager } from './mcp/client-manager.js';
+import { PluginManager } from './plugins/plugin-manager.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -149,6 +154,12 @@ if (!connectedModel) {
         status: () => manager.currentRuntime().session.modelRoutingStatus(),
       },
       hooks: hookCommandProxy(manager),
+      mcpUsage: () => manager.currentRuntime().mcpManager.quotaUsage(),
+      plugins: {
+        list: () => new PluginManager(manager.currentRuntime().workspaceRoot).list(),
+        export: (name) => new PluginManager(manager.currentRuntime().workspaceRoot).exportBundle(name),
+        import: (source) => new PluginManager(manager.currentRuntime().workspaceRoot).importBundle(source),
+      },
       plans: {
         decide: (planId, decision, plan) => manager.currentRuntime().session.decidePlan(planId, decision, plan),
         approveAsGoal: (planId, plan, edited) => manager.currentRuntime().session.approvePlanAsGoal(planId, plan, edited),
@@ -246,7 +257,7 @@ if (!connectedModel) {
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
           sessionDeletionAvailable: true, skillImportAvailable: true, skillsAvailable: true, modelRoutingAvailable: true,
-          hooksAvailable: true, goalAvailable: true, interface: 'line' as const };
+          hooksAvailable: true, goalAvailable: true, mcpAvailable: true, pluginAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }
         prompt = parsed.input;
@@ -353,6 +364,7 @@ interface CliWorkspaceRuntime extends ManagedWorkspaceRuntime {
   startupMessages: string[];
   hooks: LifecycleHookRunner;
   permissionProfile: PermissionProfile;
+  mcpManager: McpClientManager;
 }
 
 interface CreateCliWorkspaceRuntimeOptions {
@@ -369,17 +381,32 @@ async function createCliWorkspaceRuntime(
   workspaceRoot: string,
   options: CreateCliWorkspaceRuntimeOptions,
 ): Promise<CliWorkspaceRuntime> {
+  const sessionId = options.sessionId ?? randomUUID();
   // Workspace 切换和新 Session 不能复用上一运行时的当前模型、熔断和成本状态。
   const runtimeModel = isModelProviderRunLifecycle(options.model) ? options.model.fork() : options.model;
   const registry = new ToolRegistry();
   registerWorkspaceTools(registry);
+  registerGitTools(registry);
+  registerUnifiedDiffTool(registry);
   registerSandboxTools(registry, options.sandbox);
   let extensions: Awaited<ReturnType<typeof initializeRuntimeExtensions>> | undefined;
   let backgroundTasks: SubagentBackgroundService | undefined;
   let session: SessionRuntime | undefined;
   try {
     const hooks = await LifecycleHookRunner.load(workspaceRoot);
-    extensions = await initializeRuntimeExtensions(registry, workspaceRoot);
+    extensions = await initializeRuntimeExtensions(registry, workspaceRoot, {
+      sessionId,
+      onMcpQuotaExceeded: (event) => session?.store.append({
+        turnId: undefined,
+        payload: {
+          type: 'mcp.quota.exceeded',
+          serverId: event.serverId,
+          reasonCode: event.reasonCode,
+          callsPerSession: event.callsPerSession,
+          ...(event.callsThisTurn === undefined ? {} : { callsThisTurn: event.callsThisTurn }),
+        },
+      }).then(() => undefined),
+    });
     const approvalStore = new JsonApprovalStore(resolve(workspaceRoot, '.echolens', 'approvals.json'));
     const subagents = new SubagentOrchestrator(runtimeModel, registry, workspaceRoot,
       undefined, undefined, undefined, {
@@ -434,7 +461,7 @@ async function createCliWorkspaceRuntime(
     session = await SessionRuntime.open(agent, {
       rootDirectory: sessionRoot,
       workspaceRoot,
-      sessionId: options.sessionId,
+      sessionId,
       storeOptions: { flushEachEvent: false },
       hooks,
     });
@@ -453,6 +480,7 @@ async function createCliWorkspaceRuntime(
       startupMessages,
       hooks,
       permissionProfile: options.permissionProfile,
+      mcpManager: extensions.mcpManager,
       close: () => closeWorkspaceResources(session, backgroundTasks!, extensions!),
     };
   } catch (error) {

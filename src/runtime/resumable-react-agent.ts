@@ -554,6 +554,7 @@ export class ReactAgent {
             phase: event.phase,
             phaseOverride: event.phaseOverride,
             suggestedModel: event.suggestedModel,
+            excluded: event.excluded,
           },
         });
       } else if (event.type === 'fallback') {
@@ -774,6 +775,7 @@ export class ReactAgent {
       signal: signal ?? new AbortController().signal,
       approvalContext: {
         sessionId: machine.sessionId,
+        turnId: machine.turnId,
         runId: machine.runId,
         callId: call.callId,
       },

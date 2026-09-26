@@ -22,12 +22,32 @@ export interface CommandCatalogContext {
   skillsAvailable?: boolean;
   modelRoutingAvailable?: boolean;
   hooksAvailable?: boolean;
+  mcpAvailable?: boolean;
+  pluginAvailable?: boolean;
   verificationAvailable?: boolean;
   rollbackAvailable?: boolean;
   goalAvailable?: boolean;
 }
 
 export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
+  {
+    name: '/mcp',
+    description: '查看已连接 MCP Server 及其配额用量',
+    usage: '/mcp',
+    category: 'system',
+    acceptsArguments: false,
+    availableDuringTask: true,
+    source: 'builtin',
+  },
+  {
+    name: '/plugin',
+    description: '列出、导出或导入插件分发包',
+    usage: '/plugin <list|export|import> [name|path]',
+    category: 'system',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
   {
     name: '/hooks',
     description: '查看、信任、撤销或重载生命周期 Hook',
@@ -249,6 +269,8 @@ export function getCommandCatalog(context: CommandCatalogContext): CommandDescri
     if (command.name === '/plan' && context.modelRoutingAvailable === false) return false;
     if (command.name === '/goal' && context.goalAvailable === false) return false;
     if (command.name === '/hooks' && context.hooksAvailable === false) return false;
+    if (command.name === '/mcp' && !context.mcpAvailable) return false;
+    if (command.name === '/plugin' && !context.pluginAvailable) return false;
     if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
     if (command.name === '/verify' && context.verificationAvailable === false) return false;
     if (command.name === '/rollback' && context.rollbackAvailable === false) return false;

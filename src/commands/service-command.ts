@@ -12,6 +12,8 @@ import type { AgentPlan } from '../runtime/structured-output.js';
 import type { ChangeSet } from '../runtime/change-set.js';
 import type { ContextBuildResult } from '../context/context-manager.js';
 import type { RewindMode, RewindResult, SessionCheckpointSummary } from '../session/session-runtime.js';
+import type { McpQuotaUsage } from '../mcp/types.js';
+import type { PluginBundle } from '../plugins/plugin-manager.js';
 
 export interface HookCommands {
   list(): HookStatus[];
@@ -46,6 +48,12 @@ export interface CommandServices {
     status(): string[];
   };
   hooks?: HookCommands;
+  mcpUsage?(): McpQuotaUsage[];
+  plugins?: {
+    list(): Promise<PluginBundle[]>;
+    export(name: string): Promise<PluginBundle>;
+    import(source: string): Promise<PluginBundle>;
+  };
   plans?: {
     decide(planId: string, decision: 'approved' | 'edited' | 'rejected', plan?: AgentPlan): Promise<void>;
     approveAsGoal(planId: string, plan: AgentPlan, edited?: boolean): Promise<AgentGoal>;
@@ -58,7 +66,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/context', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/context', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks', '/mcp', '/plugin']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -72,6 +80,26 @@ export async function executeServiceCommand(
   const [command, ...args] = input.split(/\s+/u);
   let lines: string[];
   switch (command) {
+    case '/mcp': {
+      if (args.length > 0) return { handled: true, lines: ['用法：/mcp'] };
+      if (!services.mcpUsage) throw new Error('MCP 用量服务不可用');
+      const usage = services.mcpUsage();
+      lines = usage.length ? usage.map(formatMcpUsage) : ['当前没有 MCP Server 调用用量'];
+      break;
+    }
+    case '/plugin': {
+      if (!services.plugins) throw new Error('插件服务不可用');
+      if (args.length === 0 || args[0] === 'list') {
+        if (args.length > 1) return { handled: true, lines: ['用法：/plugin list'] };
+        const plugins = await services.plugins.list();
+        lines = plugins.length ? plugins.map((item) => `${item.name}: ${item.components.join(',')} (${item.path})`) : ['当前没有插件包'];
+      } else if (args[0] === 'export' && args.length === 2) {
+        const item = await services.plugins.export(args[1]!); lines = [`已导出插件：${item.name} -> ${item.path}`];
+      } else if (args[0] === 'import' && args.length === 2) {
+        const item = await services.plugins.import(args[1]!); lines = [`已导入插件：${item.name} -> ${item.path}`];
+      } else return { handled: true, lines: ['用法：/plugin list | /plugin export <name> | /plugin import <path>'] };
+      break;
+    }
     case '/pwd': case '/cd': case '/workspace':
       if (!services.workspaceCommands) throw new Error('工作目录切换服务不可用。');
       return executeWorkspaceCommand(input, services.workspaceCommands);
@@ -280,4 +308,14 @@ function formatGoalStatus(goal: AgentGoal | undefined): string[] {
 function formatHookStatus(item: HookStatus): string {
   const state = !item.enabled ? 'disabled' : item.trusted ? 'trusted' : 'untrusted';
   return `${item.runtimeId} event=${item.event} state=${state} command=${item.executable}`;
+}
+
+function formatMcpUsage(item: McpQuotaUsage): string {
+  const turns = Object.entries(item.callsByTurn).map(([turn, count]) => `${turn}=${count}`).join(', ');
+  const quota = [
+    item.maxCallsPerTurn === undefined ? '' : `turn≤${item.maxCallsPerTurn}`,
+    item.maxCallsPerSession === undefined ? '' : `session≤${item.maxCallsPerSession}`,
+    item.maxOutputBytes === undefined ? '' : `output≤${item.maxOutputBytes}`,
+  ].filter(Boolean).join(' ');
+  return `${item.serverId}: calls=${item.callsPerSession}${quota ? ` (${quota})` : ''}${turns ? ` turns[${turns}]` : ''}`;
 }

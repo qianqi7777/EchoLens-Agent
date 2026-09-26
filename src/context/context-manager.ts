@@ -475,6 +475,11 @@ function estimateTokens(items: readonly ConversationItem[]): number {
   return Math.ceil(Buffer.byteLength(JSON.stringify(providerPayload), 'utf8') / 4);
 }
 
+/** 路由初选复用上下文预算的同一估算口径。 */
+export function estimateInputTokens(text: string): number {
+  return estimateTokens([textMessage('routing-estimate', 'user', text)]);
+}
+
 function sourceUsage(items: readonly ConversationItem[], sourceKinds: ReadonlyMap<string, ContextSourceKind>): ContextSourceUsage[] {
   const grouped = new Map<ContextSourceKind, ConversationItem[]>();
   for (const item of items) {

@@ -79,6 +79,7 @@ export interface ToolContext {
   approvalRequiredPermissions?: ReadonlySet<Permission>;
   approvalContext?: {
     sessionId?: string;
+    turnId?: string;
     runId?: string;
     callId?: string;
     workspaceRevision?: string;

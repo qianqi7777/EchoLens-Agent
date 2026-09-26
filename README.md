@@ -33,6 +33,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 事件日志带连续 SHA-256 前置哈希，可检测中间事件篡改；提供并发恢复压测、路由对照基准与无头 JSON 入口
 - 方案竞争可复用持久 Worker 池并行生成候选，必须提供显式评分函数后才会选优
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
+- 提供 `git_status`、`git_diff`、`git_log` 三个受限 Git 只读工具，以及 `apply_unified_diff`（转换为结构化 Patch 后复用审批、哈希、检查点与回滚管线）
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
 - 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
 - 自动验证可将 TAP、Jest、pytest、Go test 和 Cargo test 的失败输出解析为有界结构化摘要；未知格式仍保留脱敏后的原始输出
@@ -41,6 +42,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - Sandbox 写入以 Artifact Bundle 返回，并通过独立审批的结构化 Patch 回放到宿主工作区
 - `package_install` 使用内部 Docker 网络和域名 allowlist 代理，不向工作容器提供直连公网
 - 支持 MCP stdio、Streamable HTTP、Tools、Resources、Prompts、进度与取消
+- MCP Server 可配置每回合/每会话调用次数与输出字节配额；超限拒绝、写入 Session Event Store，并可用 `/mcp` 查看用量
 - 提供 `outline_file`、`find_symbols`、`go_to_definition`、`find_references`、`get_diagnostics`
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
 - 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
@@ -59,6 +61,8 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - Skill 支持基于 prompt 的一层受控自动激活、`requires` 组合和 `disable-model-invocation` 约束；递归引用与加载总量超限会拒绝
 - 支持 `read-only`、`auto`、`full` 三档权限配置（`AGENT_PERMISSION_PROFILE`），越界路径和网络/外部副作用审批边界不因档位放宽
 - 内置 `code-search`、`git-workflow`、`test-runner` 三个 Skill，并提供只检查客观文件/frontmatter/资源断言的 Skill Eval CLI（`npm run eval -- --skill <目录>`）
+- 支持受限插件目录分发：`/plugin list|export|import` 可打包 Skill、Hook、Subagent profile 与 MCP 配置；包内禁止秘密、`studydocs/`、`AGENTS.md` 和符号链接
+- 模型路由初选会按上下文估算和输出预留排除容量不足 Profile，并在路由事件和界面展示排除原因
 
 ## 快速开始
 
@@ -273,6 +277,7 @@ A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/T
 仍必须由后续运行时通过 ToolExecutor/Sandbox 接入。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现；`/rewind` 的检查点索引按当前 Session 事件顺序，仅覆盖已持久化的 Agent 检查点。
 固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。断点恢复基准可用 `npm run eval:resume-soak -- --rounds 3` 复现，结果包含分母、成功数、逐轮故障明细；工具执行中途故障通过真实子进程终止注入，其余故障使用本地 Provider 注入，不代表真实模型服务或宿主进程 kill 的成功率。
 `/context` 报告只反映最近一次已构建的模型上下文；尚未运行 Turn 时没有报告，token 仍是现有字节近似值，不等同于任一具体模型 tokenizer 的精确计数。
+插件当前采用工作区内受限目录包而非压缩归档；导出只收集公开组件，导入不会自动启用其中的 Hook 或 MCP Server，仍需通过现有配置与信任流程加载。MCP 配额会话计数持久化在 `.echolens/mcp-quota-<session-id>.json`（无 Session ID 的独立管理器使用 `.echolens/mcp-quota.json`），配额未配置时保持原有行为。
 Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
 事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝。
 并发压测与路由基准使用本地 Provider，报告的是实际运行参数与结果，不等同于真实模型服务的长期可用性或质量保证。

@@ -12,6 +12,7 @@ import type {
   ProviderStreamEvent,
 } from '../providers/types.js';
 import type { PrivacyLevel } from './model-router.js';
+import { estimateInputTokens } from '../context/context-manager.js';
 
 export type TaskTier = 0 | 1 | 2 | 3;
 export type ExecutionPhase = 'plan' | 'execute' | 'verify';
@@ -82,6 +83,8 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
   private sessionCostUsd = 0;
   private costUnknown = false;
   private readonly routeEvents: ModelRouteEvent[] = [];
+  private estimatedInputTokens = 0;
+  private readonly contextReserveTokens = 4_096;
 
   constructor(profiles: readonly ModelProfile[], options: RoutedModelProviderOptions = {}) {
     if (profiles.length === 0) throw new Error('模型路由至少需要一个模型 Profile');
@@ -127,6 +130,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
     this.toolsStarted = false;
     this.runCostUsd = 0;
     this.costUnknown = false;
+    this.estimatedInputTokens = estimateInputTokens(userMessage);
     this.select(classification);
   }
 
@@ -325,6 +329,7 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
       phase: this.phase,
       phaseOverride: this.phaseOverride,
       suggestedModel: this.mode === 'off' ? undefined : candidates[0]?.profile.id,
+      excluded: this.excludedCandidates(classification),
     });
   }
 
@@ -333,20 +338,25 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
     if (pinned) {
       const profile = profileById(this.profiles, pinned);
       if (!profile) throw new Error(`固定模型不存在：${pinned}`);
-      if (!isUsable(profile, classification, this.defaultProfile.privacy, this.health, this.now())) {
+      if (!isUsable(profile, classification, this.defaultProfile.privacy, this.health, this.now(), this.estimatedInputTokens, this.contextReserveTokens)) {
         throw new Error(`固定模型不满足当前任务能力或处于熔断状态：${pinned}`);
       }
       return [{ profile, score: 0 }];
     }
-    if (this.mode === 'off') return [{ profile: this.defaultProfile, score: 0 }];
+    if (this.mode === 'off') {
+      if (this.estimatedInputTokens + this.contextReserveTokens > this.defaultProfile.provider.capabilities.maxContextTokens) {
+        throw new Error(`默认模型上下文容量不足：需要约 ${this.estimatedInputTokens + this.contextReserveTokens} tokens`);
+      }
+      return [{ profile: this.defaultProfile, score: 0 }];
+    }
     const usable = this.profiles.filter((profile) => isUsable(
       profile,
       classification,
       this.defaultProfile.privacy,
       this.health,
-      this.now(),
+      this.now(), this.estimatedInputTokens, this.contextReserveTokens,
     ));
-    return usable.map((profile) => ({ profile, score: candidateScore(profile, classification, this.mode) }))
+    return usable.map((profile) => ({ profile, score: candidateScore(profile, classification, this.mode, this.estimatedInputTokens, this.contextReserveTokens) }))
       .sort((left, right) => right.score - left.score || left.profile.id.localeCompare(right.profile.id));
   }
 
@@ -360,11 +370,18 @@ export class RoutedModelProvider implements ModelProvider, ModelProviderRunLifec
         classification,
         active.privacy,
         this.health,
-        this.now(),
+        this.now(), this.estimatedInputTokens, this.contextReserveTokens,
       ))
-      .map((profile) => ({ profile, score: candidateScore(profile, classification, this.mode) }))
+      .map((profile) => ({ profile, score: candidateScore(profile, classification, this.mode, this.estimatedInputTokens, this.contextReserveTokens) }))
       .sort((left, right) => right.score - left.score || left.profile.id.localeCompare(right.profile.id))
       .map((candidate) => candidate.profile);
+  }
+
+  private excludedCandidates(classification: TaskClassification): Array<{ id: string; reason: string }> {
+    return this.profiles.flatMap((profile) => {
+      const reason = usabilityReason(profile, classification, this.defaultProfile.privacy, this.health, this.now(), this.estimatedInputTokens, this.contextReserveTokens);
+      return reason ? [{ id: profile.id, reason }] : [];
+    });
   }
 
   private tryFallback(error: unknown): ModelProfile | undefined {
@@ -466,11 +483,10 @@ function isUsable(
   requiredPrivacy: PrivacyLevel,
   health: ReadonlyMap<string, HealthState>,
   now: number,
+  estimatedInputTokens: number,
+  reserve: number,
 ): boolean {
-  if (profile.privacy !== requiredPrivacy) return false;
-  if (profile.tier < classification.tier) return false;
-  if (classification.requiresTools && !profile.provider.capabilities.supportsToolCalls) return false;
-  return !(health.get(profile.id)?.blockedUntil && health.get(profile.id)!.blockedUntil! > now);
+  return !usabilityReason(profile, classification, requiredPrivacy, health, now, estimatedInputTokens, reserve);
 }
 
 function isFallbackUsable(
@@ -479,20 +495,32 @@ function isFallbackUsable(
   requiredPrivacy: PrivacyLevel,
   health: ReadonlyMap<string, HealthState>,
   now: number,
+  estimatedInputTokens: number,
+  reserve: number,
 ): boolean {
-  if (profile.privacy !== requiredPrivacy) return false;
-  if (classification.requiresTools && !profile.provider.capabilities.supportsToolCalls) return false;
-  return !(health.get(profile.id)?.blockedUntil && health.get(profile.id)!.blockedUntil! > now);
+  return !usabilityReason(profile, classification, requiredPrivacy, health, now, estimatedInputTokens, reserve, true);
 }
 
-function candidateScore(profile: ModelProfile, classification: TaskClassification, mode: ModelRoutingMode): number {
+function usabilityReason(profile: ModelProfile, classification: TaskClassification, requiredPrivacy: PrivacyLevel, health: ReadonlyMap<string, HealthState>, now: number, estimatedInputTokens: number, reserve: number, fallback = false): string | undefined {
+  if (profile.privacy !== requiredPrivacy) return 'privacy_mismatch';
+  if (!fallback && profile.tier < classification.tier) return 'tier_too_low';
+  if (classification.requiresTools && !profile.provider.capabilities.supportsToolCalls) return 'tools_unsupported';
+  if (health.get(profile.id)?.blockedUntil && health.get(profile.id)!.blockedUntil! > now) return 'circuit_open';
+  if (estimatedInputTokens + reserve > profile.provider.capabilities.maxContextTokens) return 'context_too_small';
+  return undefined;
+}
+
+function candidateScore(profile: ModelProfile, classification: TaskClassification, mode: ModelRoutingMode, estimatedInputTokens: number, reserve: number): number {
   const tierDistance = profile.tier - classification.tier;
   const cost = (profile.estimatedInputCostPer1k ?? 1) + (profile.estimatedOutputCostPer1k ?? 1);
   const latency = profile.latencyHintMs ?? 1_000;
-  if (mode === 'quality') return profile.tier * 1_000 - tierDistance * 10 - latency / 1_000;
-  if (mode === 'fast') return -latency - cost * 10 + tierDistance;
-  if (mode === 'privacy') return -cost * 100 - latency / 100;
-  return -tierDistance * 40 - cost * 25 - latency / 1_000;
+  const headroom = Math.max(0, profile.provider.capabilities.maxContextTokens - estimatedInputTokens - reserve);
+  const headroomRatio = headroom / Math.max(1, profile.provider.capabilities.maxContextTokens);
+  const contextBonus = headroomRatio >= 0.25 ? 0 : -100 * (0.25 - headroomRatio);
+  if (mode === 'quality') return profile.tier * 1_000 - tierDistance * 10 - latency / 1_000 + contextBonus;
+  if (mode === 'fast') return -latency - cost * 10 + tierDistance + contextBonus;
+  if (mode === 'privacy') return -cost * 100 - latency / 100 + contextBonus;
+  return -tierDistance * 40 - cost * 25 - latency / 1_000 + contextBonus;
 }
 
 function fallbackAllowed(error: ProviderError): boolean {

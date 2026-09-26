@@ -22,6 +22,10 @@
     "agent-test/tests/src/runtime/rollback-granularity.test.ts",
     "agent-test/tests/src/runtime/edit-loop.test.ts",
     "agent-test/tests/src/runtime/file-lock.test.ts",
+    "agent-test/tests/src/runtime/git-tools.test.ts",
+    "agent-test/tests/src/runtime/routing-context.test.ts",
+    "agent-test/tests/src/runtime/unified-diff.test.ts",
+    "agent-test/tests/src/plugins/plugin-manager.test.ts",
     "agent-test/tests/src/runtime/navigation.test.ts",
     "agent-test/tests/src/navigation/dependency-graph.test.ts",
     "agent-test/tests/src/navigation/git-history.test.ts",
@@ -72,6 +76,7 @@
     "agent-test/tests/src/runtime/tool-output.test.ts"
   ],
   "performance": [
+    "agent-test/tests/src/mcp/mcp-quota.performance.test.ts",
     "agent-test/tests/src/navigation/dependency-graph.performance.test.ts",
     "agent-test/tests/src/runtime/workspace-tools.performance.test.ts",
     "agent-test/tests/src/orchestration/worker-pool.performance.test.ts"

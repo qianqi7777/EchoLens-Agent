@@ -4,6 +4,7 @@ import {
   McpClientManager,
   registerMcpTools,
   type McpConfigFile,
+  type McpQuotaEvent,
 } from '../mcp/index.js';
 import { ToolRegistry } from './tool-registry.js';
 
@@ -11,6 +12,8 @@ export interface RuntimeExtensionsOptions {
   codeIntelligence?: CodeIntelligenceService;
   mcpManager?: McpClientManager;
   mcpConfig?: McpConfigFile;
+  onMcpQuotaExceeded?: (event: McpQuotaEvent) => void | Promise<void>;
+  sessionId?: string;
 }
 
 export interface RuntimeExtensions {
@@ -28,7 +31,10 @@ export async function initializeRuntimeExtensions(
 ): Promise<RuntimeExtensions> {
   const notices: string[] = [];
   const codeIntelligence = options.codeIntelligence ?? new CodeIntelligenceService(workspaceRoot);
-  const mcpManager = options.mcpManager ?? new McpClientManager(workspaceRoot);
+  const mcpManager = options.mcpManager ?? new McpClientManager(workspaceRoot, {
+    onQuotaExceeded: options.onMcpQuotaExceeded,
+    sessionId: options.sessionId,
+  });
   registerCodeIntelligenceTools(registry, codeIntelligence);
 
   // 配置解析失败不阻断启动：MCP 是增强能力，缺失或损坏的配置只记入 notices，

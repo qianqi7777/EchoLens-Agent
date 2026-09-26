@@ -52,6 +52,7 @@ export type ToolErrorCode =
   | 'mcp_connection_failed'
   | 'mcp_request_failed'
   | 'mcp_tool_error'
+  | 'mcp_quota_exceeded'
   | 'code_intelligence_failed'
   | 'lsp_unavailable'
   | 'lsp_request_failed'
