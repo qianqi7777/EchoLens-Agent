@@ -65,6 +65,7 @@
     "agent-test/tests/src/session/jsonl-event-store.test.ts",
     "agent-test/tests/src/session/session-runtime.test.ts",
     "agent-test/tests/src/session/event-chain.test.ts",
+    "agent-test/tests/src/session/audit-verify.test.ts",
     "agent-test/tests/server/model-gateway/src/server.test.ts"
   ],
   "security": [
@@ -73,6 +74,7 @@
     "agent-test/tests/src/runtime/automatic-verification.test.ts",
     "agent-test/tests/src/runtime/guardrail.test.ts",
     "agent-test/tests/src/runtime/path-policy.test.ts",
+    "agent-test/tests/src/runtime/extra-roots.test.ts",
     "agent-test/tests/src/runtime/tool-output.test.ts"
   ],
   "performance": [

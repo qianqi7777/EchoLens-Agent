@@ -6,7 +6,7 @@ import {
   type WorkspaceRevision,
   type WorkspaceSnapshot,
 } from './workspace-snapshot.js';
-import { PathPolicy, PathPolicyError, validateRelativePath } from './path-policy.js';
+import { PathPolicy, PathPolicyError, validatePatchPath, validateRelativePath } from './path-policy.js';
 
 export type PatchOperation =
   | ReplacePatchOperation
@@ -187,8 +187,10 @@ export function normalizePatch(value: unknown, options: StructuredPatchOptions =
       throw new PatchError('patch_invalid', 'Patch 操作缺少 op 或 path');
     }
     // 统一为 POSIX 相对路径后再判重：`.`（即根目录）与重复路径都会让补丁产生歧义，直接拒绝。
-    validateRelativePath(candidate.path);
-    const normalizedPath = candidate.path.replaceAll('\\', '/').replace(/^\.\//u, '') || '.';
+    validatePatchPath(candidate.path);
+    const normalizedPath = (path.isAbsolute(candidate.path) || path.win32.isAbsolute(candidate.path))
+      ? path.resolve(candidate.path)
+      : candidate.path.replaceAll('\\', '/').replace(/^\.\//u, '') || '.';
     if (normalizedPath === '.' || paths.has(normalizedPath)) {
       throw new PatchError('patch_invalid', `Patch 路径重复或无效：${normalizedPath}`, normalizedPath);
     }

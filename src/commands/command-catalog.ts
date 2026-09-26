@@ -24,6 +24,7 @@ export interface CommandCatalogContext {
   hooksAvailable?: boolean;
   mcpAvailable?: boolean;
   pluginAvailable?: boolean;
+  auditAvailable?: boolean;
   verificationAvailable?: boolean;
   rollbackAvailable?: boolean;
   goalAvailable?: boolean;
@@ -43,6 +44,15 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
     name: '/plugin',
     description: '列出、导出或导入插件分发包',
     usage: '/plugin <list|export|import> [name|path]',
+    category: 'system',
+    acceptsArguments: true,
+    availableDuringTask: false,
+    source: 'builtin',
+  },
+  {
+    name: '/audit',
+    description: '校验或导出当前 Session 的审计哈希链',
+    usage: '/audit verify | /audit export <path>',
     category: 'system',
     acceptsArguments: true,
     availableDuringTask: false,
@@ -271,6 +281,7 @@ export function getCommandCatalog(context: CommandCatalogContext): CommandDescri
     if (command.name === '/hooks' && context.hooksAvailable === false) return false;
     if (command.name === '/mcp' && !context.mcpAvailable) return false;
     if (command.name === '/plugin' && !context.pluginAvailable) return false;
+    if (command.name === '/audit' && !context.auditAvailable) return false;
     if (command.name === '/session' && !context.sessionDeletionAvailable) return false;
     if (command.name === '/verify' && context.verificationAvailable === false) return false;
     if (command.name === '/rollback' && context.rollbackAvailable === false) return false;

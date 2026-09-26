@@ -88,6 +88,8 @@ export interface GatewayAuditEvent {
   elapsedMs?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** 前一条网关审计事件的 SHA-256；首条事件省略。 */
+  prevHash?: string;
 }
 
 /** 已启动的 Gateway 服务句柄，供调用方读取地址、批准设备码或关闭服务。 */

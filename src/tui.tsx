@@ -382,6 +382,9 @@ function approvalLines(approval: ApprovalUi, width: number, max: number): Line[]
   const request = approval.request;
   const out: Line[] = [];
   out.push({ key: 'aph', segments: [{ text: `┌ 审批 · ${request.toolName}`, color: WARN, bold: true }] });
+  if (request.reasonCode === 'outside_workspace_write_approval') {
+    out.push({ key: 'apx', segments: [{ text: '│ ⚠ 目标是工作区外目录（仅本次具体路径与操作）', color: WARN, bold: true }] });
+  }
   out.push({ key: 'apr', segments: [{ text: `│ 原因: ${truncateDisplayText(request.reason, width - 4)}`, color: MUTED }] });
   const action = approvalActionText(request);
   if (action) out.push({ key: 'apa', segments: [{ text: `│ ${truncateDisplayText(action, width - 4)}`, color: BODY }] });
@@ -723,6 +726,7 @@ export class TerminalUi {
       hooksAvailable: Boolean(this.options.hooks),
       mcpAvailable: Boolean(this.options.mcpUsage),
       pluginAvailable: Boolean(this.options.plugins),
+      auditAvailable: Boolean(this.options.audit),
       goalAvailable: Boolean(this.options.goals),
       busy: this.store.get().busy,
       interface: 'tui' as const,

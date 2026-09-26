@@ -9,7 +9,7 @@ import { textMessage } from '../../../../../src/core/messages.js';
 import { OpenAICompatibleProvider } from '../../../../../src/providers/openai-compatible/client.js';
 import { startGatewayServer } from '../../../../../server/model-gateway/src/server.js';
 import { GatewayStateStore } from '../../../../../server/model-gateway/src/state-store.js';
-import type { GatewayModel, GatewayServerHandle } from '../../../../../server/model-gateway/src/types.js';
+import type { GatewayAuditEvent, GatewayModel, GatewayServerHandle } from '../../../../../server/model-gateway/src/types.js';
 
 const model: GatewayModel = {
   id: 'deepseek-chat',
@@ -27,6 +27,7 @@ const model: GatewayModel = {
 };
 
 test('Gateway Device Flow、固定上游代理、模型目录和注销闭环', async (context) => {
+  const auditEvents: GatewayAuditEvent[] = [];
   const upstream = createServer((request, response) => {
     // 上游只认可固定的 upstream apiKey：客户端 access token 不得透传到上游，凭据替换发生在 Gateway 边界。
     assert.equal(request.headers.authorization, 'Bearer upstream-secret');
@@ -44,6 +45,7 @@ test('Gateway Device Flow、固定上游代理、模型目录和注销闭环', a
     models: [model],
     upstreams: { [model.id]: { baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: 'upstream-secret', protocol: 'chat_completions' } },
     randomToken: (() => { let n = 0; return () => `token-${++n}`; })(),
+    audit: (event) => auditEvents.push(event),
   });
   context.after(async () => { await gateway.close(); upstream.close(); await once(upstream, 'close'); });
 
@@ -73,6 +75,9 @@ test('Gateway Device Flow、固定上游代理、模型目录和注销闭环', a
   const revoke = await fetch(`${gateway.baseUrl}/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `token=${token.access_token}` });
   assert.equal(revoke.status, 200);
   assert.equal((await fetch(`${gateway.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${token.access_token}` } })).status, 401);
+  assert.ok(auditEvents.length >= 3);
+  assert.equal(auditEvents[0]?.prevHash, undefined);
+  for (const event of auditEvents.slice(1)) assert.match(event.prevHash ?? '', /^[a-f0-9]{64}$/u);
 });
 
 test('Gateway 不接受客户端传入的任意上游地址', async (context) => {

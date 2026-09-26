@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import type { ToolSpec, ToolContext } from './types.js';
-import { PathPolicy, PathPolicyError } from './path-policy.js';
+import { PathPolicy, PathPolicyError, validatePatchPath } from './path-policy.js';
 
 export type ToolEffect = 'read' | 'write' | 'process' | 'network' | 'external';
 export type GuardrailDecisionKind = 'allow' | 'deny' | 'redact' | 'require_approval';
@@ -49,6 +49,35 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
     if (hasDangerousObjectKey(args)) {
       return outcome('deny', 'dangerous_argument_key', '工具参数包含危险对象键', args);
     }
+    const pathCandidates = extractPathCandidates(tool, args);
+    if (pathCandidates.length > 0) {
+      try {
+        const policy = await this.policyFor(context.workspaceRoot);
+        for (const requestedPath of pathCandidates) {
+          // 先复用 PathPolicy 的语法拒绝清单，再做根分类；否则带 ..、.git 或设备路径的
+          // 参数可能在 guardrail 阶段被误判成“可审批”，直到执行管线才失败。
+          validatePatchPath(requestedPath);
+          const classification = policy.classifyPath(requestedPath);
+          if (classification.scope === 'denied') {
+            return outcome('deny', 'path_outside_workspace', '路径不在工作区或显式授权根内', args);
+          }
+          if (effect === 'write' && classification.scope === 'authorized') {
+            if (!classification.root?.allowWrite) {
+              return outcome('deny', 'authorized_root_read_only', '授权根未允许写入', args);
+            }
+            return outcome(
+              'require_approval',
+              'outside_workspace_write_approval',
+              `目标是工作区外目录：${classification.absolutePath}`,
+              args,
+            );
+          }
+        }
+      } catch (error) {
+        const reasonCode = error instanceof PathPolicyError ? error.code : 'path_guardrail_failed';
+        return outcome('deny', reasonCode, '工具路径未通过动作检查', args);
+      }
+    }
     // Auto-verification is an explicit runtime configuration. It may run only the
     // registered verifier, whose implementation delegates commands to Sandbox.
     if (context.internalOperation === 'automatic_verification' && tool.name === 'verify_changes') {
@@ -78,7 +107,8 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
       const policy = await this.policyFor(context.workspaceRoot);
       const resolved = await policy.resolveExisting(requestedPath);
       // 解析校验后把路径改写为工作区相对路径：既保持只读语义，也防止处理过程把参数改成越权路径。
-      const normalizedPath = path.relative(policy.workspaceRoot, resolved.canonicalPath) || '.';
+      const normalizedPath = path.relative(policy.workspaceRoot, resolved.canonicalPath)
+        .replaceAll(path.sep, '/') || (resolved.canonicalPath === policy.workspaceRoot ? '.' : resolved.canonicalPath);
       return outcome('allow', 'workspace_path_verified', '只读路径已限制在工作区内', {
         ...args,
         path: normalizedPath,
@@ -101,6 +131,21 @@ export class DefaultProposedActionGuardrail implements ProposedActionGuardrail {
     void created.catch(() => this.policies.delete(key));
     return created;
   }
+}
+
+function extractPathCandidates(tool: ToolSpec, args: Record<string, unknown>): string[] {
+  const candidates: string[] = [];
+  if (typeof args.path === 'string') candidates.push(args.path);
+  if (tool.name === 'apply_patch' && isRecord(args.patch) && Array.isArray(args.patch.operations)) {
+    for (const operation of args.patch.operations) {
+      if (isRecord(operation) && typeof operation.path === 'string') candidates.push(operation.path);
+    }
+  }
+  return candidates;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // 通过 structuredClone 隔离返回的参数，避免调用方对参数对象的后续修改反向影响 guardrail 与传入方。

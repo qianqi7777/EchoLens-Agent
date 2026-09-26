@@ -63,6 +63,8 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 内置 `code-search`、`git-workflow`、`test-runner` 三个 Skill，并提供只检查客观文件/frontmatter/资源断言的 Skill Eval CLI（`npm run eval -- --skill <目录>`）
 - 支持受限插件目录分发：`/plugin list|export|import` 可打包 Skill、Hook、Subagent profile 与 MCP 配置；包内禁止秘密、`studydocs/`、`AGENTS.md` 和符号链接
 - 模型路由初选会按上下文估算和输出预留排除容量不足 Profile，并在路由事件和界面展示排除原因
+- 工作区外写入默认仍硬拒绝；用户可在 `.echolens/roots.json` 显式配置授权根，允许写入的根也会逐次审批并在界面标注绝对路径；`.git`、`.echolens`、符号链接和越界语法始终拒绝
+- 提供 `/audit verify` 定位当前 Session 审计哈希链断点，以及 `/audit export <path>` 导出带版本字段、可离线校验的审计记录
 
 ## 快速开始
 
@@ -108,6 +110,7 @@ npm run dev -- --resume latest
 - `/task resume <id>`：显式恢复待处理、失败或已取消任务
 - `Ctrl+C`：只取消当前 Turn，不删除 Session
 - `/exit`：退出 CLI
+- `/audit verify`：校验当前 Session 的审计链并报告断链事件；`/audit export <path>`：导出审计记录供离线校验
 
 TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚、rewind 和 steering 命令。
 TUI 可用 `Shift+Tab` 循环 `plan → execute → auto`；终端无法区分 Shift+Tab 时使用 `Ctrl+P`。
@@ -280,6 +283,7 @@ A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/T
 插件当前采用工作区内受限目录包而非压缩归档；导出只收集公开组件，导入不会自动启用其中的 Hook 或 MCP Server，仍需通过现有配置与信任流程加载。MCP 配额会话计数持久化在 `.echolens/mcp-quota-<session-id>.json`（无 Session ID 的独立管理器使用 `.echolens/mcp-quota.json`），配额未配置时保持原有行为。
 Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
 事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝。
+审计导出只接受完整链，导出包可由 `verifyAuditExport` 离线校验；本地审计文件可被整体替换，因此哈希链不提供不可抵赖性。工作区外授权根默认为空，只能由用户控制的 `.echolens/roots.json` 配置，且每次写入都必须单独审批，不支持永久放行整个根。
 并发压测与路由基准使用本地 Provider，报告的是实际运行参数与结果，不等同于真实模型服务的长期可用性或质量保证。
 可复现命令：`npm run eval:concurrency-soak -- --seconds 10 --concurrency 4`、`npm run eval:routing-benchmark`；无头执行使用 `npx tsx src/cli.ts --json --prompt "..."`，无模型配置时 fail-closed。
 

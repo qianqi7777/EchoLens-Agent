@@ -44,6 +44,7 @@ import { registerUnifiedDiffTool } from './runtime/unified-diff.js';
 import { headlessExitCode, headlessFailure, headlessPrompt, headlessSuccess } from './headless.js';
 import type { McpClientManager } from './mcp/client-manager.js';
 import { PluginManager } from './plugins/plugin-manager.js';
+import { exportAuditLog, verifyAuditLog } from './session/audit.js';
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
@@ -160,6 +161,10 @@ if (!connectedModel) {
         export: (name) => new PluginManager(manager.currentRuntime().workspaceRoot).exportBundle(name),
         import: (source) => new PluginManager(manager.currentRuntime().workspaceRoot).importBundle(source),
       },
+      audit: {
+        verify: () => verifyAuditLog(manager.currentRuntime().session.store.filePath),
+        export: (destination) => exportAuditLog(manager.currentRuntime().session.store.filePath, resolve(destination)),
+      },
       plans: {
         decide: (planId, decision, plan) => manager.currentRuntime().session.decidePlan(planId, decision, plan),
         approveAsGoal: (planId, plan, edited) => manager.currentRuntime().session.approvePlanAsGoal(planId, plan, edited),
@@ -257,7 +262,7 @@ if (!connectedModel) {
         if (!prompt) continue;
         const commandContext = { workspaceAvailable: true, backgroundTasksAvailable: true,
           sessionDeletionAvailable: true, skillImportAvailable: true, skillsAvailable: true, modelRoutingAvailable: true,
-          hooksAvailable: true, goalAvailable: true, mcpAvailable: true, pluginAvailable: true, interface: 'line' as const };
+          hooksAvailable: true, goalAvailable: true, mcpAvailable: true, pluginAvailable: true, auditAvailable: true, interface: 'line' as const };
         const parsed = parseCommandInput(prompt, commandContext);
         if (parsed.error) { console.error(parsed.error); continue; }
         prompt = parsed.input;
@@ -565,6 +570,9 @@ async function interactiveApproval(
   terminal: readline.Interface,
 ): Promise<ApprovalDecision> {
   console.log(`\n需要审批：${request.toolName} (${request.permission})`);
+  if (request.reasonCode === 'outside_workspace_write_approval') {
+    console.log('⚠ 目标是工作区外目录；本次审批仅适用于展示的具体路径与操作。');
+  }
   console.log(`原因：${request.reason}`);
   if (request.toolName === 'apply_patch' || request.toolName === 'apply_sandbox_patch') {
     // 有差异可看时才展示 diff；预览失败按拒绝处理，而不是无预览放行。

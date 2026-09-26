@@ -14,6 +14,7 @@ import type { ContextBuildResult } from '../context/context-manager.js';
 import type { RewindMode, RewindResult, SessionCheckpointSummary } from '../session/session-runtime.js';
 import type { McpQuotaUsage } from '../mcp/types.js';
 import type { PluginBundle } from '../plugins/plugin-manager.js';
+import type { AuditVerificationResult, AuditExport } from '../session/audit.js';
 
 export interface HookCommands {
   list(): HookStatus[];
@@ -54,6 +55,10 @@ export interface CommandServices {
     export(name: string): Promise<PluginBundle>;
     import(source: string): Promise<PluginBundle>;
   };
+  audit?: {
+    verify(): Promise<AuditVerificationResult>;
+    export(destination: string): Promise<AuditExport>;
+  };
   plans?: {
     decide(planId: string, decision: 'approved' | 'edited' | 'rejected', plan?: AgentPlan): Promise<void>;
     approveAsGoal(planId: string, plan: AgentPlan, edited?: boolean): Promise<AgentGoal>;
@@ -66,7 +71,7 @@ export interface CommandServices {
   };
 }
 
-const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/context', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks', '/mcp', '/plugin']);
+const serviceCommands = new Set(['/pwd', '/cd', '/workspace', '/tasks', '/usage', '/task', '/sessions', '/session', '/verify', '/rollback', '/rewind', '/diff', '/context', '/pause', '/skill', '/skills', '/model', '/plan', '/goal', '/hooks', '/mcp', '/plugin', '/audit']);
 
 export function isServiceCommand(input: string): boolean {
   return serviceCommands.has(input.split(/\s+/u)[0] ?? '');
@@ -98,6 +103,19 @@ export async function executeServiceCommand(
       } else if (args[0] === 'import' && args.length === 2) {
         const item = await services.plugins.import(args[1]!); lines = [`已导入插件：${item.name} -> ${item.path}`];
       } else return { handled: true, lines: ['用法：/plugin list | /plugin export <name> | /plugin import <path>'] };
+      break;
+    }
+    case '/audit': {
+      if (!services.audit) throw new Error('审计服务不可用');
+      if (args.length === 1 && args[0] === 'verify') {
+        const result = await services.audit.verify();
+        lines = result.valid
+          ? [`审计链校验通过：${result.eventCount} 条事件${result.chainPresent ? '（含哈希链）' : '（旧版无链记录）'}`]
+          : [`审计链校验失败：第 ${result.failure?.line ?? '?'} 行${result.failure?.seq ? `，seq=${result.failure.seq}` : ''}，eventId=${result.failure?.eventId ?? '-'}：${result.failure?.reason ?? '未知错误'}`];
+      } else if (args.length === 2 && args[0] === 'export') {
+        const item = await services.audit.export(args[1]!);
+        lines = [`已导出审计记录：${item.events.length} 条 -> ${args[1]}`];
+      } else return { handled: true, lines: ['用法：/audit verify | /audit export <path>'] };
       break;
     }
     case '/pwd': case '/cd': case '/workspace':
