@@ -172,6 +172,8 @@ test('workspace read, grep, and list tools enforce bounded ranges and text kinds
   assert.match(read.content, /^1: export class RouteEngine/u);
   const contentHash = (read.data as { contentHash?: string }).contentHash;
   assert.match(String(contentHash), /^[a-f0-9]{64}$/u);
+  const stableRead = await executor.invoke('read_file', { path: 'src/model-routing.ts', expectedContentHash: contentHash }, toolContext);
+  assert.equal(stableRead.status, 'ok');
 
   const reversed = await executor.invoke('read_file', { path: 'src/model-routing.ts', start: 2, end: 1 }, toolContext);
   assert.equal(reversed.status, 'invalid');
@@ -196,6 +198,9 @@ test('workspace read, grep, and list tools enforce bounded ranges and text kinds
   const readme = await executor.invoke('list_files', { path: 'README.md', kind: 'all-text' }, toolContext);
   assert.equal(readme.status, 'ok');
   assert.equal(readme.content, 'README.md');
+  const allText = await executor.invoke('list_files', { kind: 'all-text' }, toolContext);
+  assert.equal(allText.status, 'ok');
+  assert.match(allText.content, /README\.md/u);
 
   const invalidDirectory = await executor.invoke('list_files', { path: 'missing', kind: 'all-text' }, toolContext);
   assert.equal(invalidDirectory.status, 'denied');
@@ -252,6 +257,38 @@ test('workspace_search falls back to bounded literal scanning when the index is 
   assert.equal((result.data as { fallbackReason?: string }).fallbackReason, 'workspace_index_unavailable');
   assert.match(result.content, /notes\.txt:1/iu);
   assert.doesNotMatch(result.content, /credentials|AGENTS/iu);
+});
+
+test('workspace tools keep source filters, cancellation, and path failures fail-closed', async (context) => {
+  const root = await fixture(context);
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const executor = new ToolExecutor(registry);
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = await executor.invoke('grep', { pattern: 'RouteEngine', path: '.' }, {
+    workspaceRoot: root,
+    allowedPermissions: new Set<'workspace.read'>(['workspace.read']),
+    signal: controller.signal,
+  });
+  assert.equal(aborted.status, 'cancelled');
+
+  const nonSource = await executor.invoke('grep', { pattern: 'RouteEngine', path: 'README.md' }, {
+    workspaceRoot: root,
+    allowedPermissions: new Set<'workspace.read'>(['workspace.read']),
+    signal: new AbortController().signal,
+  });
+  assert.equal(nonSource.status, 'ok');
+  assert.match(nonSource.content, /未找到/u);
+
+  const invalidSearch = await executor.invoke('workspace_search', { query: 'RouteEngine', path: 'missing' }, {
+    workspaceRoot: root,
+    allowedPermissions: new Set<'workspace.read'>(['workspace.read']),
+    signal: new AbortController().signal,
+  });
+  assert.equal(invalidSearch.status, 'denied');
+  assert.equal(invalidSearch.error?.code, 'permission_denied');
+  assert.deepEqual(invalidSearch.error?.data, { pathPolicyCode: 'path_not_found' });
 });
 
 async function fixture(context: test.TestContext): Promise<string> {

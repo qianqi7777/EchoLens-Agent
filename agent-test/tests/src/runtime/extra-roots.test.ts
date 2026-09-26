@@ -90,6 +90,35 @@ test('授权根配置目录自身为链接时不加载外部配置', async (t) =
   assert.ok(policy.authorizedRootWarnings.length >= 1);
 });
 
+test('PathPolicy 仅在显式可写授权根内创建和删除文件', async (t) => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-write-workspace-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-write-outside-'));
+  t.after(() => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
+  await mkdir(path.join(workspace, '.echolens'));
+  await writeFile(path.join(workspace, '.echolens', 'roots.json'), JSON.stringify({
+    version: 1, roots: [{ path: outside, allowWrite: true }],
+  }));
+  const policy = await PathPolicy.create(workspace);
+  const target = path.join(outside, 'authorized.txt');
+  assert.equal(policy.classifyPath(target).scope, 'authorized');
+  assert.equal(policy.classifyPath(path.join(outside, '..', 'not-authorized.txt')).scope, 'denied');
+  const created = await policy.createFile(target);
+  await created.handle.writeFile('authorized content');
+  await created.handle.close();
+  assert.equal((await policy.readTextFile(target)).content, 'authorized content');
+  const writable = await policy.openFileForWrite(target);
+  await writable.handle.close();
+  assert.equal(await policy.deleteFile(target), target);
+  await assert.rejects(policy.readTextFile(target), (error: unknown) => error instanceof PathPolicyError && error.code === 'path_not_found');
+
+  await writeFile(path.join(workspace, '.echolens', 'roots.json'), JSON.stringify({
+    version: 1, roots: [{ path: outside, allowWrite: false }],
+  }));
+  const readOnly = await PathPolicy.create(workspace);
+  assert.equal(readOnly.classifyPath(target).scope, 'authorized');
+  await assert.rejects(readOnly.createFile(target), (error: unknown) => error instanceof PathPolicyError && error.code === 'path_outside_workspace');
+});
+
 function toolContext(workspaceRoot: string) {
   return { workspaceRoot, allowedPermissions: new Set(['workspace.write' as const]), signal: new AbortController().signal };
 }

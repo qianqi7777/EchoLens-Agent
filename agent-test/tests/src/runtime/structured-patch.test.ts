@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
   applyPatch,
+  listEditCheckpoints,
   listEditCheckpointIds,
   loadEditCheckpoint,
   normalizePatch,
@@ -12,6 +14,7 @@ import {
   previewPatch,
   restoreFiles,
   rollbackCheckpoint,
+  rollbackTo,
   saveEditCheckpoint,
 } from '../../../../src/runtime/structured-patch.js';
 
@@ -129,4 +132,105 @@ test('Patch persists checkpoints, enforces context, and rejects binary text', as
     version: 1,
     operations: [{ op: 'replace', path: 'binary.bin', oldString: 'x', newString: 'y' }],
   }), (error) => error instanceof PatchError && error.code === 'patch_binary_unsupported');
+});
+
+test('Patch checkpoint listing and indexed rollback only undo later Agent changes', async (context) => {
+  const root = await workspace(context);
+  assert.deepEqual(await listEditCheckpoints(root), []);
+  await writeFile(join(root, 'file.txt'), 'initial\n');
+  const first = await applyPatch(root, {
+    version: 1, operations: [{ op: 'replace', path: 'file.txt', oldString: 'initial', newString: 'middle' }],
+  });
+  const firstId = await saveEditCheckpoint(root, first.checkpoint);
+  const second = await applyPatch(root, {
+    version: 1, operations: [{ op: 'replace', path: 'file.txt', oldString: 'middle', newString: 'agent' }],
+  });
+  const secondId = await saveEditCheckpoint(root, second.checkpoint);
+  assert.deepEqual(await listEditCheckpointIds(root), [firstId, secondId]);
+  await assert.rejects(rollbackTo([first.checkpoint, second.checkpoint], -1), (error) => error instanceof PatchError && error.code === 'patch_invalid');
+  const undone = await rollbackTo(root, [firstId, secondId], 0);
+  assert.deepEqual(undone.completedCheckpointIds, [secondId]);
+  assert.deepEqual(undone.restoredPaths, ['file.txt']);
+  assert.equal(await readFile(join(root, 'file.txt'), 'utf8'), 'middle\n');
+});
+
+test('Patch rollback deletes unchanged creations but preserves later user edits', async (context) => {
+  const root = await workspace(context);
+  const created = await applyPatch(root, {
+    version: 1, operations: [{ op: 'create', path: 'new.txt', content: 'agent\n' }],
+  });
+  const deleted = await rollbackCheckpoint(created.checkpoint);
+  assert.deepEqual(deleted.restoredPaths, ['new.txt']);
+  assert.equal(await readFile(join(root, 'new.txt')).catch(() => undefined), undefined);
+
+  const createdAgain = await applyPatch(root, {
+    version: 1, operations: [{ op: 'create', path: 'new.txt', content: 'agent\n' }],
+  });
+  await writeFile(join(root, 'new.txt'), 'user\n');
+  const preserved = await rollbackCheckpoint(createdAgain.checkpoint);
+  assert.deepEqual(preserved.skippedPaths, ['new.txt']);
+  assert.equal(await readFile(join(root, 'new.txt'), 'utf8'), 'user\n');
+});
+
+test('Patch 拒绝后置上下文漂移与预览规模越界，且不写入文件', async (context) => {
+  const root = await workspace(context);
+  await writeFile(join(root, 'note.txt'), 'before\nanchor\nafter\n');
+  const patch = { version: 1, operations: [{ op: 'replace', path: 'note.txt', oldString: 'anchor', newString: 'much-longer-change' }] };
+  await assert.rejects(previewPatch(root, {
+    version: 1,
+    operations: [{ ...patch.operations[0], expectedContext: { after: '\nmissing' } }],
+  }), (error: unknown) => error instanceof PatchError && error.code === 'patch_context_mismatch');
+  await assert.rejects(previewPatch(root, patch, { maxChangedBytes: 1 }),
+    (error: unknown) => error instanceof PatchError && error.code === 'patch_limits_exceeded');
+  await assert.rejects(previewPatch(root, patch, { maxChangedLines: 0 }),
+    (error: unknown) => error instanceof PatchError && error.code === 'patch_limits_exceeded');
+  assert.equal(await readFile(join(root, 'note.txt'), 'utf8'), 'before\nanchor\nafter\n');
+});
+
+test('Checkpoint 拒绝跨工作区移植；回滚不复活已移除的新文件或覆盖用户重建文件', async (context) => {
+  const root = await workspace(context);
+  const otherRoot = await workspace(context);
+  const created = await applyPatch(root, {
+    version: 1, operations: [{ op: 'create', path: 'new.txt', content: 'agent\n' }],
+  });
+  const foreignId = await saveEditCheckpoint(root, { ...created.checkpoint, workspaceRoot: otherRoot });
+  await assert.rejects(loadEditCheckpoint(root, foreignId),
+    (error: unknown) => error instanceof PatchError && error.code === 'patch_invalid');
+  await rm(join(root, 'new.txt'));
+  assert.deepEqual(await rollbackCheckpoint(created.checkpoint), { restoredPaths: [], skippedPaths: [] });
+
+  await writeFile(join(root, 'old.txt'), 'before\n');
+  const deleted = await applyPatch(root, {
+    version: 1,
+    operations: [{ op: 'delete', path: 'old.txt', expectedFileHash: `sha256:${createHash('sha256').update('before\n').digest('hex')}` }],
+  });
+  await writeFile(join(root, 'old.txt'), 'user recreated\n');
+  const rollback = await rollbackCheckpoint(deleted.checkpoint);
+  assert.deepEqual(rollback.skippedPaths, ['old.txt']);
+  assert.equal(await readFile(join(root, 'old.txt'), 'utf8'), 'user recreated\n');
+
+  await rm(join(root, 'old.txt'));
+  const restored = await rollbackCheckpoint(deleted.checkpoint);
+  assert.deepEqual(restored.restoredPaths, ['old.txt']);
+  assert.equal(await readFile(join(root, 'old.txt'), 'utf8'), 'before\n');
+});
+
+test('旧检查点缺少应用后证据时不覆盖或删除现有用户文件', async (context) => {
+  const root = await workspace(context);
+  await writeFile(join(root, 'existing.txt'), 'user edited\n');
+  await writeFile(join(root, 'created.txt'), 'user created\n');
+  const checkpoint = {
+    version: 1 as const,
+    workspaceRoot: root,
+    workspaceRevision: { value: 'legacy', capturedAt: new Date().toISOString(), fileCount: 2 },
+    createdAt: new Date().toISOString(),
+    files: [
+      { path: 'existing.txt', existed: true, contentBase64: Buffer.from('old\n').toString('base64') },
+      { path: 'created.txt', existed: false },
+    ],
+  };
+  const result = await rollbackCheckpoint(checkpoint);
+  assert.deepEqual(result.skippedPaths, ['existing.txt', 'created.txt']);
+  assert.equal(await readFile(join(root, 'existing.txt'), 'utf8'), 'user edited\n');
+  assert.equal(await readFile(join(root, 'created.txt'), 'utf8'), 'user created\n');
 });

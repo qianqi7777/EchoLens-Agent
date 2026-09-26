@@ -9,10 +9,14 @@ import { toolSuccess } from '../../../../src/runtime/tool-result.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
 import type { TaskWorkspaceAllocator } from '../../../../src/orchestration/workspace-allocator.js';
 import { LifecycleHookRunner } from '../../../../src/orchestration/lifecycle-hooks.js';
+import type { AgentEvent } from '../../../../src/session/events.js';
+import { SubagentBackgroundService } from '../../../../src/orchestration/subagent-background.js';
+import { PersistentTaskQueue } from '../../../../src/orchestration/task-queue.js';
 import {
   BUILTIN_SUBAGENT_PROFILES,
   createWorkspaceBoundSubagentRegistry,
   SubagentOrchestrator,
+  type SubagentResult,
 } from '../../../../src/orchestration/subagent.js';
 
 test('Explore 子 Agent 只看到白名单工具，父级只收到结构化摘要和证据', async (t) => {
@@ -108,6 +112,134 @@ test('代码智能工具绑定子 Agent 租约目录而不是主工作区', asyn
   assert.match(leaseResult.content, /LeaseOnly/u);
   assert.doesNotMatch(sourceResult.content, /RootOnly/u);
 });
+
+test('观察型 Hook 隔离事件副本、超时与异常，不能中断后续 Hook', async () => {
+  const runner = new LifecycleHookRunner({ timeoutMs: 10 });
+  const event: AgentEvent = {
+    version: 1, eventId: 'event', sessionId: 'session', seq: 1,
+    timestamp: '2026-09-26T00:00:00.000Z',
+    payload: { type: 'tool.started', callId: 'original', toolName: 'read_file', callIndex: 0 },
+  };
+  let observed = '';
+  runner.register({
+    id: 'mutates-copy', trust: 'builtin', stages: new Set(['tool']),
+    handle: async (copy) => { (copy.payload as { callId: string }).callId = 'changed'; },
+  });
+  runner.register({
+    id: 'throws', trust: 'user', stages: new Set(['tool']),
+    handle: async () => { throw new Error('observer failed'); },
+  });
+  runner.register({
+    id: 'times-out', trust: 'user', stages: new Set(['tool']),
+    handle: async () => new Promise<void>(() => undefined),
+  });
+  runner.register({
+    id: 'still-runs', trust: 'builtin', stages: new Set(['tool']),
+    handle: async (copy) => { observed = (copy.payload as { callId: string }).callId; },
+  });
+  const results = await runner.observe(event);
+  assert.deepEqual(results.map((item) => item.status), ['completed', 'failed', 'timeout', 'completed']);
+  assert.equal((event.payload as { callId: string }).callId, 'original');
+  assert.equal(observed, 'original');
+});
+
+test('未绑定工作区的 Hook Runner 保持空结果，拒绝信任变更及无效注册', async () => {
+  const runner = new LifecycleHookRunner();
+  const event: AgentEvent = {
+    version: 1, eventId: 'event', sessionId: 'session', seq: 1,
+    timestamp: '2026-09-26T00:00:00.000Z', payload: { type: 'turn.started', userMessage: 'hello' },
+  };
+  assert.deepEqual(await runner.observe(event), []);
+  assert.deepEqual(await runner.run({ version: 1, hookEventName: 'SessionStart', sessionId: 'session', cwd: '.' }),
+    { decision: 'continue', contexts: [], results: [] });
+  assert.deepEqual(runner.hookStatus(), []);
+  assert.deepEqual(await runner.reloadCommandHooks(), runner.hookSummary());
+  await assert.rejects(runner.trustProjectHooks('all'), /未绑定工作区/u);
+  await assert.rejects(runner.revokeProjectHooks('all'), /未绑定工作区/u);
+  assert.throws(() => new LifecycleHookRunner({ timeoutMs: 1 }), /timeoutMs/u);
+  const valid = { id: 'valid', trust: 'builtin' as const, stages: new Set(['turn'] as const), handle: async () => undefined };
+  runner.register(valid);
+  assert.throws(() => runner.register(valid), /已注册/u);
+  assert.throws(() => runner.register({ ...valid, id: '../bad' }), /ID 无效/u);
+  assert.throws(() => runner.register({ ...valid, id: 'bad-trust', trust: 'unknown' as 'builtin' }), /trust 无效/u);
+  assert.throws(() => runner.register({ ...valid, id: 'bad-stage', stages: new Set(['unknown' as 'turn']) }), /stage 无效/u);
+});
+
+test('后台子 Agent 映射完成与审批状态，并在恢复后保留使用量证据', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-subagent-background-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  const requests: string[] = [];
+  let paused = true;
+  const orchestrator = {
+    run: async (request: { objective: string }): Promise<SubagentResult> => {
+      requests.push(request.objective);
+      return subagentResult(paused ? 'paused' : 'completed');
+    },
+  } as unknown as SubagentOrchestrator;
+  const service = new SubagentBackgroundService(queue, orchestrator, undefined, undefined, (objective) => `[context] ${objective}`);
+  t.after(() => service.close());
+  service.setConcurrency(1);
+
+  const task = await service.enqueue('explore', 'inspect', 'sandbox', { source: 'test' });
+  await waitForTaskState(queue, task.id, 'waiting_approval');
+  const waiting = await queue.get(task.id);
+  assert.equal(waiting?.waitingReason, '子 Agent 等待审批');
+  assert.equal(waiting?.result?.summary, 'subagent summary');
+  assert.deepEqual(waiting?.result?.usage, { inputTokens: 2, outputTokens: 1, modelSteps: 1, toolCalls: 0 });
+  assert.deepEqual(requests, ['[context] inspect']);
+  assert.equal((await service.workerStatus()).running, 0);
+  assert.equal((await service.list()).length, 1);
+
+  paused = false;
+  const resumed = await service.resume(task.id);
+  assert.equal(resumed.state, 'pending');
+  await waitForTaskState(queue, task.id, 'completed');
+  assert.deepEqual(requests, ['[context] inspect', '[context] inspect']);
+  assert.deepEqual((await queue.get(task.id))?.result?.evidenceIds, ['evidence:subagent']);
+  await assert.rejects(service.resume('missing-task'), /后台任务不存在/u);
+});
+
+test('后台子 Agent 失败与取消不会伪装为已完成', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-subagent-background-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  const orchestrator = {
+    run: async (request: { objective: string }): Promise<SubagentResult> => subagentResult(request.objective === 'cancelled' ? 'cancelled' : 'failed'),
+  } as unknown as SubagentOrchestrator;
+  const service = new SubagentBackgroundService(queue, orchestrator);
+  t.after(() => service.close());
+
+  const failed = await service.enqueue('review', 'failed');
+  await waitForTaskState(queue, failed.id, 'failed');
+  assert.equal((await queue.get(failed.id))?.errorCode, 'subagent_failed');
+  assert.equal((await queue.get(failed.id))?.result, undefined);
+
+  const cancelled = await service.enqueue('review', 'cancelled');
+  await waitForTaskState(queue, cancelled.id, 'failed');
+  assert.equal((await queue.get(cancelled.id))?.attempts, 2);
+  assert.equal((await queue.get(cancelled.id))?.errorCode, 'subagent_cancelled');
+  const terminal = await service.cancel(cancelled.id);
+  assert.equal(terminal.state, 'failed');
+});
+
+function subagentResult(state: SubagentResult['state']): SubagentResult {
+  const usage = { inputTokens: 2, outputTokens: 1, modelSteps: 1, toolCalls: 0 };
+  return {
+    schemaVersion: 1, profile: 'explore', workspaceMode: 'sandbox', state,
+    summary: 'subagent summary', changedFiles: [], tests: [], unresolved: [], evidenceIds: ['evidence:subagent'],
+    usage, metrics: usage, estimatedCost: { unknown: true },
+  };
+}
+
+async function waitForTaskState(queue: PersistentTaskQueue, taskId: string, expected: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if ((await queue.get(taskId))?.state === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`后台任务未进入 ${expected} 状态`);
+}
 
 class RecordingModel implements ModelProvider {
   readonly model = 'test-model';

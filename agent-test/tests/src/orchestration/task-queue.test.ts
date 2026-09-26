@@ -155,6 +155,44 @@ test('多个队列实例并发写入时不丢任务且不残留临时文件', as
   assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.tmp')), []);
 });
 
+test('Worker 并发配置拒绝越界且空队列不会认领任务', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-worker-bounds-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  const executor = { execute: async () => ({ state: 'completed' as const, result: { summary: 'done', evidenceIds: [] } }) };
+  assert.throws(() => new BackgroundTaskWorker(queue, executor, { concurrency: 0 }), /1 到 32/u);
+  assert.throws(() => new BackgroundTaskWorker(queue, executor, { concurrency: 33 }), /1 到 32/u);
+  const worker = new BackgroundTaskWorker(queue, executor, { concurrency: 2 });
+  assert.deepEqual(worker.workerStatus, { concurrency: 2, running: 0 });
+  assert.equal(await worker.runOnce(), false);
+  assert.throws(() => worker.setConcurrency(1.5), /1 到 32/u);
+  worker.setConcurrency(1);
+  assert.deepEqual(worker.workerStatus, { concurrency: 1, running: 0 });
+  await worker.stop();
+});
+
+test('Worker 将显式失败和执行异常持久化为可审查的失败状态', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-worker-failures-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  const explicit = await queue.enqueue({ isolation: 'sandbox', payload: { profile: 'test', objective: 'explicit failure' } });
+  const thrown = await queue.enqueue({ isolation: 'sandbox', payload: { profile: 'test', objective: 'thrown failure' }, maxAttempts: 1 });
+  const notices: string[] = [];
+  const worker = new BackgroundTaskWorker(queue, {
+    execute: async (task) => {
+      if (task.id === explicit.id) return { state: 'failed', code: 'validation_failed', retryable: false };
+      throw Object.assign(new Error('sensitive fixture detail'), { code: 'executor_crashed' });
+    },
+  }, { workerId: 'worker-failure', onStateChange: (task) => { notices.push(task.state); } });
+  assert.equal(await worker.runOnce(), true);
+  assert.equal((await queue.get(explicit.id))?.state, 'failed');
+  assert.equal((await queue.get(explicit.id))?.errorCode, 'validation_failed');
+  assert.equal(await worker.runOnce(), true);
+  assert.equal((await queue.get(thrown.id))?.state, 'failed');
+  assert.equal((await queue.get(thrown.id))?.errorCode, 'executor_crashed');
+  assert.deepEqual(notices, ['running', 'failed', 'running', 'failed']);
+});
+
 test('claimNext atomically skips an active workspace but leaves its task pending', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-task-workspace-lock-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -223,4 +261,31 @@ test('Workspace allocator 为并行后台任务分配互不相同的根目录租
   assert.notEqual(first.workspaceKey, second.workspaceKey);
   assert.notEqual(first.root, second.root);
   await Promise.all([first.cleanup(), second.cleanup()]);
+});
+
+test('Sandbox 租约不回传暂存改动，重复清理后可再次分配', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-lease-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'source.txt'), 'source\n');
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  const first = await allocator.allocate(root, 'sandbox');
+  await writeFile(join(first.root, 'source.txt'), 'agent change\n');
+  assert.deepEqual(await first.changedFiles(), []);
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'source\n');
+  await first.cleanup();
+  await first.cleanup();
+  await assert.rejects(readFile(join(first.root, 'source.txt')));
+  const second = await allocator.allocate(root, 'sandbox');
+  assert.equal(await readFile(join(second.root, 'source.txt'), 'utf8'), 'source\n');
+  await second.cleanup();
+});
+
+test('Worktree 创建失败时清理暂存快照并保留源工作区', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-worktree-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'source.txt'), 'user data\n');
+  await assert.rejects(new DefaultTaskWorkspaceAllocator().allocate(root, 'worktree'), /无法创建后台 Worktree/u);
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'user data\n');
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual(await readdir(join(root, '.echolens', 'sandboxes')), []);
 });

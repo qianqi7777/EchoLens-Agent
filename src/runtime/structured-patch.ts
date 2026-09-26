@@ -483,7 +483,7 @@ async function rollbackCheckpointFiles(
           throw error;
         });
         if (!current) continue;
-        if (file.afterHash && hashBytes(current.bytes) !== file.afterHash) { skippedPaths.push(file.path); continue; }
+        if (!file.afterHash || hashBytes(current.bytes) !== file.afterHash) { skippedPaths.push(file.path); continue; }
         await policy.deleteFile(file.path);
         restoredPaths.push(file.path);
         continue;
@@ -493,8 +493,13 @@ async function rollbackCheckpointFiles(
         if (error instanceof PathPolicyError && error.code === 'path_not_found') return undefined;
         throw error;
       });
-      if (current && file.afterHash && hashBytes(current.bytes) !== file.afterHash) { skippedPaths.push(file.path); continue; }
-      if (!current && file.afterHash && file.afterHash !== undefined) {
+      // 删除操作的应用后状态是“不存在”：同名文件重新出现时属于用户的新内容，不能写回旧快照。
+      // 旧格式缺少 afterHash/afterExisted 时也没有足够证据证明当前状态由 Agent 产生，保守跳过。
+      if (current && (file.afterExisted === false || !file.afterHash || hashBytes(current.bytes) !== file.afterHash)) {
+        skippedPaths.push(file.path);
+        continue;
+      }
+      if (!current && file.afterExisted !== false) {
         skippedPaths.push(file.path);
         continue;
       }

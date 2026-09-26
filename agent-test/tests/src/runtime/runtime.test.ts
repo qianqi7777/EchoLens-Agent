@@ -371,6 +371,49 @@ test('ReactAgent marks non-completed stop reasons as degraded', async () => {
   assert.equal(result.trace.some((item) => item.type === 'warning'), true);
 });
 
+test('ReactAgent persists model failures with retryability and never reports a successful run', async () => {
+  const events: AgentEvent[] = [];
+  const registry = new ToolRegistry();
+  const provider: ModelProvider = {
+    model: 'failing-model',
+    capabilities: { ...new ScriptedModel().capabilities, supportsStructuredOutput: false },
+    async complete(): Promise<ProviderResult> {
+      throw Object.assign(new Error('fixture transport failed'), { code: 'transport_failure', retryable: true });
+    },
+  };
+  const agent = new ReactAgent(provider, registry, new ToolExecutor(registry), { workspaceRoot: process.cwd() });
+  await assert.rejects(agent.run('answer', [], undefined, { onEvent: (event) => { events.push(event); } }), /fixture transport failed/u);
+  assert.equal(events.some((event) => event.payload.type === 'model.failed'
+    && event.payload.code === 'transport_failure'
+    && event.payload.retryable), true);
+  assert.equal(events.some((event) => event.payload.type === 'run.failed'
+    && event.payload.code === 'transport_failure'
+    && event.payload.retryable), true);
+  assert.equal(events.some((event) => event.payload.type === 'checkpoint.saved'
+    && event.payload.checkpoint.state === 'failed'), true);
+  assert.equal(events.some((event) => event.payload.type === 'run.completed'), false);
+});
+
+test('ReactAgent refuses tool calls paired with a truncated stop reason', async () => {
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const provider: ModelProvider = {
+    model: 'malformed-tool-stop',
+    capabilities: { ...new ScriptedModel().capabilities, supportsStructuredOutput: false },
+    async complete(): Promise<ProviderResult> {
+      return {
+        output: [{ type: 'tool_call', id: 'bad-call-item', callId: 'bad-call', name: 'read_file', arguments: { path: 'README.md' }, callIndex: 0 }],
+        stopReason: 'truncated',
+      };
+    },
+  };
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), { workspaceRoot: process.cwd() }).run('answer');
+  assert.equal(result.state, 'failed');
+  assert.equal(result.degraded, true);
+  assert.equal(result.items.some((item) => item.type === 'tool_result' && item.callId === 'bad-call'), false);
+  assert.equal(result.trace.some((item) => item.type === 'warning' && item.message.includes('truncated')), true);
+});
+
 test('ReactAgent projects streaming text and usage into Runtime events', async () => {
   const registry = new ToolRegistry();
   const provider: ModelProvider = {

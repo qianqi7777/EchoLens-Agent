@@ -104,6 +104,56 @@ test('非法配置拒绝初始化，项目入口脚本必须纳入信任指纹',
   );
 });
 
+test('项目 Hook 信任可撤销，损坏的信任记录与重复 ID 失败关闭', async (t) => {
+  const { root, home } = await fixture(t);
+  await writeFile(join(root, 'observe.mjs'), 'process.stdin.resume();\n');
+  const configPath = join(root, '.echolens', 'hooks.json');
+  await writeConfig(configPath, {
+    PreToolUse: [{ ...hook('review', 'observe.mjs'), trustFiles: ['observe.mjs'] }],
+  });
+  const env = { ...process.env, ECHOLENS_HOME: home };
+  const manager = await CommandHookManager.load(root, { env });
+  assert.equal(manager.list()[0]?.trusted, false);
+  assert.equal((await manager.trustProject('all')).length, 1);
+  assert.equal(manager.list()[0]?.trusted, true);
+  assert.equal((await manager.revokeProject('all')).length, 1);
+  assert.equal(manager.list()[0]?.trusted, false);
+  await assert.rejects(manager.revokeProject('missing'), /未找到项目 Hook/u);
+  await assert.rejects(manager.trustProject('missing'), /未找到项目 Hook/u);
+
+  await writeFile(join(root, '.echolens', 'hook-trust.json'), '{"version":1,"trusted":{"review":"invalid"}}');
+  await assert.rejects(manager.reload(), (error: unknown) => error instanceof HookConfigError);
+  await rm(join(root, '.echolens', 'hook-trust.json'));
+  await writeConfig(configPath, {
+    PreToolUse: [
+      { ...hook('review', 'observe.mjs'), trustFiles: ['observe.mjs'] },
+      { ...hook('review', 'observe.mjs'), trustFiles: ['observe.mjs'] },
+    ],
+  });
+  await assert.rejects(manager.reload(), (error: unknown) => error instanceof HookConfigError && /重复/u.test(error.message));
+});
+
+test('Hook 上下文总预算、无效输出和非决策事件的拒绝均有明确结果', async (t) => {
+  const { root, home } = await fixture(t);
+  await writeFile(join(root, 'context.mjs'), "console.log(JSON.stringify({ version: 1, additionalContext: 'x'.repeat(5000) }));\n");
+  await writeFile(join(root, 'invalid.mjs'), "console.log('not json');\n");
+  await writeFile(join(root, 'deny.mjs'), "console.error('unsupported'); process.exit(2);\n");
+  await writeConfig(join(home, 'hooks.json'), {
+    UserPromptSubmit: [hook('first', 'context.mjs'), hook('second', 'context.mjs'), hook('invalid', 'invalid.mjs')],
+    SessionEnd: [hook('unsupported-deny', 'deny.mjs')],
+  });
+  const manager = await CommandHookManager.load(root, { env: { ...process.env, ECHOLENS_HOME: home } });
+  const prompt = await manager.run(input(root, 'UserPromptSubmit'));
+  assert.equal(prompt.decision, 'deny');
+  assert.equal(prompt.contexts.length, 1);
+  assert.deepEqual(prompt.results.map((item) => item.reasonCode), [
+    'hook_completed', 'hook_context_too_large', 'hook_output_invalid_json',
+  ]);
+  const end = await manager.run(input(root, 'SessionEnd'));
+  assert.equal(end.decision, 'continue');
+  assert.equal(end.results[0]?.reasonCode, 'hook_deny_not_supported');
+});
+
 test('工具预检只能拒绝且不消耗预算，放行后仍进入原审批链', async () => {
   const registry = new ToolRegistry();
   let executions = 0;

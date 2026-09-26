@@ -132,6 +132,35 @@ test('支持 afterSeq、Session 列表并在写入前脱敏', async (context) =>
   assert.deepEqual((await JsonlEventStore.list(root)).map((item) => item.sessionId), ['session-query']);
 });
 
+test('空目录列表、最新检查点和非法 JSON 行均失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-extra-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  assert.deepEqual(await JsonlEventStore.list(join(root, 'missing')), []);
+  const store = new JsonlEventStore(root, 'checkpoint-query', { flushEachEvent: false });
+  await store.append({ payload: { type: 'session.created', workspaceRoot: root } });
+  await store.append({ payload: {
+    type: 'checkpoint.saved', checkpoint: {
+      version: 1, sessionId: 'checkpoint-query', turnId: 'turn', runId: 'run', step: 1,
+      phase: 'model', toolCallsUsed: 0, state: 'paused', items: [],
+    },
+  } });
+  assert.equal((await store.latestCheckpoint())?.payload.type, 'checkpoint.saved');
+  assert.equal((await store.read(99)).length, 0);
+  await store.close();
+  await writeFile(join(root, 'broken.jsonl'), '{not-json}\n');
+  await assert.rejects(new JsonlEventStore(root, 'broken').read(), EventStoreCorruptionError);
+});
+
+test('事件日志中的空行、非法结构和不存在文件读取均失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-invalid-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'empty-line.jsonl'), `${JSON.stringify(event(1))}\n\n`);
+  await assert.rejects(new JsonlEventStore(root, 'empty-line').read(), EventStoreCorruptionError);
+  await writeFile(join(root, 'invalid-shape.jsonl'), `${JSON.stringify({ version: 1, seq: 1 })}\n`);
+  await assert.rejects(new JsonlEventStore(root, 'invalid-shape').read(), EventStoreCorruptionError);
+  assert.deepEqual(await JsonlEventStore.list(join(root, 'not-created')), []);
+});
+
 test('同一 Session 拒绝第二个写者，关闭后可以重新打开', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-events-lock-'));
   context.after(() => rm(root, { recursive: true, force: true }));

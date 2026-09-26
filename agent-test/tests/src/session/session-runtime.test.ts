@@ -339,6 +339,28 @@ test('Session 打开失败释放锁，已完成 Turn 拒绝追加无法恢复的
   await reopened.close();
 });
 
+test('Session 检查点列表保持时间索引并对请求数量设上限', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-session-checkpoint-list-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const registry = new ToolRegistry();
+  const session = await SessionRuntime.open(
+    new ReactAgent(finalProvider([]), registry, new ToolExecutor(registry), { workspaceRoot: root }),
+    { rootDirectory: join(root, 'sessions'), workspaceRoot: root, sessionId: 'checkpoint-list' },
+  );
+  t.after(() => session.close());
+  await session.run('first');
+  await session.run('second');
+
+  const all = await session.listRewindCheckpoints(20);
+  assert.ok(all.length >= 2);
+  assert.deepEqual(all.map((item) => item.index), [...all.map((item) => item.index)].sort((a, b) => b - a));
+  assert.equal((await session.listRewindCheckpoints(1)).length, 1);
+  assert.equal((await session.listRewindCheckpoints(0)).length, 1);
+  assert.equal((await session.listRewindCheckpoints(Number.NaN)).length, Math.min(all.length, 5));
+  assert.equal((await session.listRewindCheckpoints(1_000)).length, all.length);
+  assert.ok(all.every((item) => item.eventId && item.turnId && Number.isInteger(item.step)));
+});
+
 function toolCallingProvider(): ModelProvider {
   return {
     model: 'tool-caller',

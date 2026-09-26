@@ -233,6 +233,37 @@ test('off does not verify, auto skips unavailable Sandbox, and strict pauses on 
     && event.payload.verified), false);
 });
 
+test('strict verification pauses when the verification tool or execution grant is absent', async () => {
+  const root = await workspace();
+  const missingTool = new ToolRegistry();
+  missingTool.register({
+    name: 'write_file', description: 'test write', permission: 'workspace.write', effect: 'write',
+    inputSchema: objectSchema({}, []),
+    execute: async () => toolSuccess('changed', 'changed', [], { changedFiles: ['src/example.ts'] }),
+  });
+  const noToolEvents: AgentEvent[] = [];
+  const noTool = await new ReactAgent(finalAfterWrite(), missingTool,
+    new ToolExecutor(missingTool, { actionGuardrail: writeAndVerifyGuardrail() }), {
+      workspaceRoot: root, permissions: new Set(['workspace.write', 'process.exec']), verificationGate: 'strict',
+    }).run('写入', [], undefined, { onEvent: (event) => { noToolEvents.push(event); } });
+  assert.equal(noTool.state, 'paused');
+  assert.equal(noToolEvents.some((event) => event.payload.type === 'verification.skipped'
+    && event.payload.reason === '未注册 Sandbox 验证工具'), true);
+  assert.equal(noToolEvents.some((event) => event.payload.type === 'verification.completed' && event.payload.verified), false);
+
+  const sandbox = new SequenceSandbox([]);
+  const { registry } = setup(sandbox);
+  const noGrantEvents: AgentEvent[] = [];
+  const noGrant = await new ReactAgent(finalAfterWrite(), registry,
+    new ToolExecutor(registry, { actionGuardrail: writeAndVerifyGuardrail() }), {
+      workspaceRoot: root, permissions: new Set(['workspace.write']), verificationGate: 'strict',
+    }).run('写入', [], undefined, { onEvent: (event) => { noGrantEvents.push(event); } });
+  assert.equal(noGrant.state, 'paused');
+  assert.equal(noGrantEvents.some((event) => event.payload.type === 'verification.skipped'
+    && event.payload.reason === 'Runtime 未授予 Sandbox 命令执行权限'), true);
+  assert.equal(sandbox.requests.length, 0);
+});
+
 function setup(sandbox: SandboxAdapter, changedFiles: string[] = ['src/example.ts']) {
   const registry = new ToolRegistry();
   registry.register({

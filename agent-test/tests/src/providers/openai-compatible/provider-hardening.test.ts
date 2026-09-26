@@ -427,6 +427,31 @@ test('default retry sleep responds to cancellation during backoff', async () => 
   await assert.rejects(completion, (error: unknown) => error instanceof ProviderError && error.kind === 'cancelled');
 });
 
+test('retry policy preserves non-abort sleep failures and clamps jitter/delay bounds', async () => {
+  await assert.rejects(
+    runWithRetry(
+      async () => { throw new ProviderError({ kind: 'network', message: 'temporary', retryable: true }); },
+      { sleep: async () => { throw new Error('clock failed'); }, random: () => 99 },
+    ),
+    (error: unknown) => error instanceof Error && error.message === 'clock failed',
+  );
+
+  let observedDelay = -1;
+  const result = await runWithRetry(
+    async (attempt) => {
+      if (attempt === 1) throw new ProviderError({ kind: 'network', message: 'retry', retryable: true, retryAfterMs: 99_999 });
+      return 'done';
+    },
+    {
+      maxDelayMs: 100,
+      sleep: async (delayMs) => { observedDelay = delayMs; },
+      random: () => -99,
+    },
+  );
+  assert.equal(result.value, 'done');
+  assert.equal(observedDelay, 100);
+});
+
 function providerFor(baseUrl: string, overrides: Partial<OpenAICompatibleProviderOptions> = {}) {
   return new OpenAICompatibleProvider({
     model: 'test-model',

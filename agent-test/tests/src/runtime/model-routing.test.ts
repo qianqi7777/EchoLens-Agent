@@ -6,7 +6,7 @@ import test from 'node:test';
 import { textMessage } from '../../../../src/core/messages.js';
 import { ProviderError } from '../../../../src/providers/provider-error.js';
 import type { ModelProvider, ProviderCapabilities, ProviderRequest, ProviderResult, ProviderStreamEvent } from '../../../../src/providers/types.js';
-import { RoutedModelProvider, classifyTask } from '../../../../src/runtime/model-routing.js';
+import { RoutedModelProvider, classifyTask, latestUserText } from '../../../../src/runtime/model-routing.js';
 import { connectRoutedModelProviderFromEnv, routingMode } from '../../../../src/runtime/model-routing-config.js';
 import type { RouteStatus } from '../../../../src/runtime/model-router.js';
 import { ReactAgent } from '../../../../src/runtime/resumable-react-agent.js';
@@ -506,4 +506,89 @@ test('refuses to resume when the checkpoint model was removed from the pool', ()
     sessionCostUsd: 0,
     costUnknown: false,
   }), /不在当前候选池/u);
+});
+
+test('routing forks a pinned subagent model and estimates known versus unknown cost', () => {
+  const first = new StubProvider('first', () => answer('first'));
+  const second = new StubProvider('second', () => answer('second'));
+  const provider = new RoutedModelProvider([
+    { id: 'first', provider: first, tier: 1, privacy: 'full-context' },
+    { id: 'second', provider: second, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 1, estimatedOutputCostPer1k: 2 },
+  ], { mode: 'balanced', defaultProfileId: 'first' });
+  assert.throws(() => provider.forkProfile('missing'), /不存在/u);
+  assert.deepEqual(provider.estimateUsageCost({ inputTokens: 1_000, outputTokens: 1_000 }), { unknown: true });
+  const fork = provider.forkProfile('second');
+  fork.beginRun('修复 bug');
+  assert.equal(fork.model, 'second');
+  assert.equal(fork.status().some((line) => line === 'mode=pinned:second'), true);
+  assert.deepEqual(fork.estimateUsageCost({ inputTokens: 1_000, outputTokens: 2_000 }), { amount: 5, currency: 'USD' });
+  assert.equal(provider.status().some((line) => line === 'mode=balanced'), true);
+  assert.equal(latestUserText([textMessage('u1', 'user', 'first'), textMessage('a1', 'assistant', 'reply'), textMessage('u2', 'user', 'latest')]), 'latest');
+  assert.equal(latestUserText([]), undefined);
+});
+
+test('routing stream exposes a complete-only provider without fabricating deltas', async () => {
+  const primary = new StubProvider('complete-only', () => answer('complete-only'), { supportsStreaming: false });
+  const provider = new RoutedModelProvider([
+    { id: 'primary', provider: primary, tier: 1, privacy: 'full-context' },
+  ], { mode: 'off', defaultProfileId: 'primary' });
+  provider.beginRun('解释路由');
+  const events: ProviderStreamEvent[] = [];
+  for await (const event of provider.stream({ items: [] })) events.push(event);
+  assert.deepEqual(events.map((event) => event.type), ['response.completed']);
+  assert.equal(primary.calls, 1);
+});
+
+test('routing stream switches before any text but keeps one coherent final model', async () => {
+  const primary = new StubProvider('primary-stream', () => answer('unused'), { supportsStreaming: true }, async function* () {
+    throw new ProviderError({ kind: 'network', message: 'stream connect failed', retryable: true });
+  });
+  const backup = new StubProvider('backup-stream', () => answer('unused'), { supportsStreaming: true }, async function* () {
+    yield { type: 'response.completed', result: { output: [textMessage('backup-answer', 'assistant', 'backup')], stopReason: 'completed' } };
+  });
+  const provider = new RoutedModelProvider([
+    { id: 'primary', provider: primary, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 0 },
+    { id: 'backup', provider: backup, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 10 },
+  ], { mode: 'balanced', defaultProfileId: 'primary' });
+  provider.beginRun('修复 bug');
+  const events: ProviderStreamEvent[] = [];
+  for await (const event of provider.stream({ items: [] })) events.push(event);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.type, 'response.completed');
+  assert.equal(provider.model, 'backup-stream');
+  assert.equal(provider.takeRouteEvents().some((event) => event.type === 'fallback' && event.toModel === 'backup'), true);
+});
+
+test('routing rejects unknown and policy-blocked failures without replaying another model', async () => {
+  for (const failure of [new Error('unknown failure'), new ProviderError({ kind: 'content_filter', message: 'blocked', retryable: false })]) {
+    const primary = new StubProvider('primary', async () => { throw failure; });
+    const backup = new StubProvider('backup', () => answer('backup'));
+    const provider = new RoutedModelProvider([
+      { id: 'primary', provider: primary, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 0 },
+      { id: 'backup', provider: backup, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 10 },
+    ], { mode: 'balanced', defaultProfileId: 'primary' });
+    provider.beginRun('修复 bug');
+    await assert.rejects(provider.complete({ items: [] }), (error: unknown) => error === failure);
+    assert.equal(backup.calls, 0);
+    assert.equal(provider.takeRouteEvents().some((event) => event.type === 'fallback_rejected'), true);
+  }
+});
+
+test('routing enforces a zero-fallback budget and off-mode context capacity', async () => {
+  const failing = new StubProvider('failing', async () => { throw new ProviderError({ kind: 'network', message: 'offline', retryable: true }); });
+  const backup = new StubProvider('backup', () => answer('backup'));
+  const provider = new RoutedModelProvider([
+    { id: 'primary', provider: failing, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 0 },
+    { id: 'backup', provider: backup, tier: 2, privacy: 'full-context', estimatedInputCostPer1k: 10 },
+  ], { mode: 'balanced', defaultProfileId: 'primary', maxFallbacks: 0 });
+  provider.beginRun('修复 bug');
+  await assert.rejects(provider.complete({ items: [] }), ProviderError);
+  assert.equal(backup.calls, 0);
+  assert.equal(provider.takeRouteEvents().some((event) => event.type === 'fallback_rejected' && event.reason.includes('次数上限')), true);
+
+  const tiny = new StubProvider('tiny', () => answer('tiny'), { maxContextTokens: 1 });
+  const off = new RoutedModelProvider([{ id: 'tiny', provider: tiny, tier: 0, privacy: 'full-context' }], {
+    mode: 'off', defaultProfileId: 'tiny',
+  });
+  assert.throws(() => off.beginRun('修复 bug'), /上下文容量不足/u);
 });

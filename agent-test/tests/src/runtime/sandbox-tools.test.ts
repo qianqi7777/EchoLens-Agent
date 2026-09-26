@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { SandboxError, type SandboxAdapter, type SandboxExecuteRequest, type SandboxExecuteResult } from '../../../../src/sandbox/index.js';
 import { MemoryApprovalStore } from '../../../../src/runtime/approval.js';
 import { registerSandboxTools } from '../../../../src/runtime/sandbox-tools.js';
+import { previewSandboxPatch } from '../../../../src/runtime/sandbox-tools.js';
+import { collectSandboxArtifacts } from '../../../../src/sandbox/artifact-store.js';
+import { FileSystemWorkspaceStager } from '../../../../src/sandbox/workspace-stager.js';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
 
@@ -28,6 +31,53 @@ class FakeSandbox implements SandboxAdapter {
     };
   }
 }
+
+test('Sandbox Patch 只能由 Bundle 经审批应用，二进制 Bundle 与不存在的 ID 均拒绝', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-patch-tool-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'source.txt'), 'before\n');
+  await writeFile(join(root, 'image.png'), Buffer.from([0xff, 0xfe]));
+  const stager = new FileSystemWorkspaceStager();
+  const textId = 'echolens-00000000-0000-4000-8000-000000000011';
+  const textStage = await stager.prepare(root, textId);
+  t.after(() => textStage.cleanup());
+  await writeFile(join(textStage.root, 'source.txt'), 'after\n');
+  const textBundle = await collectSandboxArtifacts({ workspaceRoot: root, staged: textStage, id: textId });
+  assert.deepEqual((await previewSandboxPatch(root, textBundle.id)).changedFiles, ['source.txt']);
+
+  const registry = new ToolRegistry();
+  registerSandboxTools(registry, new FakeSandbox());
+  const context = {
+    workspaceRoot: root,
+    allowedPermissions: new Set(['workspace.write'] as const),
+    signal: new AbortController().signal,
+  };
+  const unapproved = await new ToolExecutor(registry).invoke('apply_sandbox_patch', { bundleId: textBundle.id }, context);
+  assert.equal(unapproved.error?.code, 'approval_required');
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'before\n');
+  const executor = new ToolExecutor(registry, {
+    approvalDecider: async () => ({ decision: 'allow', scope: 'once', decidedAt: new Date().toISOString() }),
+  });
+  const applied = await executor.invoke('apply_sandbox_patch', { bundleId: textBundle.id }, context);
+  assert.equal(applied.status, 'ok');
+  assert.match(applied.summary, /来源 bundle=/u);
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'after\n');
+
+  const binaryId = 'echolens-00000000-0000-4000-8000-000000000012';
+  const binaryStage = await stager.prepare(root, binaryId);
+  t.after(() => binaryStage.cleanup());
+  await writeFile(join(binaryStage.root, 'image.png'), Buffer.from([0xff, 0xfd]));
+  const binaryBundle = await collectSandboxArtifacts({ workspaceRoot: root, staged: binaryStage, id: binaryId });
+  const noPatch = await executor.invoke('apply_sandbox_patch', { bundleId: binaryBundle.id }, context);
+  assert.equal(noPatch.error?.code, 'patch_invalid');
+  await assert.rejects(previewSandboxPatch(root, binaryBundle.id), (error: unknown) =>
+    error instanceof SandboxError && error.code === 'sandbox_artifact_failed');
+  const missing = await executor.invoke('apply_sandbox_patch', {
+    bundleId: '00000000-0000-4000-8000-000000000099',
+  }, context);
+  assert.equal(missing.status, 'failed');
+  assert.equal(missing.error?.code, 'tool_failed');
+});
 
 test('Sandbox 工具未审批时不执行，批准后只传递 executable 与 argv', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-sandbox-tool-'));

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   mkdir,
   mkdtemp,
+  readFile,
   rename,
   rm,
   symlink,
@@ -10,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { PathPolicy, PathPolicyError } from '../../../../src/runtime/path-policy.js';
+import { PathPolicy, PathPolicyError, validatePatchPath, validateRelativePath } from '../../../../src/runtime/path-policy.js';
 
 test('PathPolicy rejects Windows namespace, ADS, short-name, reserved, and escape syntax', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-path-policy-'));
@@ -76,6 +77,10 @@ test('PathPolicy rejects directory junctions', async (t) => {
     assert.equal(error.code, 'reparse_point_denied');
     return true;
   });
+  await assert.rejects(policy.createFile('junction\\new.ts'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'reparse_point_denied');
+  await assert.rejects(policy.deleteFile('junction\\secret.ts'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'reparse_point_denied');
 });
 
 test('PathPolicy rejects file symlinks when the environment supports creating them', async (t) => {
@@ -146,6 +151,27 @@ test('PathPolicy rejects text files above the configured read limit', async (t) 
     assert.equal(error.code, 'file_too_large');
     return true;
   });
+  await assert.rejects(policy.readFileBytes('large.ts', 10), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'file_too_large');
+});
+
+test('PathPolicy 根目录被替换后拒绝继续读写', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-path-root-race-'));
+  const moved = `${root}-moved`;
+  t.after(() => Promise.all([
+    rm(root, { recursive: true, force: true }),
+    rm(moved, { recursive: true, force: true }),
+  ]));
+  await writeFile(join(root, 'file.txt'), 'old root');
+  const policy = await PathPolicy.create(root);
+  await rename(root, moved);
+  await mkdir(root);
+  await writeFile(join(root, 'file.txt'), 'new root');
+  await assert.rejects(policy.readTextFile('file.txt'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'workspace_changed');
+  await assert.rejects(policy.createFile('created.txt'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'workspace_changed');
+  await assert.rejects(readFile(join(root, 'created.txt')));
 });
 
 test('workspace tools reject explicit junction traversal with a structured path policy code', async (t) => {
@@ -237,6 +263,26 @@ test('PathPolicy creation fails closed for missing, non-directory, and reparse r
     return;
   }
   await assert.rejects(PathPolicy.create(linkedRoot), (error: unknown) => error instanceof PathPolicyError && error.code === 'reparse_point_denied');
+});
+
+test('路径校验器覆盖空值、长度、绝对语法与保留名称边界', () => {
+  const cases: Array<[unknown, string]> = [
+    ['', 'invalid_path'], [null, 'invalid_path'], ['a\0b', 'invalid_path'],
+    ['a'.repeat(32_001), 'path_too_long'],
+    ['\\\\server\\share', 'unc_path'], ['\\\\?\\C:\\file', 'device_path'],
+    ['/absolute/file', 'absolute_path'], ['a:b', 'alternate_data_stream'],
+    ['bad|name', 'invalid_path'], ['name. ', 'trailing_dot_or_space'],
+    ['SOURCE~1', 'short_name'], ['NUL.txt', 'reserved_name'], ['.git/file', 'git_metadata_denied'],
+    ['.echolens/file', 'private_metadata_denied'], ['..\\outside', 'path_outside_workspace'],
+  ];
+  for (const [value] of cases) {
+    assert.throws(() => validateRelativePath(value as string));
+  }
+  assert.throws(() => validateRelativePath('C:relative'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'drive_relative_path');
+  assert.doesNotThrow(() => validatePatchPath('C:\\workspace\\file.txt'));
+  assert.throws(() => validatePatchPath('\\\\server\\share\\file'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'unc_path');
 });
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
