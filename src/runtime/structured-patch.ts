@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   captureWorkspaceSnapshot,
   type WorkspaceRevision,
   type WorkspaceSnapshot,
 } from './workspace-snapshot.js';
-import { PathPolicy, PathPolicyError, validateRelativePath } from './path-policy.js';
+import { PathPolicy, PathPolicyError, validatePatchPath, validateRelativePath } from './path-policy.js';
 
 export type PatchOperation =
   | ReplacePatchOperation
@@ -75,7 +75,16 @@ export interface EditCheckpoint {
   workspaceRoot: string;
   workspaceRevision: WorkspaceRevision;
   createdAt: string;
-  files: Array<{ path: string; contentBase64?: string; existed: boolean; hash?: string; afterHash?: string }>;
+  files: Array<{
+    path: string;
+    contentBase64?: string;
+    existed: boolean;
+    hash?: string;
+    afterHash?: string;
+    /** 新检查点保存补丁后的内容，供任务级 diff 从证据重建；旧 checkpoint 可缺省。 */
+    afterContentBase64?: string;
+    afterExisted?: boolean;
+  }>;
 }
 
 export interface ApplyPatchResult {
@@ -133,6 +142,28 @@ export async function loadEditCheckpoint(workspaceRoot: string, id: string): Pro
   return value;
 }
 
+export async function listEditCheckpoints(workspaceRoot: string): Promise<Array<{ id: string; checkpoint: EditCheckpoint }>> {
+  const directory = path.join(workspaceRoot, '.echolens', 'checkpoints');
+  let names: string[];
+  try { names = await readdir(directory); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const items: Array<{ id: string; checkpoint: EditCheckpoint }> = [];
+  for (const name of names.filter((item) => /^[a-f0-9]{24}\.json$/u.test(item))) {
+    const id = name.slice(0, -5);
+    const checkpoint = await loadEditCheckpoint(workspaceRoot, id);
+    items.push({ id, checkpoint });
+  }
+  return items.sort((left, right) => left.checkpoint.createdAt.localeCompare(right.checkpoint.createdAt)
+    || left.id.localeCompare(right.id));
+}
+
+export async function listEditCheckpointIds(workspaceRoot: string): Promise<string[]> {
+  return (await listEditCheckpoints(workspaceRoot)).map((item) => item.id);
+}
+
 // 安全上限：约束单个补丁的操作数、文件数、改动字节与改动行，防止异常或恶意的
 // 超大补丁消耗过多内存、刷屏审批 UI，也便于审批者理解改动规模。
 const DEFAULT_LIMITS = {
@@ -156,8 +187,10 @@ export function normalizePatch(value: unknown, options: StructuredPatchOptions =
       throw new PatchError('patch_invalid', 'Patch 操作缺少 op 或 path');
     }
     // 统一为 POSIX 相对路径后再判重：`.`（即根目录）与重复路径都会让补丁产生歧义，直接拒绝。
-    validateRelativePath(candidate.path);
-    const normalizedPath = candidate.path.replaceAll('\\', '/').replace(/^\.\//u, '') || '.';
+    validatePatchPath(candidate.path);
+    const normalizedPath = (path.isAbsolute(candidate.path) || path.win32.isAbsolute(candidate.path))
+      ? path.resolve(candidate.path)
+      : candidate.path.replaceAll('\\', '/').replace(/^\.\//u, '') || '.';
     if (normalizedPath === '.' || paths.has(normalizedPath)) {
       throw new PatchError('patch_invalid', `Patch 路径重复或无效：${normalizedPath}`, normalizedPath);
     }
@@ -326,6 +359,9 @@ export async function applyPatch(
         const handle = await policy.openFileForWrite(operation.path);
         try { await handle.handle.writeFile(next!); await handle.handle.truncate(next!.byteLength); } finally { await handle.handle.close(); }
       }
+      const recorded = checkpoint.files.find((file) => file.path === item.path)!;
+      recorded.afterExisted = operation.op !== 'delete';
+      recorded.afterContentBase64 = next?.toString('base64');
     }
   } catch (error) {
     // 任一文件写入失败立即整体回滚；回滚本身失败才抛 patch_rollback_failed，交由调用方人工处理。
@@ -339,6 +375,100 @@ export async function applyPatch(
 }
 
 export async function rollbackCheckpoint(checkpoint: EditCheckpoint): Promise<{ restoredPaths: string[]; skippedPaths: string[] }> {
+  return rollbackCheckpointFiles(checkpoint);
+}
+
+/** 只恢复指定文件；空数组表示拒绝空范围，避免把“没有选择”误当成全量回滚。 */
+export function restoreFiles(
+  checkpoint: EditCheckpoint,
+  paths: readonly string[],
+): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
+export function restoreFiles(
+  workspaceRoot: string,
+  checkpointId: string,
+  paths: readonly string[],
+): Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
+export async function restoreFiles(
+  checkpointOrRoot: EditCheckpoint | string,
+  pathsOrId: readonly string[] | string,
+  maybePaths?: readonly string[],
+): Promise<{ restoredPaths: string[]; skippedPaths: string[] }> {
+  const checkpoint = typeof checkpointOrRoot === 'string'
+    ? await loadEditCheckpoint(checkpointOrRoot, pathsOrId as string)
+    : checkpointOrRoot;
+  const paths = typeof checkpointOrRoot === 'string' ? maybePaths ?? [] : pathsOrId as readonly string[];
+  if (paths.length === 0) throw new PatchError('patch_invalid', '至少指定一个需要恢复的文件');
+  const selected = new Set(paths.map((value) => {
+    validateRelativePath(value);
+    const normalized = value.replaceAll('\\', '/').replace(/^\.\//u, '');
+    if (!normalized || normalized === '.') throw new PatchError('patch_invalid', '恢复路径无效');
+    return normalized;
+  }));
+  const known = new Set(checkpoint.files.map((file) => file.path));
+  const unknown = [...selected].filter((file) => !known.has(file));
+  if (unknown.length > 0) throw new PatchError('patch_invalid', `检查点不包含文件：${unknown.join(', ')}`);
+  return rollbackCheckpointFiles(checkpoint, selected);
+}
+
+export interface RollbackToResult {
+  targetIndex: number;
+  checkpointIds: string[];
+  completedCheckpointIds: string[];
+  restoredPaths: string[];
+  skippedPaths: string[];
+}
+
+/**
+ * 将一组按时间升序排列的检查点回退到指定索引（0-based）。
+ * 只逆序处理 targetIndex 之后的检查点；任一检查点失败立即抛出并在错误中报告已处理范围。
+ */
+export function rollbackTo(
+  checkpoints: readonly EditCheckpoint[],
+  targetIndex: number,
+): Promise<RollbackToResult>;
+export function rollbackTo(
+  workspaceRoot: string,
+  checkpointIds: readonly string[],
+  targetIndex: number,
+): Promise<RollbackToResult>;
+export async function rollbackTo(
+  checkpointsOrRoot: readonly EditCheckpoint[] | string,
+  targetIndexOrIds: number | readonly string[],
+  maybeTargetIndex?: number,
+): Promise<RollbackToResult> {
+  const checkpoints = typeof checkpointsOrRoot === 'string'
+    ? await Promise.all((targetIndexOrIds as readonly string[]).map((id) => loadEditCheckpoint(checkpointsOrRoot, id)))
+    : checkpointsOrRoot;
+  const targetIndex = typeof checkpointsOrRoot === 'string' ? maybeTargetIndex! : targetIndexOrIds as number;
+  if (!Number.isSafeInteger(targetIndex) || targetIndex < 0 || targetIndex >= checkpoints.length) {
+    throw new PatchError('patch_invalid', `回退目标索引无效：${targetIndex}`);
+  }
+  const checkpointIds = checkpoints.map((checkpoint) => checkpointId(checkpoint));
+  const completedCheckpointIds: string[] = [];
+  const restoredPaths: string[] = [];
+  const skippedPaths: string[] = [];
+  for (let index = checkpoints.length - 1; index > targetIndex; index -= 1) {
+    const checkpoint = checkpoints[index]!;
+    try {
+      const result = await rollbackCheckpointFiles(checkpoint);
+      completedCheckpointIds.push(checkpointIds[index]!);
+      restoredPaths.push(...result.restoredPaths);
+      skippedPaths.push(...result.skippedPaths);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new PatchError(
+        'patch_rollback_failed',
+        `回退在 checkpoint=${checkpointIds[index]} 处停止；已处理：${completedCheckpointIds.join(', ') || '无'}；${detail}`,
+      );
+    }
+  }
+  return { targetIndex, checkpointIds, completedCheckpointIds, restoredPaths, skippedPaths };
+}
+
+async function rollbackCheckpointFiles(
+  checkpoint: EditCheckpoint,
+  selected?: ReadonlySet<string>,
+): Promise<{ restoredPaths: string[]; skippedPaths: string[] }> {
   const policy = await PathPolicy.create(checkpoint.workspaceRoot);
   const restoredPaths: string[] = [];
   const skippedPaths: string[] = [];
@@ -346,13 +476,14 @@ export async function rollbackCheckpoint(checkpoint: EditCheckpoint): Promise<{ 
     // 回滚只恢复到「本补丁应用前」的状态：仅当文件当前哈希等于应用后哈希时才改动它。
     // 若用户在应用后又改了该文件，说明现状不是本补丁造成的，跳过以免覆盖用户新改动。
     for (const file of checkpoint.files) {
+      if (selected && !selected.has(file.path)) continue;
       if (!file.existed) {
         const current = await policy.readFileBytes(file.path).catch((error) => {
           if (error instanceof PathPolicyError && error.code === 'path_not_found') return undefined;
           throw error;
         });
         if (!current) continue;
-        if (file.afterHash && hashBytes(current.bytes) !== file.afterHash) { skippedPaths.push(file.path); continue; }
+        if (!file.afterHash || hashBytes(current.bytes) !== file.afterHash) { skippedPaths.push(file.path); continue; }
         await policy.deleteFile(file.path);
         restoredPaths.push(file.path);
         continue;
@@ -362,8 +493,13 @@ export async function rollbackCheckpoint(checkpoint: EditCheckpoint): Promise<{ 
         if (error instanceof PathPolicyError && error.code === 'path_not_found') return undefined;
         throw error;
       });
-      if (current && file.afterHash && hashBytes(current.bytes) !== file.afterHash) { skippedPaths.push(file.path); continue; }
-      if (!current && file.afterHash && file.afterHash !== undefined) {
+      // 删除操作的应用后状态是“不存在”：同名文件重新出现时属于用户的新内容，不能写回旧快照。
+      // 旧格式缺少 afterHash/afterExisted 时也没有足够证据证明当前状态由 Agent 产生，保守跳过。
+      if (current && (file.afterExisted === false || !file.afterHash || hashBytes(current.bytes) !== file.afterHash)) {
+        skippedPaths.push(file.path);
+        continue;
+      }
+      if (!current && file.afterExisted !== false) {
         skippedPaths.push(file.path);
         continue;
       }
@@ -376,6 +512,10 @@ export async function rollbackCheckpoint(checkpoint: EditCheckpoint): Promise<{ 
   } catch (error) {
     throw new PatchError('patch_rollback_failed', `无法回滚文件：${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function checkpointId(checkpoint: EditCheckpoint): string {
+  return createHash('sha256').update(JSON.stringify(checkpoint)).digest('hex').slice(0, 24);
 }
 
 async function openOrCreate(policy: PathPolicy, relativePath: string): Promise<{ handle: import('node:fs/promises').FileHandle; canonicalPath: string }> {

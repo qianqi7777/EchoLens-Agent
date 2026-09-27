@@ -3,6 +3,8 @@ import { ToolRegistry } from './tool-registry.js';
 import { toolFailure, toolSuccess } from './tool-result.js';
 import { objectSchema } from './tool-schema.js';
 import { runVerification, selectVerificationPlan, type EditVerificationResult } from './verification.js';
+import { parseTestOutput } from './test-output/index.js';
+import { redactText } from '../providers/redaction.js';
 import { applyStructuredPatch } from './workspace-tools.js';
 import { previewPatch, type PatchPreview } from './structured-patch.js';
 import {
@@ -134,6 +136,18 @@ async function executeVerification(
         }, signal);
         return verificationResult(command, executed);
       } catch (error) {
+        if (error instanceof SandboxError
+          && (error.code === 'sandbox_unavailable' || error.code === 'sandbox_launch_failed')) {
+          return {
+            id: command.id,
+            label: command.label,
+            command: command.command,
+            status: 'skipped',
+            durationMs: 0,
+            summary: 'Sandbox 不可用，验证未运行',
+            reason: 'sandbox_unavailable',
+          };
+        }
         return {
           id: command.id,
           label: command.label,
@@ -316,6 +330,8 @@ function verificationResult(
   const status = result.status === 'passed' ? 'passed'
     : result.status === 'timeout' ? 'timeout'
       : result.status === 'cancelled' ? 'skipped' : 'failed';
+  const output = redactText([result.stdout, result.stderr].filter(Boolean).join('\n')).slice(-4000);
+  const failures = status === 'failed' ? parseTestOutput(output).failures : [];
   return {
     id: command.id,
     label: command.label,
@@ -326,7 +342,8 @@ function verificationResult(
     summary: status === 'passed' ? 'Sandbox 验证通过'
       : status === 'timeout' ? 'Sandbox 验证超时'
         : status === 'skipped' ? 'Sandbox 验证已取消' : `Sandbox 验证失败（退出码 ${result.exitCode ?? 'unknown'}）`,
-    output: [result.stdout, result.stderr].filter(Boolean).join('\n').slice(-4000),
+    output,
+    ...(failures.length ? { failures } : {}),
   };
 }
 

@@ -11,31 +11,61 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 支持流式文本、连接前分类重试、Usage 与 Request ID 追踪
 - 提供 Gateway 登录状态、模型能力目录和 OpenAPI 客户端契约
 - 提供独立 Gateway MVP：Device Flow、Token 刷新/撤销、固定上游代理、SSE、用量和限流
-- 执行 `list_files`、`read_file`、`grep` 只读工具
+- 通过本地功能索引和工作区索引为首轮请求提供文件、符号和搜索导航
+- `src/` 全量覆盖率由 c8 `--all --src src --exclude "agent-test/**" --exclude "server/**"` 统计，并设有实测基线门禁；CI 保存 LCOV 报告
+- 执行 `list_files`、`read_file`、`grep`、`workspace_search` 只读工具
 - 使用带跨进程锁的单写者 JSONL Event Store 持久化 Session、Turn、Run 与检查点
 - 支持并行只读工具、暂停、取消、恢复和 steering
+- 支持 `/pause` 在工具批次完成后的安全点暂停，重启后用 `/resume` 继续且不重复执行已完成工具
+- 支持在 TUI/行模式中查看和切换工作目录，并为目标目录重建隔离的 Session 与运行时资源
+- TUI 支持输入 `/` 打开命令候选菜单，按说明过滤并用方向键、Tab、Enter、Esc 操作
 - 分层加载 `AGENTS.md`，项目规则只能收紧权限，不能提升到 System
 - 支持 `full-context`、`evidence`、`metadata` 三种上下文隐私模式
 - 限制工具权限、调用次数、执行时间、输出长度和 Windows 工作区路径
 - 在工具执行前检查动作，并将工具输出作为不可信数据回填
 - 对模型声明提供独立 Verifier 基础类型
 - 通过结构化 Patch、审批、Checkpoint 和后状态哈希完成安全编辑与回滚
+- 支持 `/rollback <checkpoint-id> [文件路径...]` 的按文件恢复，以及 `/rollback --to <检查点索引>` 的多步逆序回退；用户后续修改会被保护并明确列为 skipped
+- 支持 `/rewind` 查看最近会话检查点，并用 `--code`、`--conversation` 或默认双回退分别恢复代码与会话状态；用户后续修改仍会被跳过并提示
+- 支持 `/context` 查看最近一次模型请求实际注入的来源、token 估算、预算比例和压缩状态
+- 上下文压缩保留用户约束、当前请求和带证据的工具结果；白名单内容超出预算时显式失败，不静默丢弃
+- 首轮导航可按相对 import 构建有界依赖/被依赖候选（默认最多 2 跳），并可选装配受限 Git 历史候选信息
+- 事件日志带连续 SHA-256 前置哈希，可检测中间事件篡改；提供并发恢复压测、路由对照基准与无头 JSON 入口
+- 方案竞争可复用持久 Worker 池并行生成候选，必须提供显式评分函数后才会选优
 - 提供 `shell_exec`、`run_tests`、`run_build`、`package_install` 四类独立工具
+- 提供 `git_status`、`git_diff`、`git_log` 三个受限 Git 只读工具，以及 `apply_unified_diff`（转换为结构化 Patch 后复用审批、哈希、检查点与回滚管线）
+- 当前固定工具注册表共 21 个（含 Git 只读工具、统一 Diff 和三类受限子 Agent 委派工具）；MCP 工具按用户配置动态增加，不计入固定数
 - 模型命令只接受 `executable + argv`，不经过宿主 Shell 字符串解析
+- 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
+- 自动验证可将 TAP、Jest、pytest、Go test 和 Cargo test 的失败输出解析为有界结构化摘要；未知格式仍保留脱敏后的原始输出
 - Docker Sandbox 默认禁网、只读容器根、清空 Capability、禁止提权并限制 CPU、内存和 PID
 - Sandbox 只挂载过滤后的临时工作区快照，排除 `.env*`、`.git`、`.echolens` 和 Git 忽略文件
 - Sandbox 写入以 Artifact Bundle 返回，并通过独立审批的结构化 Patch 回放到宿主工作区
 - `package_install` 使用内部 Docker 网络和域名 allowlist 代理，不向工作容器提供直连公网
 - 支持 MCP stdio、Streamable HTTP、Tools、Resources、Prompts、进度与取消
+- MCP Server 可配置每回合/每会话调用次数与输出字节配额；超限拒绝、写入 Session Event Store，并可用 `/mcp` 查看用量
 - 提供 `outline_file`、`find_symbols`、`go_to_definition`、`find_references`、`get_diagnostics`
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
 - 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
 - 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
-- 提供带跨进程锁的持久后台任务队列、租约恢复、显式取消/恢复和状态通知
+- 支持版本锁定的 Eval Suite（静态任务 + 固定 seed 动态变体），归档逐任务原始结果与汇总报告；复现命令 `npm run eval:fixed`
+- 提供带跨进程锁的持久后台任务队列、可配置 Worker 池并发、工作区互斥、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
+- 子 Agent profile 支持独立模型路由与 `$ECHOLENS_HOME/agent-memory/<profile>/` 记忆，读取/写入均有行数、大小和路径边界
+- 后台任务持久化 input/output/cached tokens、模型步数和工具调用；`/tasks` 展示单任务用量，`/usage` 按任务与会话汇总估算成本
+- 任务结束持久化 `change.set.completed` 变更包；`/diff [turn-id]` 从检查点字节重建多轮、多文件统一 diff，TUI 以聚合 Patch 视图展示并对超长 diff 做有界截断
 - Worktree 子 Agent 使用过滤后的当前工作区作为基线，可读取未提交改动且不会把原有改动误报为子 Agent 产物
 - TypeScript 启用未使用代码、数组越界、隐式返回、Switch 穿透和 Override 等额外静态检查
 - 生命周期 Hook 只观察克隆事件，仓库级 Hook 必须显式信任且不能成为执行旁路
+- 支持用户级与项目级可执行命令 Hook；项目 Hook 按配置和脚本内容指纹显式信任
+- 支持按 Agent Skills 开放规范发现、校验和渐进式加载 Skill catalog；`/skills` 列表与 `/skill <name>` 手动查看可用 Skill
+- Skill 支持基于 prompt 的一层受控自动激活、`requires` 组合和 `disable-model-invocation` 约束；递归引用与加载总量超限会拒绝
+- 支持 `read-only`、`auto`、`full` 三档权限配置（`AGENT_PERMISSION_PROFILE`），越界路径和网络/外部副作用审批边界不因档位放宽
+- 内置 `code-search`、`git-workflow`、`test-runner` 三个 Skill，并提供只检查客观文件/frontmatter/资源断言的 Skill Eval CLI（`npm run eval -- --skill <目录>`）
+- 支持受限插件目录分发：`/plugin list|export|import` 可打包 Skill、Hook、Subagent profile 与 MCP 配置；包内禁止秘密、`studydocs/`、`AGENTS.md` 和符号链接
+- 模型路由初选会按上下文估算和输出预留排除容量不足 Profile，并在路由事件和界面展示排除原因
+- 工作区外写入默认仍硬拒绝；用户可在 `.echolens/roots.json` 显式配置授权根，允许写入的根也会逐次审批并在界面标注绝对路径；`.git`、`.echolens`、符号链接和越界语法始终拒绝
+- 提供 `/audit verify` 定位当前 Session 审计哈希链断点，以及 `/audit export <path>` 导出带版本字段、可离线校验的审计记录
 
 ## 快速开始
 
@@ -64,18 +94,56 @@ npm run dev -- --resume latest
 ```
 
 - `/sessions`：列出最近 Session
+- `/session delete <session-id>`：确认后删除指定历史 Session 日志（当前 Session 不可删除）
+- `/pwd` 或 `/workspace`：显示当前工作目录和 Session
+- `/cd <path>` 或 `/workspace <path>`：切换工作目录；相对路径以当前目录为基准
+- 在 TUI 中输入 `/`：打开带说明的命令候选菜单；`↑/↓` 选择、`Tab` 补全、`Enter` 确认、`Esc` 关闭
 - `/resume`：恢复当前 Session 的未完成 Turn
-- `/steer 新要求`：持久化新要求并从当前检查点继续
+- `/tasks`：查看后台 Worker 并发、运行中与排队数量及任务状态
+- `/task concurrency <1-32>`：运行时调整后台 Worker 池并发；默认按 CPU 线程数的一半计算，也可通过 `AGENT_WORKER_CONCURRENCY` 配置
+- `/steer 新要求`：运行中排队补充要求；暂停后写入并从当前检查点继续
+- `/plan [on|off|plan|execute|verify|status]`：查看或切换执行阶段；规划阶段只提供只读工具
+- `/goal <目标>`：设置长时目标；`/goal status|note <证据>|done|drop` 管理证据与状态
 - `/tasks`：列出最近后台任务
+- `/usage [session-id]`：汇总后台任务 token、模型步数、工具调用和估算成本；缺少模型单价时显示 `unknown`
 - `/task <explore|test|review> [sandbox|worktree] <目标>`：创建并启动受限后台任务
 - `/task cancel <id>`：取消后台任务
 - `/task resume <id>`：显式恢复待处理、失败或已取消任务
 - `Ctrl+C`：只取消当前 Turn，不删除 Session
 - `/exit`：退出 CLI
+- `/audit verify`：校验当前 Session 的审计链并报告断链事件；`/audit export <path>`：导出审计记录供离线校验
 
-TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚和 steering 命令。
+TUI 还支持 `/help`、`/clear`，以及上述 Session、验证、回滚、rewind 和 steering 命令。
+TUI 可用 `Shift+Tab` 循环 `plan → execute → auto`；终端无法区分 Shift+Tab 时使用 `Ctrl+P`。
+
+规划阶段结束后，TUI 或行模式会要求批准、修改或拒绝计划，也可批准并转为目标。批准计划只注入
+紧随其后的首个执行 Turn；活动目标则在后续执行中持续注入，但不会授予权限、跳过审批或扩大工具范围。
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
+
+## 首轮工具导航
+
+代码、配置、测试和仓库维护类请求会先在本地匹配功能目录与工作区索引，再把有限的候选文件、
+符号和只读动作提示交给模型。高置信度和低置信度搜索场景要求模型首轮返回只读工具调用；取得
+首个工具结果后恢复正常工具集合和最终结构化输出。该过程不增加额外模型调用，也不会让索引授予
+文件权限；真实读取仍经过 `PathPolicy` 和 `ToolExecutor`。
+
+`workspace_search` 统一搜索功能、文件、符号、配置、测试和字面量文本。索引只保存在本地内存，
+排除 `.env*`、私有规则、凭据命名文件、Git 元数据、依赖和构建目录。设置
+`AGENT_NAVIGATION_MODE=off` 可关闭导航并恢复模型自行探索的兼容行为。
+
+## 模型智能路由
+
+默认 `AGENT_ROUTING_MODE=off`，行为与单模型版本一致。将其设置为 `auto`、`fast`、
+`balanced`、`quality`、`privacy` 或 `pinned:<profileId>` 后，CLI 会从主模型和本地
+`AGENT_MODEL_PROFILES` 模型池中选择候选。模型池使用 JSON 数组，字段示例见 `.env.example`；
+凭据只允许经 `credentialRef` 引用环境变量或 Gateway Token Store。
+
+路由在 Turn 开始时锁定模型。网络、超时、限流和上游错误在模型未输出文本前默认可切换一次
+符合能力与同等隐私边界的备用模型（可用 `AGENT_ROUTING_MAX_FALLBACKS` 调整上限）；认证、内容策略、协议错误、用户取消，以及工具已执行后
+均不会自动切换或重放。`AGENT_ROUTING_ALLOW_TIER_DOWNGRADE=true` 时，故障 fallback 可使用
+低一档模型；主选仍只会选择满足任务等级的模型。终端会显示模型选择与 fallback 原因，Session
+事件保存模型选择元数据。
 
 ## Evals 与编排
 
@@ -118,6 +186,19 @@ Server 全部禁用且不包含真实地址。敏感 Header 和环境变量只�
 tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、引用和诊断结果只保留工作区内
 的相对路径；LSP 不可用时定义、引用和语法诊断自动降级到 tree-sitter。
 
+## 生命周期 Hook
+
+用户 Hook 读取 `$ECHOLENS_HOME/hooks.json`（默认 `~/.echolens/hooks.json`），项目 Hook
+读取 `.echolens/hooks.json`。配置采用版本化 JSON，示例见 `examples/hooks.example.json`。
+支持 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop` 和
+`SessionEnd`；命令从 stdin 读取事件 JSON，并可用 stdout JSON 拒绝 Prompt/工具或为 Prompt
+补充上下文。
+
+项目 Hook 在宿主机以当前用户权限执行，因此默认不受信。使用 `/hooks` 查看状态，确认命令和
+指纹后运行 `/hooks trust <id|all>`；配置或 `trustFiles` 内容变化会自动撤销信任。
+`/hooks revoke <id|all>` 撤销信任，`/hooks reload` 显式重载配置。Hook 只能拒绝动作，不能
+自动批准或绕过原有 Schema、权限、guardrail 和审批链。敏感环境变量只能用 `envFrom` 引用。
+
 ## 文档
 
 - [公开文档中心](doc/README.md)
@@ -128,6 +209,7 @@ tree-sitter 工具无需后台进程。TypeScript LSP 按需启动，定义、�
 
 ```bash
 npm run check:ci
+npm run test:coverage
 npm run gateway:build
 npm run eval:smoke
 npm run audit
@@ -137,6 +219,9 @@ npm run audit
 
 测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
 由 `package.json` 和 `.github/workflows/ci.yml` 定义。
+Security 当前为 35 个已登记测试用例；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
+`npm run eval:fixed` 运行 6 项固定版本地静态 Candidate 套件，并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；该套件验证本地 Grader/结构化 Patch/安全事件判据，不代表真实模型完成率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
+CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage 分为独立 job；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
 
 ## 目录
 
@@ -146,6 +231,7 @@ src/
   core/                  模型中立的消息、权限与 System Policy
   context/               项目指令来源和权限收紧契约
   code-intelligence/     tree-sitter 索引、TypeScript LSP 和代码工具
+  navigation/            本地工作区索引、功能目录与首轮导航解析
   orchestration/         后台队列、独立工作区、受限子 Agent 和只读 Hook
   credentials/           凭据引用与异步解析接口
   mcp/                   MCP 配置、Client 生命周期与工具桥接
@@ -160,6 +246,9 @@ src/
     tool-executor.ts     权限、预算、超时和输出限制
     tool-registry.ts     工具注册表
     file-lock.ts         Session 与后台队列共用的跨进程文件锁
+    workspace-manager.ts 工作目录命令、路径校验和运行时原子切换
+    commands/command-catalog.ts
+                         内置命令目录、别名、说明、参数提示和候选过滤
     workspace-tools.ts   安全的只读代码工具
     sandbox-tools.ts     Sandbox Shell、测试、构建与安装工具
     verifier.ts          声明验证基础
@@ -178,9 +267,26 @@ contracts/
 ## 当前边界
 
 v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
+自动验证默认开启（`AGENT_VERIFY_GATE=auto`）：本回合写入返回变更文件后，受控验证命令经 Sandbox 执行；缺少验证计划或 Sandbox 不可用时记录 skipped，不代表通过。`strict` 在 Sandbox 不可用时暂停；连续两次验证失败后均会暂停。此闭环依赖 Docker Sandbox 可用，自动验证也消耗单回合最多 24 次工具预算。
+失败解析目前依据 TAP、Jest、pytest、Go test 与 Cargo test 的文本形态；非标准/custom reporter 可能无法结构化，此时仍回传原有脱敏截断输出，不代表覆盖所有测试运行器。
+后台子 Agent 使用异步 I/O Worker 池；并发默认 `max(1, floor(os.cpus().length / 2))`，允许 1–32 并可由 `AGENT_WORKER_CONCURRENCY` 或 `/task concurrency` 覆盖。同一显式 workspace key 在队列认领时互斥，缺省任务由 allocator 分配独立 Sandbox/Worktree。Docker 主机建议从并发 2–4 起步并按内存/CPU 配额调节；该建议不是压力测试结论。
+后台任务用量按子 Agent 实际收到的 usage 事件累计；成本只复用已配置模型 Profile 的公开单价，任一单价缺失会记录并展示 `unknown`，不会把未知成本当作 0。CLI 入队时自动写入当前 Session ID；未提供该 metadata 的历史或外部入队任务归入 `unknown`。
+任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
+按索引回退使用当前工作区检查点目录中按 `createdAt` 排序的检查点，索引从 0 开始；中途失败会停止并报告已处理范围，不提供跨工作区或强制覆盖用户后续修改的回退。
+手动暂停只在工具批次完成后、下一次模型调用前生效；模型请求或工具执行中不会被硬中断。命令行非交互执行不能在已阻塞的同步输入期间注入 `/pause`，TUI 支持运行中输入该命令。
+最近一次完整且全绿的覆盖率实测为全量 `src/` Statements/Lines 89.03%、Functions 94.15%、Branches 81.47%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）为 Statements/Lines 94.91%（14382/15153），距离 95% 仍差 14 条。之后新增测试尚未完成一次全绿覆盖率重跑（Windows 并发锁用例曾两次以 EPERM 中断），不能把未验证结果写成达标。覆盖率门禁按行 84%、函数 88%、分支 76% 设置；复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
-回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；MCP OAuth、Skills 和
-可执行生命周期 Hook 尚未实现。远程 Gateway 只代理模型请求，没有本地工具执行权。
+回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，
+仍必须由后续运行时通过 ToolExecutor/Sandbox 接入。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现；`/rewind` 的检查点索引按当前 Session 事件顺序，仅覆盖已持久化的 Agent 检查点。Patch 回滚对删除后被用户重建的同名文件会保守跳过；旧检查点缺少应用后状态证据时不执行覆盖性恢复。
+固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。断点恢复基准可用 `npm run eval:resume-soak -- --rounds 3` 复现，结果包含分母、成功数、逐轮故障明细；工具执行中途故障通过真实子进程终止注入，其余故障使用本地 Provider 注入，不代表真实模型服务或宿主进程 kill 的成功率。
+`/context` 报告只反映最近一次已构建的模型上下文；尚未运行 Turn 时没有报告，token 仍是现有字节近似值，不等同于任一具体模型 tokenizer 的精确计数。
+插件当前采用工作区内受限目录包而非压缩归档；导出只收集公开组件，导入不会自动启用其中的 Hook 或 MCP Server，仍需通过现有配置与信任流程加载。MCP 配额会话计数持久化在 `.echolens/mcp-quota-<session-id>.json`（无 Session ID 的独立管理器使用 `.echolens/mcp-quota.json`），配额未配置时保持原有行为。
+Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
+事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝。
+审计导出只接受完整链，导出包可由 `verifyAuditExport` 离线校验；本地审计文件可被整体替换，因此哈希链不提供不可抵赖性。工作区外授权根默认为空，只能由用户控制的 `.echolens/roots.json` 配置，且每次写入都必须单独审批，不支持永久放行整个根。
+并发压测与路由基准使用本地 Provider，压测脚本允许显式设置最多 50 个并发任务；长期运行时报告保留全部尝试的分母与观测计数，仅保留失败详情，避免把成功样本无限累积到内存。结果仍只代表实际运行参数，不等同于真实模型服务的长期可用性或质量保证；未实际运行 24 小时就不能写成 24 小时稳定性结论。
+可复现命令：`npm run eval:concurrency-soak -- --seconds 10 --concurrency 4`、`npm run eval:routing-benchmark`；无头执行使用 `npx tsx src/cli.ts --json --prompt "..."`，无模型配置时 fail-closed。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`
 完成 Device Flow。Gateway 使用 SQLite 持久化哈希令牌和月度用量；单机部署样例位于

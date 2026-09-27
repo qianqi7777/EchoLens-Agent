@@ -1,4 +1,5 @@
 import type { ConversationItem, MessageItem, ToolCallItem } from '../core/messages.js';
+import type { Permission } from '../core/permissions.js';
 import type { JsonSchema } from '../runtime/types.js';
 
 /**
@@ -13,6 +14,8 @@ export interface ProviderCapabilities {
   supportsStructuredOutput: boolean;
   supportsPromptCaching: boolean;
   supportsUsageReporting: boolean;
+  /** 缺省按支持处理，显式 false 时 Runtime 不发送 tool_choice。 */
+  supportsToolChoice?: boolean;
 }
 
 /**
@@ -41,9 +44,12 @@ export interface ModelToolDefinition {
   parameters: JsonSchema;
 }
 
+export type ToolChoice = 'auto' | 'required' | { type: 'function'; name: string };
+
 export interface ProviderRequest {
   items: ConversationItem[];
   tools?: ModelToolDefinition[];
+  toolChoice?: ToolChoice;
   responseFormat?: {
     name: string;
     description?: string;
@@ -90,4 +96,84 @@ export interface ModelProvider {
   readonly capabilities: ProviderCapabilities;
   complete(request: ProviderRequest): Promise<ProviderResult>;
   stream?(request: ProviderRequest): AsyncIterable<ProviderStreamEvent>;
+}
+
+/**
+ * 可选的 run 生命周期。普通 Provider 不需要实现；路由 Provider 用它在 Turn 开始时
+ * 固定一个模型，避免同一条 model -> tools -> model 链路在无边界处切换模型。
+ */
+export interface ModelProviderRunLifecycle {
+  beginRun(userMessage: string): Promise<void> | void;
+  beginResume(snapshot?: ModelRoutingSnapshot): Promise<void> | void;
+  snapshot(): ModelRoutingSnapshot;
+  restore(snapshot: ModelRoutingSnapshot): void;
+  fork(): ModelProvider & ModelProviderRunLifecycle;
+  markToolsStarted(): void;
+  configure(mode?: string, phase?: string): string[];
+  status(): string[];
+  readonly privacy: 'metadata' | 'evidence' | 'full-context';
+  currentPhase(): 'plan' | 'execute' | 'verify';
+  allowedPermissions(): ReadonlySet<Permission> | undefined;
+  takeRouteEvents(): ModelRouteEvent[];
+}
+
+export interface ModelRoutingSnapshot {
+  version: 1;
+  mode: string;
+  phase: 'plan' | 'execute' | 'verify';
+  automaticPhase?: 'plan' | 'execute' | 'verify';
+  phaseOverride?: 'plan' | 'execute' | 'verify';
+  profileId: string;
+  tier: number;
+  /** 仅用于恢复路径校验备用模型的工具能力；旧 checkpoint 缺省时按 true 处理。 */
+  requiresTools?: boolean;
+  locked: boolean;
+  fallbacks: number;
+  runCostUsd: number;
+  sessionCostUsd: number;
+  costUnknown: boolean;
+}
+
+export type ModelRouteEvent =
+  | {
+      type: 'selected';
+      model: string;
+      mode: string;
+      tier: number;
+      reason: string;
+      candidates: string[];
+      actualModel?: string;
+      phase?: string;
+      phaseOverride?: 'plan' | 'execute' | 'verify';
+      suggestedModel?: string;
+      excluded?: Array<{ id: string; reason: string }>;
+    }
+  | {
+      type: 'fallback';
+      fromModel: string;
+      toModel: string;
+      reason: string;
+    }
+  | {
+      type: 'fallback_rejected';
+      model: string;
+      reason: string;
+    };
+
+export function isModelProviderRunLifecycle(
+  provider: ModelProvider,
+): provider is ModelProvider & ModelProviderRunLifecycle {
+  const candidate = provider as Partial<ModelProviderRunLifecycle>;
+  return typeof candidate.beginRun === 'function'
+    && typeof candidate.beginResume === 'function'
+    && typeof candidate.snapshot === 'function'
+    && typeof candidate.restore === 'function'
+    && typeof candidate.fork === 'function'
+    && typeof candidate.markToolsStarted === 'function'
+    && typeof candidate.configure === 'function'
+    && typeof candidate.status === 'function'
+    && typeof candidate.allowedPermissions === 'function'
+    && typeof candidate.takeRouteEvents === 'function'
+    && typeof candidate.currentPhase === 'function'
+    && (candidate.privacy === 'metadata' || candidate.privacy === 'evidence' || candidate.privacy === 'full-context');
 }

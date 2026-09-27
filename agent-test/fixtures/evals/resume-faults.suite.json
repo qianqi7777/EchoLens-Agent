@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "resume-faults",
+  "cases": [
+    { "id": "tool-execution-process-kill", "injection": "工具执行中途终止子进程" },
+    { "id": "model-timeout", "injection": "模型首次请求超时" },
+    { "id": "tool-failure", "injection": "工具返回结构化失败后退出" },
+    { "id": "approval-wait", "injection": "审批等待期间释放并暂停" }
+  ]
+}

@@ -235,3 +235,51 @@ test('remote HTTP fails closed while implemented privacy routes connect explicit
   assert.equal(projected.inspect().state, 'configured');
   assert.deepEqual(resolver.calls.map((call) => call.reference), ['vault:direct']);
 });
+
+test('模型路由状态接口保留凭据缺失与不支持引用的差别', async () => {
+  const env = {
+    AGENT_MODEL_ROUTE: 'direct', AGENT_DIRECT_BASE_URL: 'https://provider.example/v1',
+    AGENT_DIRECT_MODEL: 'model', AGENT_DIRECT_PROTOCOL: 'chat_completions',
+    AGENT_DIRECT_CREDENTIAL_REF: 'vault:missing', AGENT_DIRECT_PRIVACY: 'full-context',
+  };
+  const missing = ModelRouter.fromEnv(env, { credentialResolver: new RecordingCredentialResolver({}) });
+  assert.equal((await missing.status()).state, 'credential_missing');
+  assert.equal(await missing.build(), null);
+  const unsupported = ModelRouter.fromEnv(env, {
+    credentialResolver: { resolve: async () => ({ status: 'unsupported_reference' }) },
+  });
+  assert.equal((await unsupported.connect()).status.reasonCode, 'credential_reference_unsupported');
+  const failed = ModelRouter.fromEnv(env, {
+    credentialResolver: { resolve: async () => { throw new Error('resolver failed'); } },
+  });
+  await assert.rejects(failed.connect(), /resolver failed/u);
+});
+
+test('Gateway 不提供所选模型时拒绝构建 Provider', async () => {
+  const mock = await startGatewayOpenApiMock();
+  try {
+    const router = ModelRouter.fromEnv({
+      AGENT_MODEL_ROUTE: 'gateway', AGENT_GATEWAY_URL: mock.baseUrl,
+      AGENT_GATEWAY_MODEL: 'not-in-catalog', AGENT_GATEWAY_CREDENTIAL_REF: 'env:GATEWAY_TOKEN',
+      AGENT_GATEWAY_PRIVACY: 'full-context', AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
+      GATEWAY_TOKEN: 'test-token',
+    });
+    const connection = await router.connect();
+    assert.equal(connection.provider, null);
+    assert.equal(connection.status.state, 'model_not_allowed');
+    assert.equal(mock.requests.some((request) => request.path === '/v1/models'), true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test('模型路由配置拒绝未知路由、畸形 Gateway 和带凭据的 URL', () => {
+  assert.equal(ModelRouter.fromEnv({ AGENT_MODEL_ROUTE: 'surprise' }).inspect().reasonCode, 'invalid_route');
+  const base = {
+    AGENT_MODEL_ROUTE: 'gateway', AGENT_GATEWAY_MODEL: 'model',
+    AGENT_GATEWAY_CREDENTIAL_REF: 'env:TOKEN', AGENT_GATEWAY_PRIVACY: 'full-context',
+    AGENT_GATEWAY_PRIVACY_CONFIRMED: 'true',
+  };
+  assert.equal(ModelRouter.fromEnv({ ...base, AGENT_GATEWAY_URL: 'invalid-url' }).inspect().reasonCode, 'gateway_config_invalid');
+  assert.equal(ModelRouter.fromEnv({ ...base, AGENT_GATEWAY_URL: 'https://user:secret@gateway.example' }).inspect().reasonCode, 'gateway_config_invalid');
+});

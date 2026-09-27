@@ -84,3 +84,44 @@ test('Artifact 变化超过上限时失败关闭且不留下部分 Bundle', asyn
   }), (error: unknown) => error instanceof SandboxError && error.code === 'sandbox_artifact_failed');
   await assert.rejects(loadSandboxArtifactBundle(root, id));
 });
+
+test('Artifact 将二进制变化与未变更请求文件分开保存并验证 Bundle 身份', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-artifacts-requested-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'report.txt'), 'unchanged report\n');
+  await writeFile(join(root, 'image.png'), Buffer.from([0xff, 0xfe]));
+  const id = 'echolens-00000000-0000-4000-8000-000000000004';
+  const staged = await new FileSystemWorkspaceStager().prepare(root, id);
+  context.after(() => staged.cleanup());
+  await writeFile(join(staged.root, 'image.png'), Buffer.from([0xff, 0xfd, 0xfc]));
+
+  const bundle = await collectSandboxArtifacts({
+    workspaceRoot: root, staged, id, requestedPaths: ['./report.txt', 'report.txt'],
+  });
+  assert.deepEqual(bundle.artifacts.map((item) => [item.path, item.kind]), [
+    ['image.png', 'workspace-change'], ['report.txt', 'requested'],
+  ]);
+  assert.equal(bundle.artifacts[0]?.mediaType, 'image/png');
+  assert.equal(bundle.patch, undefined);
+  assert.equal(bundle.warnings.some((warning) => warning.includes('二进制变化')), true);
+  assert.equal((await loadSandboxArtifactBundle(root, bundle.id)).id, bundle.id);
+
+  await writeFile(join(root, '.echolens', 'artifacts', bundle.id, 'manifest.json'), JSON.stringify({ ...bundle, workspaceRoot: 'wrong-root' }));
+  await assert.rejects(loadSandboxArtifactBundle(root, bundle.id), (error: unknown) => error instanceof SandboxError && error.code === 'sandbox_artifact_failed');
+});
+
+test('Artifact 请求路径数量与总字节上限失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-artifacts-request-limits-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'report.txt'), 'report');
+  const id = 'echolens-00000000-0000-4000-8000-000000000005';
+  const staged = await new FileSystemWorkspaceStager().prepare(root, id);
+  context.after(() => staged.cleanup());
+  await assert.rejects(collectSandboxArtifacts({
+    workspaceRoot: root, staged, id, requestedPaths: Array.from({ length: 33 }, () => 'report.txt'),
+  }), (error: unknown) => error instanceof SandboxError && error.code === 'sandbox_invalid_request');
+  await assert.rejects(collectSandboxArtifacts({
+    workspaceRoot: root, staged, id, requestedPaths: ['report.txt'], maxArtifactBytes: 3,
+  }), (error: unknown) => error instanceof SandboxError && error.code === 'sandbox_artifact_failed');
+  await assert.rejects(loadSandboxArtifactBundle(root, id));
+});

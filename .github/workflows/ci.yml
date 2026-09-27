@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,9 +28,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Typecheck and test
-        run: npm run check:ci
+        run: npm run check
 
-  dependency-audit:
+  performance:
+    name: Performance suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run performance tests
+        run: npm run test:performance
+
+  audit:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
@@ -44,3 +61,60 @@ jobs:
         run: npm ci
       - name: Audit high-severity vulnerabilities
         run: npm run audit
+
+  coverage:
+    name: Source coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run coverage gate
+        run: npm run test:coverage
+      - name: Upload LCOV report
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: error
+
+  docker-verify:
+    name: Docker Sandbox verification (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      AGENT_SANDBOX_IMAGE: node:22-bookworm-slim
+      AGENT_SANDBOX_PROXY_IMAGE: node:22-bookworm-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Prepare sandbox image
+        run: |
+          set -o pipefail
+          docker pull node:22-bookworm-slim 2>&1 | tee docker-image-pull.log
+      - name: Run Docker Sandbox verification
+        run: |
+          set -o pipefail
+          npm run verify:docker 2>&1 | tee docker-verify.log
+      - name: Upload Docker verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-sandbox-verification-logs
+          path: |
+            docker-image-pull.log
+            docker-verify.log
+          if-no-files-found: warn

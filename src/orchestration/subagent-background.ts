@@ -14,6 +14,7 @@ export class SubagentBackgroundService {
     orchestrator: SubagentOrchestrator,
     onStateChange?: (task: BackgroundTaskRecord) => void | Promise<void>,
     onError?: (error: unknown) => void | Promise<void>,
+    decorateObjective?: (objective: string) => string,
   ) {
     // 把子 Agent 终态映射为后台任务态：paused→waiting_approval（等待显式恢复重跑）、cancelled→可重试失败、
     // completed→完成；其余异常统一记为 failed 并带 subagent_ 前缀错误码。
@@ -21,7 +22,7 @@ export class SubagentBackgroundService {
       execute: async (task, signal) => {
         const result = await orchestrator.run({
           profile: task.payload.profile,
-          objective: task.payload.objective,
+          objective: decorateObjective?.(task.payload.objective) ?? task.payload.objective,
           workspaceMode: task.isolation,
         }, signal);
         if (result.state === 'paused') return { state: 'waiting_approval', reason: '子 Agent 等待审批', result: taskResult(result) };
@@ -33,14 +34,28 @@ export class SubagentBackgroundService {
   }
 
   // 入队或恢复后必须唤醒 Worker 轮询，否则任务会停留在 pending 无人认领。
-  async enqueue(profile: string, objective: string, isolation: BackgroundTaskIsolation = 'sandbox'): Promise<BackgroundTaskRecord> {
-    const task = await this.queue.enqueue({ isolation, payload: { profile, objective } });
+  async enqueue(
+    profile: string,
+    objective: string,
+    isolation: BackgroundTaskIsolation = 'sandbox',
+    metadata?: Record<string, string | number | boolean | null>,
+  ): Promise<BackgroundTaskRecord> {
+    const task = await this.queue.enqueue({ isolation, payload: { profile, objective, metadata } });
     await this.worker.start();
     return task;
   }
 
   list(): Promise<BackgroundTaskRecord[]> {
     return this.queue.list();
+  }
+
+  async workerStatus(): Promise<{ concurrency: number; running: number; pending: number }> {
+    const tasks = await this.queue.list();
+    return { ...this.worker.workerStatus, pending: tasks.filter((task) => task.state === 'pending').length };
+  }
+
+  setConcurrency(value: number): void {
+    this.worker.setConcurrency(value);
   }
 
   cancel(taskId: string): Promise<BackgroundTaskRecord> {
@@ -64,6 +79,8 @@ function taskResult(result: SubagentResult) {
   return {
     summary: result.summary,
     evidenceIds: result.evidenceIds,
+    usage: result.usage,
+    estimatedCost: result.estimatedCost,
     data: { subagent: result },
   };
 }

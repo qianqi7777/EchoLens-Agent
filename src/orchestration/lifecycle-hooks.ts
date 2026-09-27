@@ -1,4 +1,13 @@
 import type { AgentEvent } from '../session/events.js';
+import {
+  CommandHookManager,
+  type CommandHookManagerOptions,
+  type HookInput,
+  type HookRunResult,
+  type HookStatus,
+} from './command-hooks.js';
+
+export * from './command-hooks.js';
 
 export type LifecycleHookStage = 'session' | 'turn' | 'tool' | 'approval' | 'verify';
 export type LifecycleHookTrust = 'builtin' | 'user' | 'repository';
@@ -26,6 +35,7 @@ export class LifecycleHookRunner {
   private readonly hooks = new Map<string, LifecycleHook>();
   private readonly trustedRepositoryHooks: ReadonlySet<string>;
   private readonly timeoutMs: number;
+  private commandHooks?: CommandHookManager;
 
   constructor(options: LifecycleHookRunnerOptions = {}) {
     this.trustedRepositoryHooks = options.trustedRepositoryHooks ?? new Set();
@@ -33,6 +43,15 @@ export class LifecycleHookRunner {
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 10 || this.timeoutMs > 60_000) {
       throw new Error('Hook timeoutMs 无效');
     }
+  }
+
+  static async load(
+    workspaceRoot: string,
+    options: LifecycleHookRunnerOptions & CommandHookManagerOptions = {},
+  ): Promise<LifecycleHookRunner> {
+    const runner = new LifecycleHookRunner(options);
+    runner.commandHooks = await CommandHookManager.load(workspaceRoot, options);
+    return runner;
   }
 
   register(hook: LifecycleHook): void {
@@ -78,6 +97,33 @@ export class LifecycleHookRunner {
       }
     }
     return results;
+  }
+
+  run(input: HookInput, signal?: AbortSignal): Promise<HookRunResult> {
+    return this.commandHooks?.run(input, signal)
+      ?? Promise.resolve({ decision: 'continue', contexts: [], results: [] });
+  }
+
+  hookStatus(): HookStatus[] {
+    return this.commandHooks?.list() ?? [];
+  }
+
+  hookSummary(): string[] {
+    return this.commandHooks?.summary() ?? ['Hook 已加载 0 个，启用 0 个，待信任 0 个'];
+  }
+
+  reloadCommandHooks(): Promise<string[]> {
+    return this.commandHooks?.reload() ?? Promise.resolve(this.hookSummary());
+  }
+
+  trustProjectHooks(selector: string): Promise<string[]> {
+    if (!this.commandHooks) return Promise.reject(new Error('Hook Runner 未绑定工作区'));
+    return this.commandHooks.trustProject(selector);
+  }
+
+  revokeProjectHooks(selector: string): Promise<string[]> {
+    if (!this.commandHooks) return Promise.reject(new Error('Hook Runner 未绑定工作区'));
+    return this.commandHooks.revokeProject(selector);
   }
 }
 

@@ -1,0 +1,280 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  completeCommand,
+  filterCommandCandidates,
+  formatCommandHelp,
+  getCommandCatalog,
+  parseCommandInput,
+  commandMenuWindow,
+} from '../../../../src/commands/command-catalog.js';
+import { completeArguments } from '../../../../src/commands/argument-completion.js';
+import { executeSessionCommand } from '../../../../src/commands/session-command.js';
+import { executeServiceCommand } from '../../../../src/commands/service-command.js';
+import type { EditCheckpoint } from '../../../../src/runtime/structured-patch.js';
+import type { AgentCheckpoint } from '../../../../src/session/events.js';
+import type { ContextBuildResult } from '../../../../src/context/context-manager.js';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
+
+const context = { workspaceAvailable: true, backgroundTasksAvailable: true };
+
+test('命令目录按名称和别名过滤，并保留稳定顺序', () => {
+  assert.deepEqual(
+    filterCommandCandidates('/', context).map((command) => command.name),
+    ['/hooks', '/model', '/plan', '/goal', '/pwd', '/cd', '/resume', '/pause', '/sessions', '/tasks', '/usage', '/task', '/verify', '/rollback', '/rewind', '/diff', '/context', '/steer', '/clear', '/help', '/exit'],
+  );
+  assert.equal(filterCommandCandidates('/wo', context)[0]?.name, '/cd');
+  assert.equal(filterCommandCandidates('/wo', context)[0]?.aliases?.[0], '/workspace');
+});
+
+test('参数命令补全保留用户输入的别名并追加空格', () => {
+  const command = filterCommandCandidates('/wo', context)[0]!;
+  assert.equal(completeCommand('/wo', command), '/workspace ');
+  assert.equal(completeCommand('/cd', command), '/cd ');
+});
+
+test('命令帮助与目录共享描述和用法', () => {
+  const help = formatCommandHelp(context);
+  assert.ok(help.some((line) => line.startsWith('/cd <path>：查看或切换工作目录')));
+  assert.ok(help.some((line) => line.startsWith('/exit：退出当前 Agent 进程')));
+});
+
+test('主名称优先，别名、界面和依赖能力独立处理', () => {
+  for (const name of ['/cd', '/exit']) {
+    const command = getCommandCatalog(context).find((item) => item.name === name)!;
+    assert.equal(completeCommand('/', command), name + (command.acceptsArguments ? ' ' : ''));
+  }
+  const names = getCommandCatalog({ ...context, workspaceAvailable: false, interface: 'line' }).map((item) => item.name);
+  assert.ok(names.includes('/verify') && names.includes('/rollback'));
+  assert.ok(!names.includes('/clear') && !names.includes('/cd'));
+  assert.deepEqual(getCommandCatalog({ ...context, busy: true }).map((item) => item.name), ['/plan', '/goal', '/pause', '/context', '/steer']);
+  assert.ok(getCommandCatalog({ ...context, sessionDeletionAvailable: true }).some((item) => item.name === '/session'));
+});
+
+test('命令解析统一大小写和空白，拒绝错误命令及多余参数', () => {
+  assert.equal(parseCommandInput('/WORKSPACE\t"My Project"', context).input, '/cd "My Project"');
+  assert.equal(parseCommandInput('/workspace', context).input, '/pwd');
+  assert.equal(parseCommandInput('/quit', context).input, '/exit');
+  for (const input of ['/rollbackoops id', '/exit now', '/sessions extra', '/missing']) {
+    assert.ok(parseCommandInput(input, context).error, input);
+  }
+  assert.ok(parseCommandInput('/clear', { ...context, interface: 'line' }).error);
+});
+
+test('任何候选索引均处于可视窗口内', () => {
+  for (const capacity of [1, 6, 8]) for (let selected = 0; selected < 13; selected++) {
+    const window = commandMenuWindow(13, selected, capacity);
+    assert.ok(window.start <= selected && window.end > selected);
+    assert.ok(window.end - window.start <= capacity);
+  }
+});
+
+test('参数补全支持目录、任务、会话和检查点，仅读本地元数据', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-completion-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, '中文 space'));
+  await mkdir(join(root, '.echolens', 'checkpoints'), { recursive: true });
+  await writeFile(join(root, '.echolens', 'checkpoints', 'checkpoint-1.json'), '{}');
+  await writeFile(join(root, 'not-directory'), '');
+  const ctx = { workspaceRoot: root, currentSessionId: 'active',
+    listSessions: async () => [{ sessionId: 'active' }, { sessionId: 'older' }],
+    listTasks: async () => [{ id: 'task-1', state: 'paused' }],
+    listCheckpoints: async () => ['cp0', 'cp1'],
+  };
+  assert.equal((await completeArguments('/cd 中', ctx))[0]?.replacement, `/cd "中文 space${sep}"`);
+  assert.equal((await completeArguments('/cd "中文', ctx))[0]?.replacement, `/cd "中文 space${sep}"`);
+  assert.equal((await completeArguments('/task ', ctx)).length, 5);
+  assert.equal((await completeArguments('/task cancel ', ctx))[0]?.replacement, '/task cancel task-1 ');
+  assert.deepEqual((await completeArguments('/session delete ', ctx)).map((item) => item.name), ['older']);
+  assert.equal((await completeArguments('/rollback ', ctx))[0]?.replacement, '/rollback checkpoint-1 ');
+  assert.deepEqual((await completeArguments('/rollback --to ', ctx)).map((item) => item.name), ['0', '1']);
+  assert.deepEqual(await completeArguments('/cd nonexistent/', ctx), []);
+});
+
+test('会话删除必须确认，拒绝当前、未知和多余参数，列表不截断', async () => {
+  const sessions = Array.from({ length: 25 }, (_, i) => ({ sessionId: `s${i}`, bytes: 1, modifiedAt: 'date' }));
+  let confirmed = false;
+  let calls = 0;
+  const service = { currentSessionId: 's0', list: async () => sessions,
+    confirm: async () => confirmed, delete: async () => { calls++; },
+  };
+  assert.equal((await executeSessionCommand('/sessions', service)).length, 25);
+  assert.match((await executeSessionCommand('/sessions', service))[0]!, /当前/u);
+  await executeSessionCommand('/session delete s24', service);
+  assert.equal(calls, 0);
+  confirmed = true;
+  await executeSessionCommand('/session delete s24', service);
+  assert.equal(calls, 1);
+  await assert.rejects(executeSessionCommand('/session delete s0', service), /当前/u);
+  await assert.rejects(executeSessionCommand('/session delete missing', service), /未找到/u);
+  assert.match((await executeSessionCommand('/session delete s1 extra', service))[0]!, /用法/u);
+  assert.equal(calls, 1);
+});
+
+test('/model delegates session routing configuration and keeps invalid arguments bounded', async () => {
+  const calls: Array<[string | undefined, string | undefined]> = [];
+  const services = {
+    listSessions: async () => [],
+    verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    modelRouting: {
+      status: () => ['mode=auto'],
+      configure: async (mode?: string, phase?: string) => {
+        calls.push([mode, phase]);
+        return ['mode=quality', 'phase=plan'];
+      },
+    },
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/model', services, session)).lines, ['mode=auto']);
+  assert.deepEqual((await executeServiceCommand('/model quality plan', services, session)).lines, ['mode=quality', 'phase=plan']);
+  assert.deepEqual(calls, [['quality', 'plan']]);
+  assert.match((await executeServiceCommand('/model quality plan extra', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/plan 只配置阶段，/goal 支持状态、证据与收口', async () => {
+  const routes: Array<[string | undefined, string | undefined]> = [];
+  let goal = undefined as import('../../../../src/runtime/goal.js').AgentGoal | undefined;
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    modelRouting: {
+      status: () => ['phase=auto'],
+      configure: async (mode?: string, phase?: string) => { routes.push([mode, phase]); return [`phase=${phase}`]; },
+    },
+    goals: {
+      status: () => goal,
+      set: async (statement: string) => (goal = { id: 'g1', statement, criteria: [], status: 'active' as const, evidence: [] }),
+      note: async (text: string) => { goal?.evidence.push({ id: 'e1', kind: 'note', ref: 'user', summary: text, at: 'now' }); },
+      close: async () => { goal = undefined; },
+    },
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/plan', services, session)).lines, ['phase=auto']);
+  await executeServiceCommand('/plan on', services, session);
+  await executeServiceCommand('/plan off', services, session);
+  assert.deepEqual(routes, [[undefined, 'plan'], [undefined, 'auto']]);
+  await executeServiceCommand('/goal 完成发布', services, session);
+  await executeServiceCommand('/goal note 构建通过', services, session);
+  assert.match((await executeServiceCommand('/goal status', services, session)).lines.join('\n'), /完成发布[\s\S]*构建通过/u);
+  await executeServiceCommand('/goal done', services, session);
+  assert.equal(goal, undefined);
+});
+
+test('/hooks 查看状态并在确认后信任项目 Hook', async () => {
+  let trusted = false;
+  let revoked = false;
+  let reloaded = false;
+  const services = {
+    listSessions: async () => [],
+    verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    hooks: {
+      list: () => [{
+        id: 'policy', runtimeId: 'project:policy', scope: 'project' as const,
+        event: 'PreToolUse' as const, enabled: true, trusted,
+        fingerprint: `sha256:${'a'.repeat(64)}`, executable: 'node',
+      }],
+      trust: async () => { trusted = true; return ['trusted']; },
+      revoke: async () => { revoked = true; return ['revoked']; },
+      reload: async () => { reloaded = true; return ['reloaded']; },
+    },
+  };
+  let confirm = false;
+  const session = { currentSessionId: 'active', confirm: async () => confirm };
+  assert.match((await executeServiceCommand('/hooks', services, session)).lines[0] ?? '', /untrusted/u);
+  assert.deepEqual((await executeServiceCommand('/hooks trust policy', services, session)).lines, ['已取消 Hook 信任操作']);
+  assert.equal(trusted, false);
+  confirm = true;
+  assert.deepEqual((await executeServiceCommand('/hooks trust policy', services, session)).lines, ['trusted']);
+  await executeServiceCommand('/hooks revoke policy', services, session);
+  await executeServiceCommand('/hooks reload', services, session);
+  assert.equal(revoked, true);
+  assert.equal(reloaded, true);
+  assert.match((await executeServiceCommand('/hooks nope', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/rollback 支持按文件恢复和按检查点索引回退', async () => {
+  const checkpoint: EditCheckpoint = { version: 1, workspaceRoot: 'root', workspaceRevision: { value: 'r', capturedAt: 'now', fileCount: 0 }, createdAt: 'now', files: [] };
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: ['a.txt'], skippedPaths: [] }),
+    restoreFiles: async (_checkpoint: typeof checkpoint, paths: readonly string[]) => ({ restoredPaths: [...paths], skippedPaths: [] }),
+    rollbackTo: async (index: number) => ({ targetIndex: index, checkpointIds: ['c0', 'c1'], completedCheckpointIds: ['c1'], restoredPaths: ['a.txt'], skippedPaths: [] }),
+    loadCheckpoint: async () => checkpoint,
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/rollback c1 a.txt', services, session)).lines,
+    ['已回滚 checkpoint=c1，恢复 1 个文件']);
+  assert.match((await executeServiceCommand('/rollback --to 0', services, session)).lines[0] ?? '', /checkpoint\[0\]/u);
+  assert.match((await executeServiceCommand('/rollback --to bad', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/rewind 列出检查点并按模式委托正交回退', async () => {
+  const checkpoint = { version: 1, workspaceRoot: 'root', workspaceRevision: { value: 'r', capturedAt: 'now', fileCount: 0 }, createdAt: 'now', files: [] } as EditCheckpoint;
+  const calls: Array<[number, string]> = [];
+  const services = {
+    listSessions: async () => [], verify: async () => [], rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => checkpoint,
+    listRewindCheckpoints: async () => [{ index: 2, eventId: 'event', timestamp: 'now', turnId: 'turn', step: 3, phase: 'finished' as const, state: 'completed' as const }],
+    rewind: async (index: number, mode: 'code' | 'conversation' | 'both') => {
+      calls.push([index, mode]);
+      const agentCheckpoint: AgentCheckpoint = { version: 1, sessionId: 's', turnId: 'turn', runId: 'run', step: 3, phase: 'finished', toolCallsUsed: 0, state: 'completed', items: [] };
+      return { targetIndex: index, mode, checkpoint: agentCheckpoint, restoredPaths: ['a.ts'], skippedPaths: ['b.ts'] };
+    },
+  };
+  assert.match((await executeServiceCommand('/rewind', services, { currentSessionId: 's', confirm: async () => true })).lines[1] ?? '', /checkpoint\[2\]/u);
+  const result = await executeServiceCommand('/rewind 2 --conversation', services, { currentSessionId: 's', confirm: async () => true });
+  assert.match(result.lines[0] ?? '', /conversation/u);
+  assert.deepEqual(calls, [[2, 'conversation']]);
+  assert.match((await executeServiceCommand('/rewind nope', services, { currentSessionId: 's', confirm: async () => true })).lines[0] ?? '', /用法/u);
+});
+
+test('/context 展示最近一次实际上下文的来源占用', async () => {
+  const services = {
+    listSessions: async () => [], verify: async () => [], rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => ({ version: 1, workspaceRoot: 'root', workspaceRevision: { value: 'r', capturedAt: 'now', fileCount: 0 }, createdAt: 'now', files: [] } as EditCheckpoint),
+    context: () => ({
+      items: [], instructions: [], permissions: { effectivePermissions: [], deniedPermissions: [], reasons: [], approvalRequests: [], rejectedDirectiveIds: [] },
+      privacy: 'full-context' as const, estimatedTokens: 100, budgetTokens: 200, compacted: false, warnings: [],
+      sourceUsage: [{ source: 'conversation' as const, itemCount: 2, estimatedTokens: 80, itemIds: ['a', 'b'] }],
+    } as ContextBuildResult),
+  };
+  const result = await executeServiceCommand('/context', services, { currentSessionId: 's', confirm: async () => true });
+  assert.match(result.lines[0] ?? '', /100\/200/u);
+  assert.match(result.lines[1] ?? '', /conversation/u);
+});
+
+test('/pause 委托暂停服务并拒绝参数', async () => {
+  let paused = 0;
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    pause: async () => { paused += 1; },
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.deepEqual((await executeServiceCommand('/pause', services, session)).lines,
+    ['已请求暂停，将在当前工具批次完成后暂停。']);
+  assert.equal(paused, 1);
+  assert.match((await executeServiceCommand('/pause now', services, session)).lines[0] ?? '', /用法/u);
+});
+
+test('/skills 列表与 /skill 手动加载共享 Skill 服务', async () => {
+  const services = {
+    listSessions: async () => [], verify: async () => [],
+    rollback: async () => ({ restoredPaths: [], skippedPaths: [] }),
+    loadCheckpoint: async () => { throw new Error('unused'); },
+    listSkills: async () => [{ name: 'code-search', description: 'search source when investigating code', source: 'builtin' as const, path: '/builtin/code-search' }],
+    loadSkill: async () => ({ name: 'code-search', description: 'search source when investigating code', source: 'builtin' as const, path: '/builtin/code-search', body: '# rules', references: [], scripts: [] }),
+  };
+  const session = { currentSessionId: 'active', confirm: async () => false };
+  assert.match((await executeServiceCommand('/skills', services, session)).lines[0] ?? '', /code-search/u);
+  assert.deepEqual((await executeServiceCommand('/skill code-search', services, session)).lines, ['Skill：code-search', 'search source when investigating code', '# rules']);
+  assert.match((await executeServiceCommand('/skill nope extra', services, session)).lines[0] ?? '', /用法/u);
+});

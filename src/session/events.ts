@@ -4,8 +4,10 @@ import type {
   ToolResultItem,
 } from '../core/messages.js';
 import type { Permission } from '../core/permissions.js';
-import type { ProviderStopReason, TokenUsage } from '../providers/types.js';
+import type { ProviderStopReason, TokenUsage, ModelRoutingSnapshot, ToolChoice } from '../providers/types.js';
 import type { ApprovalDecision, ApprovalRequest } from '../runtime/approval.js';
+import type { AgentPlan } from '../runtime/structured-output.js';
+import type { AgentGoal, GoalEvidence } from '../runtime/goal.js';
 
 // 事件 schema 版本，仅在不兼容变更时递增；读取端以该值校验事件结构。
 export const AGENT_EVENT_VERSION = 1 as const;
@@ -21,8 +23,18 @@ export interface AgentCheckpoint {
   // 恢复合并 tool.completed 仅在 tools 阶段执行；model 阶段说明该批次已进入模型步骤。
   phase: 'model' | 'tools' | 'finished';
   toolCallsUsed: number;
+  internalVerificationCallIds?: string[];
   state: RunState;
   items: ConversationItem[];
+  hookContexts?: RuntimeHookContext[];
+  routing?: ModelRoutingSnapshot;
+}
+
+export interface RuntimeHookContext {
+  hookId: string;
+  scope: 'user' | 'project';
+  content: string;
+  contentHash: string;
 }
 
 export type AgentEventPayload =
@@ -30,7 +42,37 @@ export type AgentEventPayload =
   | { type: 'turn.started'; userMessage: string }
   | { type: 'turn.steered'; message: string }
   | { type: 'run.started'; model: string; resumed: boolean }
-  | { type: 'model.started'; step: number }
+  | {
+      type: 'navigation.resolved';
+      mode: 'off' | 'none' | 'direct' | 'advisory' | 'search';
+      confidence: number;
+      candidateCount: number;
+      matched: boolean;
+    }
+  | { type: 'route.configured'; routing: ModelRoutingSnapshot }
+  | {
+      type: 'route.selected';
+      model: string;
+      mode: string;
+      tier: number;
+      reason: string;
+      candidates: string[];
+      actualModel?: string;
+      phase?: string;
+      phaseOverride?: 'plan' | 'execute' | 'verify';
+      suggestedModel?: string;
+      excluded?: Array<{ id: string; reason: string }>;
+    }
+  | { type: 'route.fallback'; fromModel: string; toModel: string; reason: string }
+  | { type: 'route.fallback_rejected'; model: string; reason: string }
+  | {
+      type: 'mcp.quota.exceeded';
+      serverId: string;
+      reasonCode: string;
+      callsPerSession: number;
+      callsThisTurn?: number;
+    }
+  | { type: 'model.started'; step: number; toolChoice?: ToolChoice; navigationMode?: string }
   | { type: 'model.output.delta'; step: number; delta: string }
   | { type: 'model.retry'; step: number; attempt: number; delayMs: number; code: string }
   | {
@@ -41,10 +83,20 @@ export type AgentEventPayload =
       usage?: TokenUsage;
       elapsedMs?: number;
       retries?: number;
+      toolCallCount?: number;
     }
   | { type: 'model.failed'; step: number; code: string; retryable: boolean }
   | { type: 'tool.started'; callId: string; toolName: string; callIndex: number }
   | { type: 'tool.progress'; callId: string; toolName: string; progress: number; total?: number }
+  | {
+      type: 'hook.completed';
+      hookId: string;
+      scope: 'user' | 'project';
+      hookEventName: 'SessionStart' | 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse' | 'Stop' | 'SessionEnd';
+      status: 'completed' | 'denied' | 'timeout' | 'failed' | 'cancelled' | 'skipped';
+      durationMs: number;
+      reasonCode: string;
+    }
   | {
       type: 'tool.completed';
       callId: string;
@@ -79,10 +131,24 @@ export type AgentEventPayload =
       callId: string;
     }
   | { type: 'checkpoint.saved'; checkpoint: AgentCheckpoint }
-  | { type: 'verification.completed'; verified: boolean; issueCount: number }
+  | { type: 'session.rewound'; checkpoint: AgentCheckpoint; mode: 'conversation' | 'both'; targetIndex: number }
+  | {
+      type: 'change.set.completed';
+      files: string[];
+      checkpointIds: string[];
+      verification?: { status: 'passed' | 'failed' | 'skipped'; issueCount: number };
+    }
+  | { type: 'verification.started'; changedFiles: string[]; commands: string[] }
+  | { type: 'verification.skipped'; reason: string; changedFiles: string[] }
+  | { type: 'verification.completed'; verified: boolean; issueCount: number; results?: import('../runtime/verification.js').EditVerificationResult[] }
+  | { type: 'plan.proposed'; planId: string; plan?: AgentPlan; raw?: string }
+  | { type: 'plan.decided'; planId: string; decision: 'approved' | 'edited' | 'rejected'; plan?: AgentPlan }
+  | { type: 'goal.set'; goal: AgentGoal }
+  | { type: 'goal.progress'; goalId: string; evidence: GoalEvidence }
+  | { type: 'goal.closed'; goalId: string; status: 'met' | 'dropped' }
   | { type: 'usage.recorded'; model: string; usage: TokenUsage; cachedReadTokens?: number }
   | { type: 'run.completed'; answer: string; degraded: boolean }
-  | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' }
+  | { type: 'run.paused'; reason: 'step_budget' | 'tool_budget' | 'approval_required' | 'verification_failed' | 'user_paused' }
   | { type: 'run.cancelled'; reason: string }
   | { type: 'run.failed'; code: string; retryable: boolean };
 
@@ -95,6 +161,8 @@ export interface AgentEvent {
   // seq 由 Event Store 单写者按 1 起始连续分配，恢复时要求严格递增（不能有缺口或乱序）。
   seq: number;
   timestamp: string;
+  /** 前一事件的 canonical SHA-256；首事件没有前置哈希。 */
+  prevHash?: string;
   parentEventId?: string;
   payload: AgentEventPayload;
 }

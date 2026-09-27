@@ -1,10 +1,57 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { FileLockError } from '../../../../src/runtime/file-lock.js';
 import { EventStoreCorruptionError, JsonlEventStore } from '../../../../src/session/jsonl-event-store.js';
+
+test('删除仅移除确认的历史日志，保留相邻数据并释放文件锁', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'old.jsonl'), 'old log\n');
+  await writeFile(join(root, 'other.jsonl'), 'other log\n');
+  await writeFile(join(root, 'checkpoint.json'), '{}');
+  const expected = (await JsonlEventStore.list(root)).find((item) => item.sessionId === 'old')!;
+  await JsonlEventStore.delete(root, 'old', 'current', expected);
+  await assert.rejects(lstat(join(root, 'old.jsonl')), { code: 'ENOENT' });
+  await assert.rejects(lstat(join(root, 'old.jsonl.lock')), { code: 'ENOENT' });
+  assert.equal(await readFile(join(root, 'other.jsonl'), 'utf8'), 'other log\n');
+  assert.equal(await readFile(join(root, 'checkpoint.json'), 'utf8'), '{}');
+  await assert.rejects(JsonlEventStore.delete(root, 'old', 'current', expected), { code: 'ENOENT' });
+});
+
+test('删除拒绝当前会话、活跃写者、路径穿越和确认后变化', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-guard-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const active = new JsonlEventStore(root, 'active');
+  await active.read();
+  const expected = (await JsonlEventStore.list(root))[0]!;
+  await assert.rejects(JsonlEventStore.delete(root, 'active', 'active', expected), /当前/u);
+  await assert.rejects(JsonlEventStore.delete(root, 'active', 'different', expected), FileLockError);
+  for (const id of ['../escape', '..\\escape', '/absolute', 'C:\\escape', '']) {
+    await assert.rejects(JsonlEventStore.delete(root, id, 'current', expected), /格式/u);
+  }
+  await active.close();
+  await appendFile(join(root, 'active.jsonl'), 'changed\n');
+  await assert.rejects(JsonlEventStore.delete(root, 'active', 'different', expected), /变化/u);
+  assert.equal(await readFile(join(root, 'active.jsonl'), 'utf8'), 'changed\n');
+  await assert.rejects(lstat(join(root, 'active.jsonl.lock')), { code: 'ENOENT' });
+});
+
+test('删除拒绝符号链接会话目录和非普通文件', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-link-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const actual = join(root, 'actual');
+  await mkdir(actual);
+  await writeFile(join(actual, 'old.jsonl'), 'retained');
+  const expected = (await JsonlEventStore.list(actual))[0]!;
+  await symlink(actual, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(JsonlEventStore.delete(join(root, 'linked'), 'old', 'current', expected), /符号链接/u);
+  await mkdir(join(actual, 'directory.jsonl'));
+  await assert.rejects(JsonlEventStore.delete(actual, 'directory', 'current', { ...expected, sessionId: 'directory' }), /普通文件/u);
+  assert.equal(await readFile(join(actual, 'old.jsonl'), 'utf8'), 'retained');
+});
 
 test('并行 append 由单写者分配连续 seq 且每行完整', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-events-'));
@@ -83,6 +130,52 @@ test('支持 afterSeq、Session 列表并在写入前脱敏', async (context) =>
   assert.doesNotMatch(JSON.stringify(events), /secret-value/u);
   await store.close();
   assert.deepEqual((await JsonlEventStore.list(root)).map((item) => item.sessionId), ['session-query']);
+});
+
+test('空目录列表、最新检查点和非法 JSON 行均失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-extra-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  assert.deepEqual(await JsonlEventStore.list(join(root, 'missing')), []);
+  const store = new JsonlEventStore(root, 'checkpoint-query', { flushEachEvent: false });
+  await store.append({ payload: { type: 'session.created', workspaceRoot: root } });
+  await store.append({ payload: {
+    type: 'checkpoint.saved', checkpoint: {
+      version: 1, sessionId: 'checkpoint-query', turnId: 'turn', runId: 'run', step: 1,
+      phase: 'model', toolCallsUsed: 0, state: 'paused', items: [],
+    },
+  } });
+  assert.equal((await store.latestCheckpoint())?.payload.type, 'checkpoint.saved');
+  assert.equal((await store.read(99)).length, 0);
+  await store.close();
+  await writeFile(join(root, 'broken.jsonl'), '{not-json}\n');
+  await assert.rejects(new JsonlEventStore(root, 'broken').read(), EventStoreCorruptionError);
+});
+
+test('事件日志中的空行、非法结构和不存在文件读取均失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-invalid-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'empty-line.jsonl'), `${JSON.stringify(event(1))}\n\n`);
+  await assert.rejects(new JsonlEventStore(root, 'empty-line').read(), EventStoreCorruptionError);
+  await writeFile(join(root, 'invalid-shape.jsonl'), `${JSON.stringify({ version: 1, seq: 1 })}\n`);
+  await assert.rejects(new JsonlEventStore(root, 'invalid-shape').read(), EventStoreCorruptionError);
+  assert.deepEqual(await JsonlEventStore.list(join(root, 'not-created')), []);
+});
+
+test('事件序号缺口和混合哈希链均失败关闭', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-events-seq-gap-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'gap.jsonl'), `${JSON.stringify(event(1))}\n${JSON.stringify(event(3))}\n`);
+  await assert.rejects(new JsonlEventStore(root, 'gap').read(), EventStoreCorruptionError);
+  const chained = new JsonlEventStore(root, 'mixed-chain', { flushEachEvent: false });
+  await chained.append({ payload: { type: 'session.created', workspaceRoot: root } });
+  await chained.append({ payload: { type: 'turn.started', userMessage: 'second' } });
+  await chained.append({ payload: { type: 'turn.started', userMessage: 'third' } });
+  await chained.close();
+  const lines = (await readFile(join(root, 'mixed-chain.jsonl'), 'utf8')).trim().split('\n');
+  const third = JSON.parse(lines[2]!) as Record<string, unknown>;
+  delete third.prevHash;
+  await writeFile(join(root, 'mixed-chain.jsonl'), `${lines[0]}\n${lines[1]}\n${JSON.stringify(third)}\n`);
+  await assert.rejects(new JsonlEventStore(root, 'mixed-chain').read(), EventStoreCorruptionError);
 });
 
 test('同一 Session 拒绝第二个写者，关闭后可以重新打开', async (context) => {

@@ -26,6 +26,14 @@ const configSchema = {
           trust: { enum: ['untrusted', 'trusted'] },
           protocolMode: { enum: ['legacy', 'auto', '2026-07-28'] },
           timeoutMs: { type: 'integer', minimum: 1_000, maximum: 300_000 },
+          quota: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              maxCallsPerTurn: { type: 'integer', minimum: 1, maximum: 10_000 },
+              maxCallsPerSession: { type: 'integer', minimum: 1, maximum: 1_000_000 },
+              maxOutputBytes: { type: 'integer', minimum: 256, maximum: 4 * 1024 * 1024 },
+            },
+          },
           permissions: {
             type: 'object', additionalProperties: false,
             properties: {

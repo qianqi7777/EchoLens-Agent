@@ -25,6 +25,7 @@ const baseCapabilities: ProviderCapabilities = {
   supportsStructuredOutput: false,
   supportsPromptCaching: false,
   supportsUsageReporting: true,
+  supportsToolChoice: true,
 };
 
 export class OpenAICompatibleProvider implements ModelProvider {
@@ -198,6 +199,22 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   private validateRequest(request: ProviderRequest): void {
+    if (request.toolChoice && this.capabilities.supportsToolChoice === false) {
+      throw new ProviderError({
+        kind: 'invalid_request',
+        message: '当前 Provider 未声明 Tool Choice 能力',
+        retryable: false,
+        code: 'tool_choice_unsupported',
+      });
+    }
+    if (request.toolChoice === 'required' && !request.tools?.length) {
+      throw new ProviderError({
+        kind: 'invalid_request',
+        message: 'tool_choice=required 时必须提供工具定义',
+        retryable: false,
+        code: 'tool_choice_without_tools',
+      });
+    }
     if (request.responseFormat && !this.capabilities.supportsStructuredOutput) {
       throw new ProviderError({
         kind: 'invalid_request',

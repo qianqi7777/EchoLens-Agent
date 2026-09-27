@@ -1,0 +1,11 @@
+FAIL src/math.test.ts
+  math
+    ● adds values
+
+      Expected: 3
+      Received: 4
+
+      at Object.<anonymous> (src/math.test.ts:12:5)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 1 total

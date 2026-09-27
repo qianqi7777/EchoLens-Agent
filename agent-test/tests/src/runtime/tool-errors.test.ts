@@ -11,7 +11,7 @@ import type {
   ProviderRequest,
   ProviderResult,
 } from '../../../../src/providers/types.js';
-import { ReactAgent } from '../../../../src/runtime/react-loop.js';
+import { ReactAgent } from '../../../../src/runtime/resumable-react-agent.js';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
 import type { ToolContext, ToolSpec } from '../../../../src/runtime/types.js';

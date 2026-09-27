@@ -14,19 +14,25 @@ import {
 import type { AgentEvent } from './session/events.js';
 import type { AgentRunResult } from './runtime/resumable-react-agent.js';
 import { previewApprovalRequest, type ApprovalPreview } from './approval-preview.js';
-import type {
-  ApprovalDecision,
-  ApprovalRequest,
-  EditCheckpoint,
-  EditVerificationResult,
-  FinalSummary,
-  ToolExecutionStatus,
-} from './runtime/index.js';
+import { type ApprovalDecision, type ApprovalRequest } from './runtime/approval.js';
+import { parseAgentPlan, type AgentPlan, type FinalSummary } from './runtime/structured-output.js';
+import type { ExecutionPhase } from './runtime/model-routing.js';
+import type { AgentGoal } from './runtime/goal.js';
+import type { PermissionProfile } from './runtime/permission-profile.js';
+import { type ToolExecutionStatus } from './core/messages.js';
+import { executeServiceCommand, isServiceCommand, type CommandServices } from './commands/service-command.js';
 import {
-  executeBackgroundTaskCommand,
-  isBackgroundTaskCommand,
-  type BackgroundTaskCommands,
-} from './orchestration/task-command.js';
+  completeCommand,
+  filterCommandCandidates,
+  formatCommandHelp,
+  getCommandCatalog,
+  parseCommandInput,
+  commandMenuWindow,
+  type CommandDescriptor,
+} from './commands/command-catalog.js';
+import { completeArguments } from './commands/argument-completion.js';
+
+type MenuCandidate = CommandDescriptor & { replacement?: string };
 
 const DEFAULT_HEIGHT = 24;
 // 主题色集中在此：TUI 所有组件共享同一套色板，调整外观只改这里。
@@ -43,21 +49,17 @@ const BODY = '#e6e6e6';
  * TUI 的装配参数。所有能力都以回调注入，TerminalUi 不直接依赖 Session/Runtime 实现，
  * 这样既能复用现有协议，也便于测试时替换成假实现。
  */
-export interface TuiOptions {
+export interface TuiOptions extends CommandServices {
   model: string;
   route: string;
   privacy?: string;
+  permissionProfile?: PermissionProfile;
   sessionId: string;
   workspaceRoot: string;
   maxContextTokens?: number;
   run: (prompt: string, signal: AbortSignal, onEvent: (event: AgentEvent) => void) => Promise<AgentRunResult>;
   resume: (signal: AbortSignal, onEvent: (event: AgentEvent) => void) => Promise<AgentRunResult>;
   steer: (message: string) => Promise<void>;
-  listSessions: () => Promise<readonly { sessionId: string; modifiedAt: string; bytes: number }[]>;
-  verify: () => Promise<readonly EditVerificationResult[]>;
-  rollback: (checkpoint: EditCheckpoint) => Promise<{ restoredPaths: string[]; skippedPaths: string[] }>;
-  loadCheckpoint: (id: string) => Promise<EditCheckpoint>;
-  backgroundTasks?: BackgroundTaskCommands;
   startupMessages?: readonly string[];
 }
 
@@ -91,23 +93,40 @@ interface ApprovalUi {
   resolve: (decision: ApprovalDecision) => void;
 }
 
+interface PlanApprovalUi {
+  planId: string;
+  plan: AgentPlan;
+  stage: 'decision' | 'edit';
+}
+
 interface TuiState {
   transcript: ViewItem[];
   busy: boolean;
   status: string;
   statusTone: Tone;
   input: string;
+  inputCursor: number;
+  historyDraft: string;
+  argumentInput: string;
+  argumentCandidates: MenuCandidate[];
+  confirmation?: { message: string; resolve: (confirmed: boolean) => void };
   history: string[];
   historyIndex: number;
   scrollFromBottom: number;
   approval?: ApprovalUi;
+  planApproval?: PlanApprovalUi;
   tokens: number;
   maxContext?: number;
   model: string;
   route: string;
   privacy?: string;
+  permissionProfile?: PermissionProfile;
   workspaceRoot: string;
   sessionId: string;
+  phase?: ExecutionPhase | 'auto';
+  goal?: AgentGoal;
+  commandMenuSelection: number;
+  commandMenuDismissed: boolean;
 }
 
 interface Segment {
@@ -363,6 +382,9 @@ function approvalLines(approval: ApprovalUi, width: number, max: number): Line[]
   const request = approval.request;
   const out: Line[] = [];
   out.push({ key: 'aph', segments: [{ text: `┌ 审批 · ${request.toolName}`, color: WARN, bold: true }] });
+  if (request.reasonCode === 'outside_workspace_write_approval') {
+    out.push({ key: 'apx', segments: [{ text: '│ ⚠ 目标是工作区外目录（仅本次具体路径与操作）', color: WARN, bold: true }] });
+  }
   out.push({ key: 'apr', segments: [{ text: `│ 原因: ${truncateDisplayText(request.reason, width - 4)}`, color: MUTED }] });
   const action = approvalActionText(request);
   if (action) out.push({ key: 'apa', segments: [{ text: `│ ${truncateDisplayText(action, width - 4)}`, color: BODY }] });
@@ -386,36 +408,88 @@ function approvalLines(approval: ApprovalUi, width: number, max: number): Line[]
   return out.slice(0, max);
 }
 
+function planApprovalLines(approval: PlanApprovalUi, width: number, max: number): Line[] {
+  const out: Line[] = [
+    { key: 'plh', segments: [{ text: `┌ 计划 · ${truncateDisplayText(approval.plan.objective, width - 8)}`, color: ACCENT, bold: true }] },
+  ];
+  approval.plan.steps.forEach((step, index) => {
+    out.push({ key: `pls${index}`, segments: [{ text: `│ ${index + 1}. ${truncateDisplayText(step.objective, width - 7)}`, color: BODY }] });
+  });
+  approval.plan.risks.slice(0, 3).forEach((risk, index) => {
+    out.push({ key: `plr${index}`, segments: [{ text: `│ 风险: ${truncateDisplayText(risk, width - 8)}`, color: WARN }] });
+  });
+  out.push({
+    key: 'plhint',
+    segments: [{
+      text: approval.stage === 'edit'
+        ? '└ 编辑输入框中的计划 JSON，按 Enter 提交 · Esc 取消编辑'
+        : '└ [y] 批准 · [e] 修改 · [g] 批准并设为目标 · [n] 拒绝',
+      color: ACCENT,
+      bold: true,
+    }],
+  });
+  return out.slice(0, max);
+}
+
 // ---- Presentational components -----------------------------------------------
 
 function Header({ state }: { state: TuiState }): React.JSX.Element {
+  const phaseBadge = state.phase === 'plan' ? '  ·  [规划·只读]' : state.phase === 'verify' ? '  ·  [验证]' : '';
   return (
     <Box justifyContent="space-between">
       <Text>
         <Text color={BRAND} bold>◆ EchoLens Agent</Text>
-        <Text color={DIM}>  v0.6  ·  {state.route}{state.privacy ? `  ·  ${state.privacy}` : ''}</Text>
+        <Text color={DIM}>  ·  {state.route}{state.privacy ? `  ·  ${state.privacy}` : ''}{state.permissionProfile ? `  ·  ${state.permissionProfile}` : ''}{phaseBadge}</Text>
       </Text>
       <Text color={DIM}>{truncateDisplayText(state.workspaceRoot, 40)}</Text>
     </Box>
   );
 }
 
-function PromptLine({ state }: { state: TuiState }): React.JSX.Element {
-  if (state.busy) {
-    return (
-      <Text>
-        <Text color={BRAND} bold>❯ </Text>
-        <Text color={DIM} dimColor>··· {state.status} · Ctrl+C 取消</Text>
-      </Text>
-    );
-  }
+function PromptLine({ state, width }: { state: TuiState; width: number }): React.JSX.Element {
+  const before = state.input.slice(0, state.inputCursor).replace(/\n/gu, '↵');
+  const after = state.input.slice(state.inputCursor).replace(/\n/gu, '↵');
+  const visible = inputViewport(before, after, Math.max(1, width - 3));
   return (
-    <Box justifyContent="space-between">
-      <Text>
+    <Box height={1} overflow="hidden">
+      <Text wrap="truncate">
         <Text color={BRAND} bold>❯ </Text>
-        <Text color={BODY}>{state.input}<Text color={BRAND}>▌</Text></Text>
+        <Text color={BODY}>{visible.before}<Text color={BRAND}>▌</Text>{visible.after}</Text>
       </Text>
-      <Text color={DIM} dimColor>↑↓ 历史 · /help</Text>
+    </Box>
+  );
+}
+
+function CommandMenu({
+  items,
+  selected,
+  width,
+  capacity,
+}: {
+  items: readonly CommandDescriptor[];
+  selected: number;
+  width: number;
+  capacity: number;
+}): React.JSX.Element | null {
+  if (items.length === 0) return null;
+  const window = commandMenuWindow(items.length, selected, capacity);
+  const visible = items.slice(window.start, window.end);
+  if (visible.length === 0) return null;
+  return (
+    <Box flexDirection="column" width={width}>
+      {visible.map((command, index) => {
+        index += window.start;
+        const marker = index === selected ? '›' : ' ';
+        const usage = command.usage ?? command.name;
+        const aliases = command.aliases?.length ? `  别名 ${command.aliases.join('、')}` : '';
+        const detail = `${usage}  ${command.description}${aliases}`;
+        return (
+          <Text key={command.name} wrap="truncate">
+            <Text color={index === selected ? BRAND : DIM} bold={index === selected}>{marker} </Text>
+            <Text color={index === selected ? ACCENT : BODY} bold={index === selected}>{truncateDisplayText(detail, Math.max(1, width - 2))}</Text>
+          </Text>
+        );
+      })}
     </Box>
   );
 }
@@ -428,8 +502,11 @@ function StatusBar({ state, compact }: { state: TuiState; compact: boolean }): R
   return (
     <Box justifyContent="space-between">
       <Text wrap="truncate">
+        {state.busy ? <Text color={WARN}>{state.status}  ·  </Text> : null}
         <Text color={BRAND} bold>model {state.model}</Text>
         <Text color={MUTED}>  ·  route {state.route}</Text>
+        {state.phase === 'plan' ? <Text color={WARN} bold>  ·  规划·只读</Text> : state.phase === 'verify' ? <Text color={ACCENT}>  ·  验证</Text> : null}
+        {state.goal ? <Text color={GOOD} bold>  ·  目标 {Math.min(state.goal.criteria.length, state.goal.evidence.length)}/{state.goal.criteria.length}</Text> : null}
         {pct != null ? <Text color={pct > 70 ? WARN : MUTED}>  ·  ctx {pct}%</Text> : null}
         <Text color={MUTED}>  ·  session {session}</Text>
       </Text>
@@ -446,9 +523,9 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
   const { columns, rows } = useWindowSize();
   useInput((input, key) => controller.handleKey(input, key));
 
-  const cols = Math.max(30, columns || DEFAULT_HEIGHT);
-  const maxRows = Math.max(10, rows || DEFAULT_HEIGHT);
-  const contentWidth = Math.max(24, cols - 2);
+  const cols = Math.max(1, columns || 80);
+  const maxRows = Math.max(3, rows || DEFAULT_HEIGHT);
+  const contentWidth = Math.max(1, cols - 2);
 
   const allLines = useMemo(
     () => transcriptLines(state.transcript, contentWidth),
@@ -456,11 +533,18 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
   );
 
   const approvalBlock = state.approval
-    ? approvalLines(state.approval, contentWidth, Math.max(3, maxRows - 5))
-    : [];
+    ? approvalLines(state.approval, contentWidth, Math.max(1, maxRows - 3)).slice(-(maxRows - 3))
+    : state.planApproval
+      ? planApprovalLines(state.planApproval, contentWidth, Math.max(1, maxRows - 3)).slice(-(maxRows - 3))
+      : [];
+  const commandMenu = controller.commandMenu(state.input);
   const reserve = 3; // header + input + status
-  const approvalSpace = approvalBlock.length > 0 ? approvalBlock.length + 1 : 0;
-  const viewport = Math.max(2, maxRows - reserve - approvalSpace);
+  const menuCapacity = Math.max(0, Math.min(8, maxRows - reserve - 1));
+  const commandSpace = commandMenu.visible
+    ? Math.min(menuCapacity, commandMenu.items.length)
+    : 0;
+  const approvalSpace = approvalBlock.length;
+  const viewport = Math.max(0, maxRows - reserve - approvalSpace - commandSpace);
 
   // 视口计算：从底部向上取 viewport 行；scrollFromBottom 大于 0 时向上偏移，
   // 并把“上方还有内容”的提示行挤掉一行，避免提示行把正文顶出屏幕。
@@ -483,10 +567,19 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
     </Text>
   );
 
+  if (state.confirmation) {
+    return (
+      <Box flexDirection="column" width={cols}>
+        <Text color={WARN}>{state.confirmation.message}</Text>
+        <Text color={WARN}>确认删除？y / N</Text>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" width={cols} height={maxRows}>
-      <Header state={state} />
-      <Box flexGrow={1} flexDirection="column" overflow="hidden">
+      <Box height={1} overflow="hidden"><Header state={state} /></Box>
+      <Box height={viewport} flexDirection="column" overflow="hidden">
         {banner.map(renderLine)}
         {slice.map(renderLine)}
       </Box>
@@ -497,8 +590,9 @@ function App({ store, controller }: { store: UiStore; controller: TerminalUi }):
             </Box>
           )
         : null}
-      <PromptLine state={state} />
-      <StatusBar state={state} compact={cols < 110} />
+      {commandMenu.visible ? <CommandMenu items={commandMenu.items} selected={commandMenu.selected} width={contentWidth} capacity={menuCapacity} /> : null}
+      <PromptLine state={state} width={cols} />
+      <Box height={1} overflow="hidden"><StatusBar state={state} compact={cols < 110} /></Box>
     </Box>
   );
 }
@@ -509,6 +603,24 @@ function cleanDisplayText(value: string): string {
   return value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '');
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+export function inputViewport(before: string, after: string, width: number): { before: string; after: string } {
+  const segments = [...graphemes.segment(before)].map((item) => item.segment);
+  let used = 0;
+  let start = segments.length;
+  while (start > 0 && used + stringWidth(segments[start - 1]!) <= width - 1) {
+    used += stringWidth(segments[--start]!);
+  }
+  return { before: segments.slice(start).join(''), after: width - used > 1 ? truncateDisplayText(after, width - used - 1) : '' };
+}
+
+function adjacentCursor(input: string, cursor: number, direction: -1 | 1): number {
+  const boundaries = [...graphemes.segment(input)].map((item) => item.index).concat(input.length);
+  return direction < 0 ? boundaries.findLast((index) => index < cursor) ?? 0
+    : boundaries.find((index) => index > cursor) ?? input.length;
 }
 
 function message(error: unknown): string {
@@ -534,6 +646,16 @@ function compactToolDetail(result?: { summary?: string; output?: { content?: str
   return '';
 }
 
+function fallbackPlan(raw: string): AgentPlan {
+  const objective = raw.trim() || '按已批准计划执行';
+  return {
+    objective,
+    steps: [{ id: 'raw-1', objective, verification: '逐条核对执行结果', evidenceRequired: [] }],
+    risks: [],
+    completionCriteria: ['完成计划并提供验证证据'],
+  };
+}
+
 /** 依赖 Ink/React 的对话式全屏终端界面，复用现有 Session/Runtime，不改变 Agent 协议。 */
 export class TerminalUi {
   private readonly store: UiStore;
@@ -544,6 +666,9 @@ export class TerminalUi {
   private deltaBuffer = '';
   private deltaTimer?: ReturnType<typeof setTimeout>;
   private stopped = false;
+  private completionGeneration = 0;
+  private completionTimer?: ReturnType<typeof setTimeout>;
+  private autoPlanNoticeShown = false;
 
   constructor(private readonly options: TuiOptions) {
     this.store = new UiStore({
@@ -552,6 +677,10 @@ export class TerminalUi {
       status: '就绪',
       statusTone: 'info',
       input: '',
+      inputCursor: 0,
+      historyDraft: '',
+      argumentInput: '',
+      argumentCandidates: [],
       history: [],
       historyIndex: -1,
       scrollFromBottom: 0,
@@ -560,9 +689,52 @@ export class TerminalUi {
       model: options.model,
       route: options.route,
       privacy: options.privacy,
+      permissionProfile: options.permissionProfile,
       workspaceRoot: options.workspaceRoot,
       sessionId: options.sessionId,
+      phase: 'auto',
+      goal: options.goals?.status(),
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
     });
+  }
+
+  commandMenu(input: string): {
+    visible: boolean;
+    items: readonly MenuCandidate[];
+    selected: number;
+  } {
+    const state = this.store.get();
+    const items: MenuCandidate[] = filterCommandCandidates(input, this.catalogContext());
+    if (items.length === 0 && state.argumentInput === input && !state.busy) items.push(...state.argumentCandidates);
+    const selected = Math.min(state.commandMenuSelection, Math.max(0, items.length - 1));
+    return {
+      visible: !state.commandMenuDismissed && !state.approval && !state.planApproval && !state.confirmation && items.length > 0,
+      items,
+      selected,
+    };
+  }
+
+  private catalogContext() {
+    return {
+      workspaceAvailable: Boolean(this.options.workspaceCommands),
+      backgroundTasksAvailable: Boolean(this.options.backgroundTasks),
+      sessionDeletionAvailable: Boolean(this.options.deleteSession),
+      skillImportAvailable: Boolean(this.options.importSkill),
+      skillsAvailable: Boolean(this.options.listSkills),
+      modelRoutingAvailable: Boolean(this.options.modelRouting),
+      hooksAvailable: Boolean(this.options.hooks),
+      mcpAvailable: Boolean(this.options.mcpUsage),
+      pluginAvailable: Boolean(this.options.plugins),
+      auditAvailable: Boolean(this.options.audit),
+      goalAvailable: Boolean(this.options.goals),
+      busy: this.store.get().busy,
+      interface: 'tui' as const,
+    };
+  }
+
+  view(): React.JSX.Element {
+    return <App store={this.store} controller={this} />;
   }
 
   async start(): Promise<void> {
@@ -581,7 +753,7 @@ export class TerminalUi {
       for (const message of this.options.startupMessages ?? []) this.pushNotice(message, 'info');
       this.store.update((s) => ({ ...s, status: '就绪' }));
       // exitOnCtrlC: false——Ctrl+C 由 handleKey 自行解释（有活动 Turn 时只取消 Turn）。
-      this.inkInstance = render(<App store={this.store} controller={this} />, { exitOnCtrlC: false });
+      this.inkInstance = render(this.view(), { exitOnCtrlC: false });
       await new Promise<void>((resolve) => {
         this.exitResolver = resolve;
       });
@@ -633,8 +805,26 @@ export class TerminalUi {
   // 按键分发：审批界面优先于一切普通输入；滚动键独立于输入框；其余才落到输入编辑。
   handleKey(input: string, key: Key): void {
     const state = this.store.get();
+    if (state.confirmation) {
+      const confirmed = !key.ctrl && !key.meta && input.toLowerCase() === 'y';
+      if (confirmed || input.toLowerCase() === 'n' || key.escape || key.return || (key.ctrl && ['c', 'd'].includes(input))) {
+        this.store.update((s) => ({ ...s, confirmation: undefined }));
+        state.confirmation.resolve(confirmed);
+      }
+      return;
+    }
     if (state.approval) {
       this.handleApprovalKey(input, key);
+      return;
+    }
+    if (state.planApproval) {
+      this.handlePlanApprovalKey(input, key);
+      return;
+    }
+    // Shift+Tab 在大多数终端由 Ink 暴露为 key.tab + key.shift；CSI Z 和
+    // Ctrl+P 是无法区分组合键时的兼容入口。
+    if ((key.tab && key.shift) || input === '\u001b[Z' || (key.ctrl && input.toLowerCase() === 'p')) {
+      void this.cyclePhase();
       return;
     }
     if (key.shift && key.upArrow) {
@@ -666,7 +856,32 @@ export class TerminalUi {
       this.quit();
       return;
     }
+    const menu = this.commandMenu(state.input);
+    if (menu.visible && key.escape) {
+      this.store.update((s) => ({ ...s, commandMenuDismissed: true }));
+      return;
+    }
+    if (menu.visible && key.upArrow) {
+      this.store.update((s) => ({
+        ...s,
+        commandMenuSelection: Math.max(0, Math.min(menu.items.length - 1, s.commandMenuSelection - 1)),
+      }));
+      return;
+    }
+    if (menu.visible && key.downArrow) {
+      this.store.update((s) => ({
+        ...s,
+        commandMenuSelection: Math.min(menu.items.length - 1, s.commandMenuSelection + 1),
+      }));
+      return;
+    }
+    if (key.tab && menu.items.length > 0) {
+      if (menu.visible) this.completeSelectedCommand(menu);
+      else this.store.update((s) => ({ ...s, commandMenuDismissed: false }));
+      return;
+    }
     if (key.return) {
+      if (menu.visible && this.confirmSelectedCommand(menu)) return;
       void this.submit();
       return;
     }
@@ -678,23 +893,94 @@ export class TerminalUi {
       this.history(1);
       return;
     }
+    if (key.leftArrow || key.rightArrow || key.home || key.end || (key.ctrl && (input === 'a' || input === 'e'))) {
+      const cursor = key.ctrl || key.home || key.end ? (key.home || input === 'a' ? 0 : state.input.length)
+        : adjacentCursor(state.input, state.inputCursor, key.leftArrow ? -1 : 1);
+      this.store.update((s) => ({ ...s, inputCursor: cursor, commandMenuDismissed: true }));
+      return;
+    }
     if (key.backspace || key.delete) {
-      this.store.update((s) => ({ ...s, input: s.input.slice(0, -1) }));
+      const start = key.backspace ? adjacentCursor(state.input, state.inputCursor, -1) : state.inputCursor;
+      const end = key.backspace ? state.inputCursor : adjacentCursor(state.input, state.inputCursor, 1);
+      this.setInput(state.input.slice(0, start) + state.input.slice(end), start);
       return;
     }
     // 过滤控制字符：raw mode 下组合键会产生转义序列，只有可打印字符才进输入框。
-    if (input && !key.meta) {
-      const printable = [...input].every((character) => character >= ' ' && character !== '');
+    if (input && !key.meta && !key.ctrl) {
+      input = input.replace(/\r\n?/gu, '\n');
+      const printable = [...input].every((character) => (character >= ' ' && character !== '') || character === '\n' || character === '\t');
       if (printable) {
         // 20_000 字符上限：防止粘贴超长内容把 TUI 渲染拖垮。
-        this.store.update((s) => ({ ...s, input: (s.input + input).slice(0, 20000) }));
+        const inserted = input.slice(0, Math.max(0, 20000 - state.input.length));
+        this.setInput(state.input.slice(0, state.inputCursor) + inserted + state.input.slice(state.inputCursor), state.inputCursor + inserted.length);
       }
     }
+  }
+
+  private setInput(input: string, cursor = input.length): void {
+    this.store.update((s) => ({
+      ...s,
+      input,
+      inputCursor: cursor,
+      argumentInput: '',
+      argumentCandidates: [],
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
+    }));
+    this.refreshArguments(input);
+  }
+
+  private refreshArguments(input: string): void {
+    const generation = ++this.completionGeneration;
+    clearTimeout(this.completionTimer);
+    const token = input.trimStart().split(/\s/u)[0]?.toLowerCase();
+    const descriptor = getCommandCatalog(this.catalogContext()).find((item) => item.name === token || item.aliases?.includes(token ?? ''));
+    if (!descriptor?.acceptsArguments || !/\s/u.test(input.trimStart())) return;
+    const state = this.store.get();
+    this.completionTimer = setTimeout(() => {
+      void completeArguments(input, {
+        workspaceRoot: state.workspaceRoot,
+        currentSessionId: state.sessionId,
+        listSessions: this.options.listSessions,
+        listTasks: this.options.backgroundTasks ? () => this.options.backgroundTasks!.list() : undefined,
+        listCheckpoints: this.options.listCheckpoints,
+        listRewindCheckpoints: this.options.listRewindCheckpoints,
+        listHooks: this.options.hooks ? () => this.options.hooks!.list() : undefined,
+      }).then((candidates) => {
+        if (this.stopped || generation !== this.completionGeneration || this.store.get().input !== input) return;
+        this.store.update((s) => ({ ...s, argumentInput: input,
+          argumentCandidates: candidates.map((candidate) => ({ ...descriptor, ...candidate, usage: candidate.name })),
+        }));
+      }).catch(() => undefined);
+    }, 60);
+    this.completionTimer.unref();
+  }
+
+  private completeSelectedCommand(menu: { items: readonly MenuCandidate[]; selected: number }): void {
+    const command = menu.items[menu.selected];
+    if (!command) return;
+    this.setInput(command.replacement ?? completeCommand(this.store.get().input, command));
+    if (command.replacement) this.store.update((s) => ({ ...s, commandMenuDismissed: true }));
+  }
+
+  private confirmSelectedCommand(menu: { items: readonly MenuCandidate[]; selected: number }): boolean {
+    const command = menu.items[menu.selected];
+    if (!command) return false;
+    const currentInput = this.store.get().input;
+    this.setInput(command.replacement ?? completeCommand(currentInput, command));
+    if (command.replacement) this.store.update((s) => ({ ...s, commandMenuDismissed: true }));
+    if (!command.acceptsArguments && !command.replacement) void this.submit();
+    return true;
   }
 
   private handleApprovalKey(input: string, key: Key): void {
     const approval = this.store.get().approval;
     if (!approval) return;
+    if (key.escape || (key.ctrl && ['c', 'd'].includes(input))) {
+      this.resolveApproval({ decision: 'deny', scope: 'once', decidedAt: new Date().toISOString(), reason: '用户取消审批' });
+      if (key.ctrl) this.activeAbort?.abort('user_cancelled');
+      return;
+    }
     const char = input.toLowerCase();
     if (approval.stage === 'decision') {
       if (char === 'n' || key.escape || input === '\u001b') {
@@ -727,98 +1013,208 @@ export class TerminalUi {
     approval?.resolve(decision);
   }
 
+  private handlePlanApprovalKey(input: string, key: Key): void {
+    const approval = this.store.get().planApproval;
+    if (!approval) return;
+    if (approval.stage === 'edit') {
+      if (key.escape) {
+        this.setInput('');
+        this.store.update((s) => ({ ...s, planApproval: s.planApproval ? { ...s.planApproval, stage: 'decision' } : undefined }));
+        return;
+      }
+      if (key.return) {
+        const parsed = parseAgentPlan(this.store.get().input);
+        const edited = parsed.verified ? parsed.value : fallbackPlan(this.store.get().input);
+        void this.resolvePlanDecision('edited', edited);
+        return;
+      }
+      const state = this.store.get();
+      if (key.backspace || key.delete) {
+        const start = key.backspace ? adjacentCursor(state.input, state.inputCursor, -1) : state.inputCursor;
+        const end = key.backspace ? state.inputCursor : adjacentCursor(state.input, state.inputCursor, 1);
+        this.setInput(state.input.slice(0, start) + state.input.slice(end), start);
+      } else if (input && !key.ctrl && !key.meta) {
+        this.setInput(state.input.slice(0, state.inputCursor) + input + state.input.slice(state.inputCursor), state.inputCursor + input.length);
+      }
+      return;
+    }
+    const action = input.toLowerCase();
+    if (action === 'n' || key.escape) void this.resolvePlanDecision('rejected');
+    else if (action === 'y') void this.resolvePlanDecision('approved', approval.plan);
+    else if (action === 'g') void this.resolvePlanDecision('goal', approval.plan);
+    else if (action === 'e') {
+      this.setInput(JSON.stringify(approval.plan));
+      this.store.update((s) => ({ ...s, planApproval: s.planApproval ? { ...s.planApproval, stage: 'edit' } : undefined }));
+    }
+  }
+
+  private async resolvePlanDecision(
+    decision: 'approved' | 'edited' | 'rejected' | 'goal',
+    plan?: AgentPlan,
+  ): Promise<void> {
+    const approval = this.store.get().planApproval;
+    if (!approval || !this.options.plans) return;
+    try {
+      if (decision === 'goal') {
+        if (!plan) throw new Error('批准计划必须包含计划内容');
+        const goal = await this.options.plans.approveAsGoal(approval.planId, plan, false);
+        this.store.update((s) => ({ ...s, goal, phase: 'execute' }));
+      } else {
+        await this.options.plans.decide(approval.planId, decision, plan);
+        if (decision !== 'rejected') this.store.update((s) => ({ ...s, phase: 'execute' }));
+      }
+      this.setInput('');
+      this.store.update((s) => ({ ...s, planApproval: undefined }));
+      this.pushNotice(decision === 'rejected'
+        ? '计划已拒绝；仍处规划阶段，可继续补充要求。'
+        : decision === 'goal' ? '计划已批准并设为目标。' : '计划已批准，已切换执行阶段。',
+      decision === 'rejected' ? 'warn' : 'success');
+    } catch (error) {
+      this.pushNotice(message(error), 'error');
+    }
+  }
+
   private history(direction: number): void {
     const state = this.store.get();
     if (state.history.length === 0) return;
     let index = state.historyIndex < 0 ? state.history.length : state.historyIndex;
     index = Math.min(Math.max(0, index + direction), state.history.length);
-    const value = index === state.history.length ? '' : state.history[index] ?? '';
+    const draft = state.historyIndex < 0 ? state.input : state.historyDraft;
+    const value = index === state.history.length ? draft : state.history[index] ?? '';
+    this.setInput(value);
     this.store.update((s) => ({
       ...s,
       historyIndex: index === state.history.length ? -1 : index,
       input: value,
+      historyDraft: draft,
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
     }));
   }
 
   private async submit(): Promise<void> {
     const state = this.store.get();
-    const prompt = state.input.trim();
-    // busy 时忽略提交：活动 Turn 期间不允许再发起新输入，避免并发运行。
-    if (!prompt || state.busy) return;
+    if (!state.input.trim()) return;
+    const parsed = parseCommandInput(state.input, this.catalogContext());
+    if (parsed.error) { this.pushNotice(parsed.error, 'warn'); return; }
+    const prompt = parsed.input;
+    const canRunWhileBusy = Boolean(parsed.command?.availableDuringTask);
+    if (state.busy && (!this.activeAbort || (!prompt.startsWith('/steer ') && !canRunWhileBusy))) {
+      this.pushNotice('当前操作尚未结束；运行中的补充要求请使用 /steer <要求>。', 'warn');
+      return;
+    }
+    this.setInput('');
     // 历史只保留最近 100 条，防止长会话里历史列表无限增长。
-    this.store.update((s) => ({ ...s, input: '', history: [...s.history, prompt].slice(-100), historyIndex: -1 }));
+    this.store.update((s) => ({
+      ...s,
+      input: '',
+      inputCursor: 0,
+      historyDraft: '',
+      argumentInput: '',
+      argumentCandidates: [],
+      history: [...s.history, prompt].slice(-100),
+      historyIndex: -1,
+      commandMenuSelection: 0,
+      commandMenuDismissed: false,
+    }));
     this.pushUser(prompt);
+
+    if (state.busy && prompt.startsWith('/steer ')) {
+      try {
+        await this.options.steer(prompt.slice('/steer '.length));
+        this.pushNotice('补充要求已排队，将在下一模型步骤消费；若本轮已结束可用 /resume 继续。', 'info');
+      } catch (error) { this.pushNotice(message(error), 'error'); }
+      return;
+    }
 
     if (prompt === '/exit' || prompt === '/quit') {
       this.quit();
       return;
     }
     if (prompt === '/help') {
-      this.pushNotice(
-        '/resume 继续 | /sessions 会话 | /tasks 后台任务 | /task help 委托 | /verify 验证 | /rollback <id> 回滚 | /steer <要求> | /clear 清屏 | /exit 退出',
-        'info',
-      );
-      return;
-    }
-    if (isBackgroundTaskCommand(prompt)) {
-      if (!this.options.backgroundTasks) {
-        this.pushNotice('后台任务服务不可用。', 'warn');
-        return;
-      }
-      await this.runTask('正在处理后台任务...', async () => {
-        const result = await executeBackgroundTaskCommand(prompt, this.options.backgroundTasks!);
-        for (const line of result.lines) this.pushNotice(line, 'info');
-      });
+      for (const line of formatCommandHelp(this.catalogContext())) this.pushNotice(line, 'info');
       return;
     }
     if (prompt === '/clear') {
       this.store.update((s) => ({ ...s, transcript: [], scrollFromBottom: 0 }));
       return;
     }
-    if (prompt === '/sessions') {
-      await this.runTask('正在读取会话...', async () => {
-        const sessions = await this.options.listSessions();
-        if (sessions.length === 0) {
-          this.pushNotice('暂无 Session。', 'info');
-          return;
+    if (isServiceCommand(prompt)) {
+      if (state.busy) {
+        try {
+          const result = await executeServiceCommand(prompt, this.options, {
+            currentSessionId: state.sessionId,
+            confirm: (text) => this.confirmDeletion(text),
+          });
+          if (result.changeSet) this.pushChangeSet(result.changeSet);
+          else for (const line of result.lines) this.pushNotice(line, 'info');
+          this.updatePhaseFromStatus(result.lines);
+          if (prompt.startsWith('/goal')) {
+            this.store.update((s) => ({ ...s, goal: this.options.goals?.status() }));
+          }
+        } catch (error) {
+          this.pushNotice(message(error), 'error');
         }
-        for (const item of sessions.slice(0, 20)) {
-          this.pushNotice(`${item.sessionId} | ${item.modifiedAt} | ${item.bytes} bytes`, 'info');
-        }
-      });
-      return;
-    }
-    if (prompt === '/verify') {
-      await this.runTask('正在验证...', async () => {
-        const results = await this.options.verify();
-        for (const result of results) this.pushNotice(`${result.id}: ${result.status} - ${result.summary}`, 'info');
-      });
-      return;
-    }
-    if (prompt.startsWith('/rollback')) {
-      const id = prompt.split(/\s+/u)[1];
-      if (!id) {
-        this.pushNotice('用法：/rollback <checkpoint-id>', 'warn');
         return;
       }
-      await this.runTask(`正在回滚 ${id}...`, async () => {
-        const result = await this.options.rollback(await this.options.loadCheckpoint(id));
-        this.pushNotice(`已恢复 ${result.restoredPaths.length} 个文件`, 'success');
-        for (const skipped of result.skippedPaths) this.pushNotice(`跳过后续修改：${skipped}`, 'warn');
+      await this.runTask('正在处理命令...', async () => {
+        const result = await executeServiceCommand(prompt, this.options, {
+          currentSessionId: state.sessionId,
+          confirm: (text) => this.confirmDeletion(text),
+        });
+        if (result.workspace) {
+          const workspace = result.workspace;
+          this.store.update((s) => ({ ...s, workspaceRoot: workspace.workspaceRoot, sessionId: workspace.sessionId, tokens: 0 }));
+        }
+        if (result.changeSet) this.pushChangeSet(result.changeSet);
+        else for (const line of result.lines) this.pushNotice(line, line.startsWith('警告：') ? 'warn' : 'info');
+        if (prompt.startsWith('/plan')) this.updatePhaseFromStatus(result.lines);
+        if (prompt.startsWith('/goal')) {
+          this.store.update((s) => ({ ...s, goal: this.options.goals?.status() }));
+        }
       });
+      return;
+    }
+    if (prompt === '/steer') {
+      this.pushNotice('用法：/steer <要求>', 'warn');
       return;
     }
     if (prompt.startsWith('/steer ')) {
-      await this.runTask('正在写入 steering...', async () => {
-        await this.options.steer(prompt.slice('/steer '.length));
-        this.pushNotice('steering 已写入', 'success');
-      });
+      await this.runAgent(prompt, true, prompt.slice('/steer '.length));
       return;
     }
     await this.runAgent(prompt, prompt === '/resume');
   }
 
-  private async runAgent(prompt: string, resume: boolean): Promise<void> {
+  private async cyclePhase(): Promise<void> {
+    if (!this.options.modelRouting) return;
+    const current = this.store.get().phase;
+    const next = current === 'plan' ? 'execute' : current === 'execute' ? 'auto' : 'plan';
+    try {
+      const lines = await this.options.modelRouting.configure(undefined, next);
+      this.store.update((s) => ({ ...s, phase: next === 'auto' ? 'auto' : next }));
+      for (const line of lines) this.pushNotice(`阶段已切换：${line}`, 'info');
+    } catch (error) {
+      this.pushNotice(message(error), 'error');
+    }
+  }
+
+  private updatePhaseFromStatus(lines: readonly string[]): void {
+    const phase = lines.find((line) => line.startsWith('phase='))?.slice('phase='.length);
+    if (phase === 'auto' || phase === 'plan' || phase === 'execute' || phase === 'verify') {
+      this.store.update((s) => ({ ...s, phase }));
+    }
+  }
+
+  private confirmDeletion(text: string): Promise<boolean> {
+    if (this.stopped) return Promise.resolve(false);
+    this.pushNotice(text, 'warn');
+    return new Promise((resolve) => this.store.update((s) => ({
+      ...s, scrollFromBottom: 0, confirmation: { message: text, resolve },
+    })));
+  }
+
+  private async runAgent(prompt: string, resume: boolean, steering?: string): Promise<void> {
     if (this.store.get().busy) return;
     this.store.update((s) => ({
       ...s,
@@ -828,6 +1224,7 @@ export class TerminalUi {
     }));
     this.activeAbort = new AbortController();
     try {
+      if (steering) await this.options.steer(steering);
       const result = resume
         ? await this.options.resume(this.activeAbort.signal, (event) => this.onEvent(event))
         : await this.options.run(prompt, this.activeAbort.signal, (event) => this.onEvent(event));
@@ -904,6 +1301,30 @@ export class TerminalUi {
         break;
       case 'run.started':
         break;
+      case 'route.configured':
+        this.store.update((s) => ({ ...s, phase: payload.routing.phaseOverride ?? 'auto' }));
+        this.pushNotice(`模型路由已更新：${payload.routing.mode} / ${payload.routing.phase}`, 'info');
+        break;
+      case 'route.selected':
+        this.store.update((s) => ({
+          ...s,
+          model: payload.actualModel ?? payload.model,
+          phase: (payload.phase as ExecutionPhase | undefined) ?? s.phase,
+          status: `模型 ${payload.model}：${payload.reason}`,
+          statusTone: 'info',
+        }));
+        if (payload.phase === 'plan' && !payload.phaseOverride && !this.autoPlanNoticeShown) {
+          this.autoPlanNoticeShown = true;
+          this.pushNotice('已按任务特征进入规划阶段（只读），/plan off 可退出', 'info');
+        }
+        if (payload.excluded?.length) this.pushNotice(`排除模型：${payload.excluded.map((item) => `${item.id}（${item.reason}）`).join('、')}`, 'info');
+        break;
+      case 'route.fallback':
+        this.pushNotice(`模型切换：${payload.fromModel} -> ${payload.toModel}（${payload.reason}）`, 'warn');
+        break;
+      case 'route.fallback_rejected':
+        this.pushNotice(`未切换模型：${payload.reason}`, 'warn');
+        break;
       case 'model.started':
         this.store.update((s) => ({ ...s, status: `模型步骤 ${payload.step + 1}`, statusTone: 'info' }));
         break;
@@ -953,6 +1374,12 @@ export class TerminalUi {
         });
         break;
       }
+      case 'hook.completed':
+        if (payload.status !== 'completed') {
+          this.pushNotice(`Hook ${payload.hookId}: ${payload.status} (${payload.reasonCode})`,
+            payload.status === 'denied' || payload.status === 'failed' ? 'warn' : 'dim');
+        }
+        break;
       case 'approval.requested':
         this.store.update((s) => ({ ...s, status: `等待审批：${payload.permission}`, statusTone: 'warn' }));
         break;
@@ -964,6 +1391,41 @@ export class TerminalUi {
         break;
       case 'verification.completed':
         if (!payload.verified) this.pushNotice(`结构化结果未验证，发现 ${payload.issueCount} 个问题`, 'warn');
+        else if (this.store.get().goal) this.pushNotice('验收标准可能已满足，使用 /goal done 确认', 'success');
+        break;
+      case 'verification.started':
+        this.store.update((s) => ({ ...s, status: `自动验证中：${payload.commands.join(', ')}`, statusTone: 'info' }));
+        break;
+      case 'verification.skipped':
+        this.pushNotice(`自动验证已跳过：${payload.reason}`, 'warn');
+        break;
+      case 'plan.proposed':
+        if (this.options.plans) {
+          this.store.update((s) => ({
+            ...s,
+            planApproval: {
+              planId: payload.planId,
+              plan: payload.plan ?? fallbackPlan(payload.raw ?? ''),
+              stage: 'decision',
+            },
+            status: '等待计划确认',
+            statusTone: 'warn',
+          }));
+        }
+        break;
+      case 'plan.decided':
+        break;
+      case 'goal.set':
+        this.store.update((s) => ({ ...s, goal: payload.goal }));
+        break;
+      case 'goal.progress':
+        this.store.update((s) => s.goal?.id === payload.goalId
+          ? { ...s, goal: { ...s.goal, evidence: [...s.goal.evidence, payload.evidence] } }
+          : s);
+        break;
+      case 'goal.closed':
+        this.store.update((s) => ({ ...s, goal: undefined }));
+        this.pushNotice(payload.status === 'met' ? '目标已完成' : '目标已放弃', payload.status === 'met' ? 'success' : 'warn');
         break;
       case 'run.completed':
         break;
@@ -1041,6 +1503,16 @@ export class TerminalUi {
     }));
   }
 
+  private pushChangeSet(changeSet: import('./runtime/change-set.js').ChangeSet): void {
+    const verification = changeSet.verification
+      ? `验证：${changeSet.verification.status}，问题 ${changeSet.verification.issueCount}`
+      : '验证：未记录';
+    const header = `变更包：${changeSet.files.length} 个文件，${changeSet.checkpointIds.length} 个 checkpoint${changeSet.truncated ? '（已截断）' : ''}；${verification}`;
+    const files = changeSet.files.map((file) => `${file.path} (${file.beforeExisted ? '修改' : '新增'} -> ${file.afterExisted ? '存在' : '删除'})`);
+    const text = [header, ...files, changeSet.diff || '[info] 没有可见差异'].join('\n');
+    this.store.update((s) => ({ ...s, transcript: [...s.transcript, { kind: 'patch', id: this.nid(), text }] }));
+  }
+
   private nid(): string {
     this.seq.value += 1;
     return `v${this.seq.value}`;
@@ -1050,9 +1522,12 @@ export class TerminalUi {
   private quit(): void {
     if (this.stopped) return;
     this.stopped = true;
+    clearTimeout(this.completionTimer);
+    this.completionGeneration += 1;
     // 退出即取消活动 Turn；挂起的审批按拒绝结算，避免调用方永远等不到决定。
     this.activeAbort?.abort('user_exit');
     const state = this.store.get();
+    state.confirmation?.resolve(false);
     if (state.approval) {
       this.store.update((s) => ({ ...s, approval: undefined }));
       state.approval.resolve({

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   mkdir,
   mkdtemp,
+  readFile,
   rename,
   rm,
   symlink,
@@ -10,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { PathPolicy, PathPolicyError } from '../../../../src/runtime/path-policy.js';
+import { PathPolicy, PathPolicyError, validatePatchPath, validateRelativePath } from '../../../../src/runtime/path-policy.js';
 
 test('PathPolicy rejects Windows namespace, ADS, short-name, reserved, and escape syntax', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-path-policy-'));
@@ -60,15 +61,13 @@ test('PathPolicy reads normal files through a verified handle and preserves Wind
   }
 });
 
-test('PathPolicy rejects file symlinks and directory junctions', async (t) => {
+test('PathPolicy rejects directory junctions', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-path-links-'));
   const outside = await mkdtemp(join(tmpdir(), 'echolens-path-outside-'));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),
   ]));
-  const outsideFile = join(outside, 'secret.ts');
-  await writeFile(outsideFile, 'outside secret', 'utf8');
   // Junction 在 Windows 上无需提权即可创建，是最易被滥用的重解析点；这里验证它会被拒绝。
   await symlink(outside, join(root, 'junction'), process.platform === 'win32' ? 'junction' : 'dir');
   const policy = await PathPolicy.create(root);
@@ -78,18 +77,35 @@ test('PathPolicy rejects file symlinks and directory junctions', async (t) => {
     assert.equal(error.code, 'reparse_point_denied');
     return true;
   });
+  await assert.rejects(policy.createFile('junction\\new.ts'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'reparse_point_denied');
+  await assert.rejects(policy.deleteFile('junction\\secret.ts'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'reparse_point_denied');
+});
 
+test('PathPolicy rejects file symlinks when the environment supports creating them', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-path-file-link-'));
+  const outside = await mkdtemp(join(tmpdir(), 'echolens-path-file-outside-'));
+  t.after(() => Promise.all([
+    rm(root, { recursive: true, force: true }),
+    rm(outside, { recursive: true, force: true }),
+  ]));
+  const outsideFile = join(outside, 'secret.ts');
+  await writeFile(outsideFile, 'outside secret', 'utf8');
+
+  const linkPath = join(root, 'file-link.ts');
   try {
-    await symlink(outsideFile, join(root, 'file-link.ts'), 'file');
+    await symlink(outsideFile, linkPath, 'file');
   } catch (error) {
-    // Windows 默认不允许普通用户创建文件符号链接（需 Developer Mode 或提权），EPERM 时放弃
-    // 文件链接用例，仅保留已验证的 Junction 拒绝分支，避免测试在该环境下稳定失败。
-    if (isNodeError(error) && error.code === 'EPERM') {
-      t.diagnostic('Windows 未授予创建文件符号链接的权限；Junction 拒绝已验证。');
-      return;
-    }
-    throw error;
+    t.diagnostic(`当前环境不支持创建文件符号链接；跳过该能力分支。${JSON.stringify({
+      platform: process.platform,
+      code: isNodeError(error) ? error.code : undefined,
+      message: error instanceof Error ? error.message : String(error),
+    })}`);
+    return;
   }
+
+  const policy = await PathPolicy.create(root);
   await assert.rejects(policy.readTextFile('file-link.ts'), (error: unknown) => {
     assert.ok(error instanceof PathPolicyError);
     assert.equal(error.code, 'reparse_point_denied');
@@ -135,6 +151,27 @@ test('PathPolicy rejects text files above the configured read limit', async (t) 
     assert.equal(error.code, 'file_too_large');
     return true;
   });
+  await assert.rejects(policy.readFileBytes('large.ts', 10), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'file_too_large');
+});
+
+test('PathPolicy 根目录被替换后拒绝继续读写', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-path-root-race-'));
+  const moved = `${root}-moved`;
+  t.after(() => Promise.all([
+    rm(root, { recursive: true, force: true }),
+    rm(moved, { recursive: true, force: true }),
+  ]));
+  await writeFile(join(root, 'file.txt'), 'old root');
+  const policy = await PathPolicy.create(root);
+  await rename(root, moved);
+  await mkdir(root);
+  await writeFile(join(root, 'file.txt'), 'new root');
+  await assert.rejects(policy.readTextFile('file.txt'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'workspace_changed');
+  await assert.rejects(policy.createFile('created.txt'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'workspace_changed');
+  await assert.rejects(readFile(join(root, 'created.txt')));
 });
 
 test('workspace tools reject explicit junction traversal with a structured path policy code', async (t) => {
@@ -168,6 +205,86 @@ test('workspace tools reject explicit junction traversal with a structured path 
   assert.deepEqual(result.error?.data, { pathPolicyCode: 'reparse_point_denied' });
 });
 
+test('PathPolicy enforces handle kinds, read limits, classifications, and absolute-path syntax', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-path-boundaries-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'folder'));
+  await writeFile(join(root, 'file.txt'), 'content');
+  const policy = await PathPolicy.create(root);
+
+  assert.equal(policy.classifyPath('file.txt').scope, 'workspace');
+  assert.equal(policy.classifyPath('../outside.txt').scope, 'denied');
+  await assert.rejects(policy.readTextFile('file.txt', 0), (error: unknown) => error instanceof PathPolicyError && error.code === 'invalid_path');
+  await assert.rejects(policy.readFileBytes('file.txt', Number.MAX_SAFE_INTEGER), (error: unknown) => error instanceof PathPolicyError && error.code === 'invalid_path');
+  await assert.rejects(policy.resolveExisting('file.txt', 'directory'), (error: unknown) => error instanceof PathPolicyError && error.code === 'not_a_directory');
+  await assert.rejects(policy.resolveExisting('folder', 'file'), (error: unknown) => error instanceof PathPolicyError && error.code === 'not_a_file');
+  await assert.rejects(policy.readDirectory('file.txt'), (error: unknown) => error instanceof PathPolicyError && error.code === 'not_a_directory');
+  await assert.rejects(policy.resolveExisting(join(root, 'file.txt')), (error: unknown) => error instanceof PathPolicyError && error.code === 'absolute_path');
+  await assert.rejects(policy.resolveExisting('file.txt:secret'), (error: unknown) => error instanceof PathPolicyError && error.code === 'alternate_data_stream');
+  await assert.rejects(policy.resolveExisting('bad|name.txt'), (error: unknown) => error instanceof PathPolicyError && error.code === 'invalid_path');
+});
+
+test('PathPolicy performs verified create, byte-read, directory-read, and delete operations', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-path-io-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'nested'));
+  const policy = await PathPolicy.create(root);
+
+  const created = await policy.createFile('nested/new.txt');
+  await created.handle.writeFile('binary\0payload');
+  await created.handle.close();
+
+  const bytes = await policy.readFileBytes('nested/new.txt');
+  assert.equal(bytes.bytes.toString('utf8'), 'binary\0payload');
+  const directory = await policy.readDirectory('nested');
+  assert.deepEqual(directory.entries.map((entry) => entry.name), ['new.txt']);
+
+  await assert.rejects(policy.createFile('nested/new.txt'), (error: unknown) => error instanceof PathPolicyError && error.code === 'path_io_error');
+  assert.match(await policy.deleteFile('nested/new.txt'), /new\.txt$/u);
+  await assert.rejects(policy.deleteFile('nested/new.txt'), (error: unknown) => error instanceof PathPolicyError && error.code === 'path_not_found');
+});
+
+test('PathPolicy creation fails closed for missing, non-directory, and reparse roots', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'echolens-path-roots-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  await assert.rejects(PathPolicy.create(join(parent, 'missing')), (error: unknown) => error instanceof PathPolicyError && error.code === 'path_not_found');
+
+  const fileRoot = join(parent, 'file-root');
+  await writeFile(fileRoot, 'not a directory', 'utf8');
+  await assert.rejects(PathPolicy.create(fileRoot), (error: unknown) => error instanceof PathPolicyError && error.code === 'not_a_directory');
+
+  const realRoot = join(parent, 'real-root');
+  await mkdir(realRoot);
+  const linkedRoot = join(parent, 'linked-root');
+  try {
+    await symlink(realRoot, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    t.diagnostic(`当前环境不支持创建根目录链接，跳过链接根分支。${JSON.stringify({ code: isNodeError(error) ? error.code : undefined })}`);
+    return;
+  }
+  await assert.rejects(PathPolicy.create(linkedRoot), (error: unknown) => error instanceof PathPolicyError && error.code === 'reparse_point_denied');
+});
+
+test('路径校验器覆盖空值、长度、绝对语法与保留名称边界', () => {
+  const cases: Array<[unknown, string]> = [
+    ['', 'invalid_path'], [null, 'invalid_path'], ['a\0b', 'invalid_path'],
+    ['a'.repeat(32_001), 'path_too_long'],
+    ['\\\\server\\share', 'unc_path'], ['\\\\?\\C:\\file', 'device_path'],
+    ['/absolute/file', 'absolute_path'], ['a:b', 'alternate_data_stream'],
+    ['bad|name', 'invalid_path'], ['name. ', 'trailing_dot_or_space'],
+    ['SOURCE~1', 'short_name'], ['NUL.txt', 'reserved_name'], ['.git/file', 'git_metadata_denied'],
+    ['.echolens/file', 'private_metadata_denied'], ['..\\outside', 'path_outside_workspace'],
+  ];
+  for (const [value] of cases) {
+    assert.throws(() => validateRelativePath(value as string));
+  }
+  assert.throws(() => validateRelativePath('C:relative'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'drive_relative_path');
+  assert.doesNotThrow(() => validatePatchPath('C:\\workspace\\file.txt'));
+  assert.throws(() => validatePatchPath('\\\\server\\share\\file'), (error: unknown) =>
+    error instanceof PathPolicyError && error.code === 'unc_path');
+});
+
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error;
+  return error instanceof Error && 'code' in error;
 }

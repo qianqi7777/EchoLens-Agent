@@ -71,12 +71,26 @@ export async function acquireFileLock(
         },
       };
     } catch (error) {
-      if (!isNodeError(error, 'EEXIST')) throw error;
+      // Windows 在并发 `open(..., 'wx')` 时可能把共享冲突报告为 EPERM/EACCES，
+      // 而不是 POSIX 常见的 EEXIST。只有确认锁路径仍存在时才把它归为竞争，
+      // 避免把真实目录权限错误静默重试。
+      if (!(isNodeError(error, 'EEXIST')
+        || ((isNodeError(error, 'EPERM') || isNodeError(error, 'EACCES')) && await lockPathExists(path)))) throw error;
       if (await removeStaleLock(path, staleMs, now, processAlive)) continue;
       const remaining = deadline - now();
       if (remaining <= 0) throw new FileLockError(path);
       await delay(Math.min(retryDelayMs, remaining));
     }
+  }
+}
+
+async function lockPathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
+    throw error;
   }
 }
 

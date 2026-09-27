@@ -46,6 +46,7 @@ function registerRemoteTool(
             value: Number(progress.progress),
             total: typeof progress.total === 'number' ? progress.total : undefined,
           }),
+          context.approvalContext?.turnId,
         );
         return remoteToolResult(catalog.serverId, tool.name, result);
       } catch (error) {
@@ -258,6 +259,9 @@ function mcpFailure(error: unknown, fallback: string): ToolResult {
   // 只透传类型化的 McpClientError；未知异常一律替换为稳定描述，避免向调用方
   // 泄露 SDK 或服务器内部错误细节。
   const message = error instanceof McpClientError ? error.message : fallback;
+  if (error instanceof McpClientError && error.code === 'mcp_quota_exceeded') {
+    return toolFailure('denied', 'mcp_quota_exceeded', message, { retryable: false });
+  }
   return toolFailure('failed', 'mcp_request_failed', message);
 }
 

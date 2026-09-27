@@ -1,8 +1,6 @@
-import {
-  previewPatch,
-  previewSandboxPatch,
-  type ApprovalRequest,
-} from './runtime/index.js';
+import { previewPatch } from './runtime/structured-patch.js';
+import { previewSandboxPatch } from './runtime/sandbox-tools.js';
+import { type ApprovalRequest } from './runtime/approval.js';
 
 /** 审批 UI 的展示数据。`diff` 仅用于人工阅读，不参与任何执行路径。 */
 export interface ApprovalPreview {

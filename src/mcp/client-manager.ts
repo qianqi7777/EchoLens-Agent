@@ -11,8 +11,10 @@ import {
   type VersionNegotiationMode,
 } from '@modelcontextprotocol/client';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/client/stdio';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import * as path from 'node:path';
 import { PathPolicy } from '../runtime/path-policy.js';
-import type { McpProgressEvent, McpServerCatalog, McpServerConfig } from './types.js';
+import type { McpProgressEvent, McpQuotaEvent, McpQuotaUsage, McpServerCatalog, McpServerConfig } from './types.js';
 
 interface ConnectedServer {
   config: McpServerConfig;
@@ -23,11 +25,13 @@ interface ConnectedServer {
 export interface McpClientManagerOptions {
   transportFactory?: (config: McpServerConfig) => Promise<Transport> | Transport;
   onProgress?: (event: McpProgressEvent) => void;
+  onQuotaExceeded?: (event: McpQuotaEvent) => void | Promise<void>;
+  sessionId?: string;
 }
 
 export class McpClientError extends Error {
   constructor(
-    readonly code: 'mcp_config_invalid' | 'mcp_connection_failed' | 'mcp_request_failed',
+    readonly code: 'mcp_config_invalid' | 'mcp_connection_failed' | 'mcp_request_failed' | 'mcp_quota_exceeded',
     message: string,
   ) {
     super(message);
@@ -43,11 +47,19 @@ export class McpClientError extends Error {
  */
 export class McpClientManager {
   private readonly connections = new Map<string, ConnectedServer>();
+  private readonly usage = new Map<string, McpQuotaUsage>();
+  private readonly usagePath: string;
+  private readonly usageReady: Promise<void>;
+  private quotaQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly workspaceRoot: string,
     private readonly options: McpClientManagerOptions = {},
-  ) {}
+  ) {
+    if (options.sessionId && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(options.sessionId)) throw new McpClientError('mcp_config_invalid', 'MCP 配额 Session ID 无效');
+    this.usagePath = path.join(this.workspaceRoot, '.echolens', options.sessionId ? `mcp-quota-${options.sessionId}.json` : 'mcp-quota.json');
+    this.usageReady = this.loadUsage();
+  }
 
   async connectAll(configs: readonly McpServerConfig[], signal?: AbortSignal): Promise<McpServerCatalog[]> {
     const connected: McpServerCatalog[] = [];
@@ -133,14 +145,16 @@ export class McpClientManager {
     args: Record<string, unknown>,
     signal?: AbortSignal,
     onProgress?: (progress: Progress) => void,
+    turnId?: string,
   ): Promise<CallToolResult> {
     const connection = this.connection(serverId);
     const definition = connection.catalog.tools.find((tool) => tool.name === name);
     if (!definition) throw new McpClientError('mcp_request_failed', `MCP 工具不存在：${serverId}/${name}`);
+    await this.reserveQuota(connection.config, turnId);
     try {
       // 参数先克隆再发送，避免调用方在途修改共享对象；请求携带 AbortSignal，
       // resetTimeoutOnProgress 使持续上报进度的长任务不被空闲超时中断。
-      return await connection.client.callTool(
+      const result = await connection.client.callTool(
         { name, arguments: structuredClone(args) },
         {
           ...requestOptions(connection.config, signal),
@@ -152,10 +166,56 @@ export class McpClientManager {
           resetTimeoutOnProgress: true,
         },
       );
-    } catch {
+      const maxOutput = connection.config.quota?.maxOutputBytes;
+      if (maxOutput !== undefined && Buffer.byteLength(JSON.stringify(result), 'utf8') > maxOutput) {
+        await this.quotaExceeded({ serverId, reasonCode: 'mcp_quota_output_bytes', callsPerSession: this.usage.get(serverId)?.callsPerSession ?? 0 });
+        throw new McpClientError('mcp_quota_exceeded', `MCP Server ${serverId} 单次输出超过配额`);
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof McpClientError && error.code === 'mcp_quota_exceeded') throw error;
       throw new McpClientError('mcp_request_failed', `MCP 工具调用失败：${serverId}/${name}`);
     }
   }
+
+  quotaUsage(): McpQuotaUsage[] { return [...this.usage.values()].map((item) => structuredClone(item)); }
+
+  private async reserveQuota(config: McpServerConfig, turnId?: string): Promise<void> {
+    await this.usageReady;
+    const quota = config.quota;
+    if (!quota) return;
+    const operation = this.quotaQueue.then(async () => {
+      const current = this.usage.get(config.id) ?? { serverId: config.id, callsPerSession: 0, callsByTurn: {} };
+      const callsThisTurn = turnId ? current.callsByTurn[turnId] ?? 0 : 0;
+      if (quota.maxCallsPerTurn !== undefined && turnId && callsThisTurn >= quota.maxCallsPerTurn) {
+        await this.quotaExceeded({ serverId: config.id, reasonCode: 'mcp_quota_calls_per_turn', callsPerSession: current.callsPerSession, callsThisTurn });
+        throw new McpClientError('mcp_quota_exceeded', `MCP Server ${config.id} 已超过本 Turn 调用配额`);
+      }
+      if (quota.maxCallsPerSession !== undefined && current.callsPerSession >= quota.maxCallsPerSession) {
+        await this.quotaExceeded({ serverId: config.id, reasonCode: 'mcp_quota_calls_per_session', callsPerSession: current.callsPerSession, callsThisTurn });
+        throw new McpClientError('mcp_quota_exceeded', `MCP Server ${config.id} 已超过会话调用配额`);
+      }
+      current.callsPerSession += 1;
+      if (turnId) current.callsByTurn[turnId] = callsThisTurn + 1;
+      current.maxCallsPerTurn = quota.maxCallsPerTurn;
+      current.maxCallsPerSession = quota.maxCallsPerSession;
+      current.maxOutputBytes = quota.maxOutputBytes;
+      this.usage.set(config.id, current);
+      await this.persistUsage();
+    });
+    this.quotaQueue = operation.catch(() => undefined);
+    await operation;
+  }
+
+  private async quotaExceeded(event: McpQuotaEvent): Promise<void> { await this.options.onQuotaExceeded?.(event); }
+  private async loadUsage(): Promise<void> {
+    try {
+      const value = JSON.parse(await readFile(this.usagePath, 'utf8')) as { version?: number; usage?: McpQuotaUsage[] };
+      if (value.version !== 1 || !Array.isArray(value.usage)) return;
+      for (const item of value.usage) if (item && typeof item.serverId === 'string' && Number.isInteger(item.callsPerSession)) this.usage.set(item.serverId, structuredClone(item));
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  private async persistUsage(): Promise<void> { await mkdir(path.dirname(this.usagePath), { recursive: true }); await writeFile(this.usagePath, `${JSON.stringify({ version: 1, usage: [...this.usage.values()] })}\n`, { encoding: 'utf8', mode: 0o600 }); }
 
   async readResource(serverId: string, uri: string, signal?: AbortSignal): Promise<ReadResourceResult> {
     const connection = this.connection(serverId);

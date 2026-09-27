@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "patch-create",
+  "version": "1.0.0",
+  "kind": "patch",
+  "title": "Apply a structured patch",
+  "prompt": "Create evidence.txt containing fixed-patch-evidence.",
+  "introducedAt": "2026-09-23T00:00:00.000Z",
+  "leakageRisk": "low",
+  "fixture": { "files": [] },
+  "grader": {
+    "type": "patch",
+    "requirePatch": true,
+    "checks": [],
+    "fileChecks": [{ "path": "evidence.txt", "exists": true, "contentIncludes": "fixed-patch-evidence" }]
+  }
+}

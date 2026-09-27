@@ -152,6 +152,34 @@ test('已输出增量后流中断不会自动重放', async () => {
   assert.equal(calls, 1);
 });
 
+test('流式连接网络失败在重试预算耗尽后保持网络错误分类', async () => {
+  let calls = 0;
+  const provider = new OpenAICompatibleProvider({
+    model: 'offline-stream-model', baseUrl: 'https://provider.example/v1', apiKey: 'test-key',
+    protocol: 'chat_completions', capabilities: { supportsStreaming: true },
+    retry: { maxRetries: 1, sleep: async () => {} },
+    fetch: async () => { calls += 1; throw new TypeError('offline'); },
+  });
+  await assert.rejects(collect(provider.stream!({ items: [textMessage('user', 'user', 'test')] })),
+    (error: unknown) => error instanceof ProviderError && error.kind === 'network'
+      && error.code === 'network_error' && error.attempts === 2);
+  assert.equal(calls, 2);
+});
+
+test('流式连接超时不会伪装为已完成响应', async () => {
+  const provider = new OpenAICompatibleProvider({
+    model: 'slow-stream-model', baseUrl: 'https://provider.example/v1', apiKey: 'test-key',
+    protocol: 'chat_completions', capabilities: { supportsStreaming: true },
+    requestTimeoutMs: 10, retry: { maxRetries: 0 },
+    fetch: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    }),
+  });
+  await assert.rejects(collect(provider.stream!({ items: [textMessage('user', 'user', 'test')] })),
+    (error: unknown) => error instanceof ProviderError && error.kind === 'timeout'
+      && error.code === 'upstream_timeout' && error.attempts === 1);
+});
+
 test('SSE 可解析跨网络分片的 CRLF 事件边界', async () => {
   // 网络分片故意把 CRLF 与事件边界切碎（chunks[1] 以 '\n' 续上 chunks[0] 末尾的 '\r'），
   // 验证解析器按事件重组，而非依赖网络层整行投递。

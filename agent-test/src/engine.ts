@@ -1,176 +1,157 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { PathPolicy, PathPolicyError } from '../../src/runtime/path-policy.js';
+import { redactText } from '../../src/providers/redaction.js';
+import { validateIssueSet } from './validation.js';
+import { runLabProcess } from './process.js';
 import type { IssueCase, IssueSet, ProviderConfig, ProviderIssueResult, ProviderSummary } from './types.js';
 
-const MAX_OUTPUT = 64 * 1024;
-
-export async function runComparison(
-  issueSet: IssueSet,
-  providers: ProviderConfig[],
-  repoRoot: string,
-  execute = false,
-): Promise<ProviderSummary[]> {
+export async function runComparison(issueSet: IssueSet, providers: ProviderConfig[], repoRoot: string,
+  execute = false, signal?: AbortSignal): Promise<ProviderSummary[]> {
   validateIssueSet(issueSet);
   if (execute && process.env.AGENT_TEST_ENABLE_EXTERNAL !== 'true') {
     throw new Error('真实 CLI 执行已锁定；请用 AGENT_TEST_ENABLE_EXTERNAL=true 启动服务');
   }
   const active = providers.filter((provider) => provider.enabled !== false);
-  return Promise.all(active.map((provider) => runProvider(provider, issueSet, repoRoot, execute)));
+  if (!active.length) throw new Error('至少选择一个 Provider');
+  signal?.throwIfAborted();
+  // Wait for cleanup from every provider before releasing the server's single-run slot.
+  const outcomes = await Promise.allSettled(active.map(async (provider): Promise<ProviderSummary> => {
+    const results: ProviderIssueResult[] = [];
+    for (const issue of issueSet.issues) {
+      signal?.throwIfAborted();
+      results.push(await runIssue(provider, issue, repoRoot, execute, signal));
+    }
+    const resolvedBugs = results.filter((result) => result.resolved).length;
+    return { providerId: provider.id, label: provider.label, totalIssues: results.length,
+      foundBugs: results.reduce((sum, result) => sum + result.foundBugs, 0), resolvedBugs,
+      resolutionRate: resolvedBugs / results.length,
+      averageDurationMs: results.reduce((sum, result) => sum + result.durationMs, 0) / results.length, results };
+  }));
+  signal?.throwIfAborted();
+  return outcomes.map((outcome) => {
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  });
 }
 
-async function runProvider(
-  provider: ProviderConfig,
-  issueSet: IssueSet,
-  repoRoot: string,
-  execute: boolean,
-): Promise<ProviderSummary> {
-  const results: ProviderIssueResult[] = [];
-  for (const issue of issueSet.issues) {
-    results.push(await runIssue(provider, issue, repoRoot, execute));
-  }
-  const duration = results.reduce((sum, result) => sum + result.durationMs, 0);
-  const resolvedBugs = results.filter((result) => result.resolved).length;
-  return {
-    providerId: provider.id,
-    label: provider.label,
-    totalIssues: results.length,
-    foundBugs: results.reduce((sum, result) => sum + result.foundBugs, 0),
-    resolvedBugs,
-    resolutionRate: results.length ? resolvedBugs / results.length : 0,
-    averageDurationMs: results.length ? duration / results.length : 0,
-    results,
-  };
-}
-
-async function runIssue(
-  provider: ProviderConfig,
-  issue: IssueCase,
-  repoRoot: string,
-  execute: boolean,
-): Promise<ProviderIssueResult> {
+async function runIssue(provider: ProviderConfig, issue: IssueCase, repoRoot: string,
+  execute: boolean, signal?: AbortSignal): Promise<ProviderIssueResult> {
   const started = Date.now();
+  const base = { providerId: provider.id, issueId: issue.id, foundBugs: 0, resolved: false, durationMs: 0, output: '' };
   if (!execute || provider.id === 'local-sim') {
-    const found = /bug|修复|错误|失败/iu.test(`${issue.title} ${issue.body ?? ''}`) ? 1 : 0;
-    return {
-      providerId: provider.id,
-      issueId: issue.id,
-      mode: 'simulated',
-      foundBugs: found,
-      resolved: false,
-      durationMs: 5,
-      output: 'dry-run: local simulation',
-    };
+    return { ...base, mode: 'simulated', verification: 'simulated',
+      foundBugs: /bug|修复|错误|失败/iu.test(`${issue.title} ${issue.body ?? ''}`) ? 1 : 0,
+      output: '本地模拟：未启动 CLI、未执行验证；发现数仅来自题目关键词，不代表 Agent 能力。' };
   }
-  if (!provider.command) {
-    return failure(provider, issue, started, '未配置 Provider command');
-  }
-  const worktree = await mkdtemp(path.join(tmpdir(), `echolens-agent-test-${issue.id}-`));
+  let worktree: string | undefined;
   try {
-    await copyFixture(repoRoot, worktree);
+    if (!provider.command) throw new Error('未配置 Provider command');
+    worktree = await mkdtemp(path.join(tmpdir(), 'echolens-agent-test-'));
+    await copyFixture(repoRoot, worktree, signal);
     const prompt = `${issue.title}\n\n${issue.body ?? ''}`;
-    const args = (provider.args ?? []).map((arg) => arg
-      .replaceAll('{prompt}', prompt)
-      .replaceAll('{repo}', worktree)
-      .replaceAll('{issue}', issue.id));
-    const command = await executeCommand(provider.command, args, worktree, 10 * 60_000);
-    const foundBugs = parseFoundBugs(command.stdout);
-    const hasChecks = Boolean(issue.checks?.length);
-    const checks = hasChecks && await runChecks(issue, worktree);
-    return {
-      providerId: provider.id,
-      issueId: issue.id,
-      mode: 'executed',
-      foundBugs,
-      resolved: command.exitCode === 0 && !command.timedOut && checks,
-      durationMs: Date.now() - started,
-      exitCode: command.exitCode,
-      timedOut: command.timedOut,
-      output: command.stdout.slice(0, MAX_OUTPUT),
-      error: command.stderr ? command.stderr.slice(0, 2_000) : undefined,
+    const args = (provider.args ?? []).map((arg) => arg.replaceAll('{prompt}', prompt)
+      .replaceAll('{repo}', worktree!).replaceAll('{issue}', issue.id));
+    const command = await runLabProcess(provider.command, args, worktree, 10 * 60_000, signal);
+    const success = command.exitCode === 0 && !command.timedOut && !command.cancelled;
+    const checks: NonNullable<ProviderIssueResult['checks']> = [];
+    if (success) {
+      for (const check of issue.checks ?? []) {
+        signal?.throwIfAborted();
+        const cwd = await realpath(path.resolve(worktree, check.cwd ?? '.'));
+        assertInside(await realpath(worktree), cwd);
+        const outcome = await runLabProcess(check.command.executable, check.command.args, cwd, check.timeoutMs ?? 60000, signal);
+        checks.push({ id: check.id, exitCode: outcome.exitCode,
+          passed: !outcome.timedOut && !outcome.cancelled && outcome.exitCode === (check.expectedExitCode ?? 0)
+            && (!check.stdoutIncludes || outcome.stdout.includes(check.stdoutIncludes)),
+          output: `${outcome.stdout}${outcome.stderr}${outcome.timedOut ? '\n验证超时' : ''}${outcome.truncated ? '\n[输出已截断]' : ''}` });
+        if (!checks.at(-1)!.passed) break;
+      }
+    }
+    const verified = Boolean(checks.length && checks.every((check) => check.passed));
+    return { ...base, mode: 'executed', foundBugs: parseFoundBugs(command.stdout),
+      resolved: success && verified, durationMs: Date.now() - started,
+      exitCode: command.exitCode, timedOut: command.timedOut, cancelled: command.cancelled,
+      outputTruncated: command.truncated, output: command.stdout, checks,
+      verification: !success ? 'not-run' : !checks.length ? 'missing' : verified ? 'passed' : 'failed',
+      error: command.cancelled ? '已取消' : command.timedOut ? 'CLI 执行超时' : command.stderr || (!success ? `CLI 退出码 ${command.exitCode}` : undefined),
     };
   } catch (error) {
-    return failure(provider, issue, started, error instanceof Error ? error.message : '执行失败');
+    return { ...base, mode: 'executed', verification: 'not-run', durationMs: Date.now() - started,
+      error: redactText(error instanceof Error ? error.message : '执行失败') };
   } finally {
-    await rm(worktree, { recursive: true, force: true });
+    if (worktree) {
+      assertInside(tmpdir(), worktree);
+      await rm(worktree, { recursive: true, force: true });
+    }
   }
 }
 
-async function copyFixture(source: string, target: string): Promise<void> {
-  const files = await walk(source, source);
+const PRIVATE_NAMES = new Set(['.git', '.echolens', '.workbuddy', '.codex', '.agents', '.ssh',
+  'node_modules', 'dist', 'build', 'coverage', 'studydoc', 'studydocs', 'agent-test', 'agents.md']);
+function isPublic(relative: string): boolean {
+  return !relative.split(/[\\/]/u).some((name) => PRIVATE_NAMES.has(name.toLowerCase())
+    || name.toLowerCase().startsWith('.env') || /\.(?:pem|key|pfx)$/iu.test(name));
+}
+
+async function copyFixture(source: string, target: string, signal?: AbortSignal): Promise<void> {
+  const policy = await PathPolicy.create(source);
+  let files: string[];
+  try {
+    const result = await promisify(execFile)('git', ['-C', source, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 10000, signal });
+    files = result.stdout.split('\0').filter(Boolean);
+  } catch {
+    signal?.throwIfAborted();
+    if (await lstat(path.join(source, '.git')).then(() => true, () => false)) throw new Error('无法读取 Git 文件清单，拒绝忽略私有文件规则');
+    files = await walk(policy, '.', signal);
+  }
+  files = [...new Set(files)].filter(isPublic);
+  if (files.length > 20000) throw new Error('副本文件数超过 20000');
+  let total = 0;
   for (const file of files) {
-    const relative = path.relative(source, file);
-    const destination = path.join(target, relative);
-    const content = await readFile(file);
+    signal?.throwIfAborted();
+    const data = await policy.readFileBytes(file, 2 * 1024 * 1024).catch((error) => {
+      if (error instanceof PathPolicyError && error.code === 'path_not_found') return undefined;
+      throw error;
+    });
+    if (!data) continue;
+    total += data.bytes.length;
+    if (total > 64 * 1024 * 1024) throw new Error('副本大小超过 64 MiB');
+    const destination = path.resolve(target, file);
+    assertInside(target, destination);
     await mkdir(path.dirname(destination), { recursive: true });
-    await writeFile(destination, content);
+    await writeFile(destination, data.bytes);
+    const info = await policy.resolveExisting(file, 'file');
+    if (Number(info.stat.mode) & 0o111) await chmod(destination, 0o755);
   }
 }
 
-async function walk(root: string, sourceRoot: string): Promise<string[]> {
-  const entries = await import('node:fs/promises').then((fs) => fs.readdir(root, { withFileTypes: true }));
-  const files: string[] = [];
-  for (const entry of entries) {
-    const target = path.join(root, entry.name);
-    const relative = path.relative(sourceRoot, target);
-    if (isPrivateOrGenerated(relative)) continue;
-    if (entry.isDirectory()) files.push(...await walk(target, sourceRoot));
-    else if (entry.isFile()) files.push(target);
+async function walk(policy: PathPolicy, directory: string, signal?: AbortSignal): Promise<string[]> {
+  signal?.throwIfAborted();
+  const result: string[] = [];
+  for (const entry of (await policy.readDirectory(directory)).entries) {
+    const relative = path.join(directory, entry.name);
+    if (!isPublic(relative) || entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) result.push(...await walk(policy, relative, signal));
+    else if (entry.isFile()) result.push(relative);
+    if (result.length > 20000) throw new Error('副本文件数超过 20000');
   }
-  return files;
+  return result;
 }
 
-function isPrivateOrGenerated(relative: string): boolean {
-  const first = relative.split(path.sep)[0]?.toLowerCase();
-  return ['.git', '.echolens', '.workbuddy', 'node_modules', 'dist', 'coverage', 'studydocs', 'agent-test'].includes(first ?? '')
-    || relative === 'AGENTS.md'
-    || path.basename(relative).startsWith('.env');
-}
-
-async function runChecks(issue: IssueCase, cwd: string): Promise<boolean> {
-  for (const check of issue.checks ?? []) {
-    const result = await executeCommand(check.command.executable, check.command.args, path.join(cwd, check.cwd ?? '.'), check.timeoutMs ?? 60_000);
-    const expected = check.expectedExitCode ?? 0;
-    if (result.exitCode !== expected || result.timedOut || (check.stdoutIncludes && !result.stdout.includes(check.stdoutIncludes))) return false;
-  }
-  return true;
-}
-
-function executeCommand(command: string, args: string[], cwd: string, timeoutMs: number): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, shell: false, windowsHide: true });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
-    child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-MAX_OUTPUT); });
-    child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-MAX_OUTPUT); });
-    child.on('error', (error) => { clearTimeout(timer); resolve({ exitCode: 1, stdout, stderr: error.message, timedOut }); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ exitCode: code ?? 1, stdout, stderr, timedOut }); });
-  });
+export function assertInside(root: string, target: string): void {
+  const relative = path.relative(root, target);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('路径越出允许的工作目录');
 }
 
 function parseFoundBugs(output: string): number {
   try {
     const value = JSON.parse(output.trim()) as { foundBugs?: unknown };
-    if (typeof value.foundBugs === 'number' && Number.isFinite(value.foundBugs)) return Math.max(0, Math.floor(value.foundBugs));
-  } catch { /* plain CLI output is supported below */ }
-  return (output.match(/\b(?:bug|issue|错误|缺陷)\b/giu) ?? []).length;
-}
-
-function failure(provider: ProviderConfig, issue: IssueCase, started: number, error: string): ProviderIssueResult {
-  return { providerId: provider.id, issueId: issue.id, mode: 'executed', foundBugs: 0, resolved: false, durationMs: Date.now() - started, output: '', error };
-}
-
-function validateIssueSet(value: IssueSet): void {
-  if (!value || typeof value.repo !== 'string' || !Array.isArray(value.issues)) throw new Error('Issue 数据格式无效');
-  if (value.issues.length > 100) throw new Error('单次最多评测 100 个 Issue');
-  for (const issue of value.issues) {
-    if (!issue.id || !issue.title) throw new Error('Issue 缺少 id 或 title');
-    if (issue.id.length > 200 || issue.title.length > 2_000 || (issue.body?.length ?? 0) > 100_000) {
-      throw new Error('Issue 字段过长');
-    }
-    if ((issue.checks?.length ?? 0) > 50) throw new Error('Issue 验证命令过多');
-  }
+    if (typeof value?.foundBugs === 'number' && Number.isFinite(value.foundBugs)) return Math.max(0, Math.floor(value.foundBugs));
+  } catch { /* Legacy CLI output uses a clearly labeled heuristic count. */ }
+  return (output.match(/\b(?:bug|issue)\b|错误|缺陷/giu) ?? []).length;
 }

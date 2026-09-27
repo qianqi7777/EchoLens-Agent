@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "skill": "test-runner",
+  "version": "1.0.0",
+  "assertions": [
+    { "id": "entrypoint", "type": "file_exists", "path": "SKILL.md" },
+    { "id": "reference", "type": "file_contains", "path": "references/workflow.md", "text": "Sandbox" },
+    { "id": "manifest", "type": "manifest_valid", "name": "test-runner", "descriptionIncludes": "when verifying" }
+  ]
+}

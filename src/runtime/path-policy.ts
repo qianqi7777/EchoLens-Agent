@@ -1,6 +1,7 @@
 import type { BigIntStats, Dirent } from 'node:fs';
 import { lstat, open, readdir, realpath, stat, unlink, type FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
+import { isWithin, loadAuthorizedRoots, type AuthorizedRoot } from './authorized-roots.js';
 
 export const DEFAULT_MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -66,6 +67,7 @@ export interface PathPolicyOptions {
     canonicalPath: string;
     kind: 'file' | 'directory';
   }) => Promise<void>;
+  authorizedRoots?: readonly AuthorizedRoot[];
 }
 
 interface ResolvedPath {
@@ -73,6 +75,10 @@ interface ResolvedPath {
   candidatePath: string;
   canonicalPath: string;
   stat: BigIntStats;
+  baseRoot: string;
+  external: boolean;
+  allowWrite: boolean;
+  intent: 'read' | 'write';
 }
 
 /**
@@ -88,6 +94,8 @@ export class PathPolicy {
     readonly workspaceRoot: string,
     private readonly rootIdentity: FileIdentity,
     private readonly options: PathPolicyOptions,
+    readonly authorizedRoots: readonly AuthorizedRoot[],
+    readonly authorizedRootWarnings: readonly string[],
   ) {}
 
   static async create(workspaceRoot: string, options: PathPolicyOptions = {}): Promise<PathPolicy> {
@@ -109,7 +117,17 @@ export class PathPolicy {
     if (!rootStat.isDirectory()) throw new PathPolicyError('not_a_directory', '工作区根路径不是目录');
     // 固化根目录身份（dev/ino）并在每次访问时重新比对，用于检测工作区根在运行期间被替换，
     // 避免后续操作落在已被迁移到别处的目录上。
-    return new PathPolicy(canonical, identity(rootStat), options);
+    const configured = options.authorizedRoots ? { roots: [...options.authorizedRoots], warnings: [] } : await loadAuthorizedRoots(canonical);
+    return new PathPolicy(canonical, identity(rootStat), options, configured.roots, configured.warnings);
+  }
+
+  /** 返回路径将落在哪个受信边界；未授权路径只返回 denied，不执行任何 IO。 */
+  classifyPath(input: string): { scope: 'workspace' | 'authorized' | 'denied'; absolutePath: string; root?: AuthorizedRoot } {
+    const candidate = candidatePath(this.workspaceRoot, input);
+    if (!candidate) return { scope: 'denied', absolutePath: input };
+    if (isWithin(this.workspaceRoot, candidate)) return { scope: 'workspace', absolutePath: candidate };
+    const root = this.authorizedRoots.find((item) => isWithin(item.canonicalPath, candidate));
+    return root ? { scope: 'authorized', absolutePath: candidate, root } : { scope: 'denied', absolutePath: candidate };
   }
 
   async readTextFile(
@@ -187,7 +205,7 @@ export class PathPolicy {
   }
 
   async openFileForWrite(input: string): Promise<VerifiedFile> {
-    const resolved = await this.resolveExisting(input, 'file');
+    const resolved = await this.resolveExisting(input, 'file', 'write');
     const handle = await open(resolved.candidatePath, 'r+').catch((error) => {
       throw ioError(error, '无法以写入方式打开工作区文件');
     });
@@ -201,14 +219,22 @@ export class PathPolicy {
   }
 
   async createFile(input: string): Promise<VerifiedCreateFile> {
-    validateRelativePath(input);
+    validatePathInput(input, true);
     await this.assertRootIdentity();
-    const candidatePath = path.resolve(this.workspaceRoot, platformPath(input));
-    this.assertInside(candidatePath);
-    this.assertForbiddenSegments(candidatePath);
+    const classification = this.classifyPath(input);
+    if (classification.scope === 'denied') throw new PathPolicyError('path_outside_workspace', '目标路径不在工作区或显式授权根内');
+    if (classification.scope === 'workspace' && isAbsoluteInput(input)) throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
+    if (classification.scope === 'authorized' && !classification.root?.allowWrite) throw new PathPolicyError('path_outside_workspace', '授权根未允许写入');
+    const candidatePath = classification.absolutePath;
+    const baseRoot = classification.scope === 'workspace' ? this.workspaceRoot : classification.root!.canonicalPath;
+    this.assertForbiddenSegments(candidatePath, baseRoot);
     const parentPath = path.dirname(candidatePath);
-    const parentRelative = path.relative(this.workspaceRoot, parentPath) || '.';
-    await this.resolveExisting(parentRelative, 'directory');
+    // 工作区内的父目录走相对路径，避免把内部绝对路径误判成用户输入的越界绝对路径；
+    // 显式授权根则保留绝对路径，以便继续通过授权根与 allowWrite 校验。
+    const parentInput = classification.scope === 'workspace'
+      ? (path.relative(this.workspaceRoot, parentPath).replaceAll(path.sep, '/') || '.')
+      : parentPath;
+    await this.resolveExisting(parentInput, 'directory', 'write');
     try {
       const handle = await open(candidatePath, 'wx+');
       try {
@@ -227,7 +253,7 @@ export class PathPolicy {
   }
 
   async deleteFile(input: string): Promise<string> {
-    const verified = await this.openFile(input);
+    const verified = await this.openFileForWrite(input);
     try {
       try {
         await unlink(verified.canonicalPath);
@@ -274,19 +300,29 @@ export class PathPolicy {
     }
   }
 
-  async resolveExisting(input: string, kind: 'file' | 'directory' | 'any' = 'any'): Promise<ResolvedPath> {
-    validateRelativePath(input);
+  async resolveExisting(input: string, kind: 'file' | 'directory' | 'any' = 'any', intent: 'read' | 'write' = 'read'): Promise<ResolvedPath> {
+    return this.resolveExistingWithIntent(input, kind, intent);
+  }
+
+  private async resolveExistingWithIntent(input: string, kind: 'file' | 'directory' | 'any', intent: 'read' | 'write'): Promise<ResolvedPath> {
+    validatePathInput(input, true);
     await this.assertRootIdentity();
-    const candidatePath = path.resolve(this.workspaceRoot, platformPath(input));
-    this.assertInside(candidatePath);
-    this.assertForbiddenSegments(candidatePath);
-    await this.assertNoLinkComponents(candidatePath);
+    const classification = this.classifyPath(input);
+    if (classification.scope === 'denied') throw new PathPolicyError('path_outside_workspace', '目标路径不在工作区或显式授权根内');
+    if (classification.scope === 'workspace' && isAbsoluteInput(input)) throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
+    if (intent === 'write' && classification.scope === 'authorized' && !classification.root?.allowWrite) {
+      throw new PathPolicyError('path_outside_workspace', '授权根未允许写入');
+    }
+    const candidatePath = classification.absolutePath;
+    const baseRoot = classification.scope === 'workspace' ? this.workspaceRoot : classification.root!.canonicalPath;
+    this.assertForbiddenSegments(candidatePath, baseRoot);
+    await this.assertNoLinkComponents(candidatePath, baseRoot);
 
     const canonicalPath = await realpath(candidatePath).catch((error) => {
       throw ioError(error, '工作区路径不存在或无法解析');
     });
-    this.assertInside(canonicalPath);
-    this.assertForbiddenSegments(canonicalPath);
+    this.assertAllowed(canonicalPath, intent);
+    this.assertForbiddenSegments(canonicalPath, baseRoot);
     const pathStat = await stat(canonicalPath, { bigint: true }).catch((error) => {
       throw ioError(error, '无法读取工作区路径');
     });
@@ -294,7 +330,10 @@ export class PathPolicy {
     if (kind === 'directory' && !pathStat.isDirectory()) {
       throw new PathPolicyError('not_a_directory', '目标不是目录');
     }
-    return { input, candidatePath, canonicalPath, stat: pathStat };
+    return {
+      input, candidatePath, canonicalPath, stat: pathStat,
+      baseRoot, external: classification.scope === 'authorized', allowWrite: classification.root?.allowWrite ?? true, intent,
+    };
   }
 
   private async verifyHandle(
@@ -320,12 +359,12 @@ export class PathPolicy {
       kind,
     });
     await this.assertRootIdentity();
-    await this.assertNoLinkComponents(resolved.candidatePath);
+    await this.assertNoLinkComponents(resolved.candidatePath, resolved.baseRoot);
     const finalPath = await realpath(resolved.candidatePath).catch((error) => {
       throw ioError(error, '打开后无法重新解析目标路径');
     });
-    this.assertInside(finalPath);
-    this.assertForbiddenSegments(finalPath);
+    this.assertAllowed(finalPath, resolved.intent);
+    this.assertForbiddenSegments(finalPath, resolved.baseRoot);
     const finalStat = await stat(finalPath, { bigint: true }).catch((error) => {
       throw ioError(error, '打开后无法读取目标路径');
     });
@@ -344,12 +383,14 @@ export class PathPolicy {
     if (!handleStat.isFile()) throw new PathPolicyError('not_a_file', '新建目标不是普通文件');
     await this.assertRootIdentity();
     const parentPath = path.dirname(candidatePath);
-    await this.assertNoLinkComponents(parentPath);
+    const classification = this.classifyPath(input);
+    const baseRoot = classification.scope === 'workspace' ? this.workspaceRoot : classification.root?.canonicalPath ?? this.workspaceRoot;
+    await this.assertNoLinkComponents(parentPath, baseRoot);
     const canonicalPath = await realpath(candidatePath).catch((error) => {
       throw ioError(error, '新建后无法解析目标路径');
     });
-    this.assertInside(canonicalPath);
-    this.assertForbiddenSegments(canonicalPath);
+    this.assertAllowed(canonicalPath, 'write');
+    this.assertForbiddenSegments(canonicalPath, baseRoot);
     const finalStat = await stat(canonicalPath, { bigint: true }).catch((error) => {
       throw ioError(error, '新建后无法读取目标路径');
     });
@@ -368,12 +409,12 @@ export class PathPolicy {
     }
   }
 
-  private async assertNoLinkComponents(candidatePath: string): Promise<void> {
-    const relative = path.relative(this.workspaceRoot, candidatePath);
+  private async assertNoLinkComponents(candidatePath: string, baseRoot = this.workspaceRoot): Promise<void> {
+    const relative = path.relative(baseRoot, candidatePath);
     if (!relative) return;
     // realpath 会静默跟随符号链接 / Junction，因此仅校验 canonicalPath 不足以拒绝链接；
     // 必须逐段 lstat，显式拒绝中间路径组件里出现的重解析点。相对路径为空即指向工作区根，无需检查。
-    let current = this.workspaceRoot;
+    let current = baseRoot;
     for (const segment of relative.split(path.sep).filter(Boolean)) {
       current = path.join(current, segment);
       const component = await lstat(current, { bigint: true }).catch((error) => {
@@ -385,18 +426,18 @@ export class PathPolicy {
     }
   }
 
-  private assertInside(candidatePath: string): void {
+  private assertAllowed(candidatePath: string, intent: 'read' | 'write'): void {
     // 用字符串前缀判断包含关系前先归一化（去尾部分隔符、Windows 统一小写），否则大小写或
     // 结尾分隔符的差异会让边界判断失真；候选路径等于工作区根时需单独放行。
-    const root = comparablePath(this.workspaceRoot);
     const candidate = comparablePath(path.resolve(candidatePath));
-    if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
-      throw new PathPolicyError('path_outside_workspace', '目标路径位于工作区之外');
-    }
+    const workspace = comparablePath(this.workspaceRoot);
+    if (candidate === workspace || candidate.startsWith(`${workspace}${path.sep}`)) return;
+    const root = this.authorizedRoots.find((item) => isWithin(item.canonicalPath, candidatePath));
+    if (!root || (intent === 'write' && !root.allowWrite)) throw new PathPolicyError('path_outside_workspace', '目标路径不在允许的授权根内');
   }
 
-  private assertForbiddenSegments(candidatePath: string): void {
-    const relative = path.relative(this.workspaceRoot, candidatePath);
+  private assertForbiddenSegments(candidatePath: string, baseRoot = this.workspaceRoot): void {
+    const relative = path.relative(baseRoot, candidatePath);
     const segments = relative.split(path.sep).filter(Boolean);
     // 在 normalize / realpath 之后再次检查 .git 与 .echolens，与 validateRelativePath 构成双层防御：
     // 前者拦原始输入，这里拦解析后的路径，防止通过大小写变体或解析结果绕过。
@@ -406,6 +447,47 @@ export class PathPolicy {
     if (segments.some((segment) => segment.toLowerCase() === '.echolens')) {
       throw new PathPolicyError('private_metadata_denied', '拒绝访问 .echolens 私有运行目录');
     }
+  }
+}
+
+function candidatePath(workspaceRoot: string, input: string): string | undefined {
+  if (typeof input !== 'string' || input.length === 0) return undefined;
+  if (path.win32.isAbsolute(input) || path.posix.isAbsolute(input)) return path.resolve(input);
+  return path.resolve(workspaceRoot, platformPath(input));
+}
+
+function isAbsoluteInput(input: string): boolean {
+  return path.win32.isAbsolute(input) || path.posix.isAbsolute(input);
+}
+
+function validatePathInput(input: string, allowAbsolute: boolean): void {
+  if (typeof input !== 'string' || input.length === 0 || input.includes('\0')) {
+    throw new PathPolicyError('invalid_path', '路径必须是非空字符串且不能包含 NUL');
+  }
+  if ((path.win32.isAbsolute(input) || path.posix.isAbsolute(input)) && allowAbsolute) {
+    validateAbsoluteSyntax(input);
+    return;
+  }
+  validateRelativePath(input);
+}
+
+function validateAbsoluteSyntax(input: string): void {
+  if (input.length > 32_000) throw new PathPolicyError('path_too_long', '路径长度超过限制');
+  const windows = input.replaceAll('/', '\\');
+  if (/^\\\\[?.]\\/u.test(windows)) {
+    throw new PathPolicyError('device_path', '拒绝 Windows 设备命名空间路径');
+  }
+  if (windows.startsWith('\\\\')) {
+    throw new PathPolicyError('unc_path', '拒绝 UNC 路径');
+  }
+  const segments = windows.split('\\').filter(Boolean);
+  for (const segment of segments) {
+    if (segment === '..') throw new PathPolicyError('path_outside_workspace', '拒绝包含 .. 的路径');
+    if (segment.includes(':') && !/^[A-Za-z]:$/u.test(segment)) {
+      throw new PathPolicyError('alternate_data_stream', '拒绝 NTFS Alternate Data Stream');
+    }
+    if (/[\u0000-\u001f<>"|?*]/u.test(segment)) throw new PathPolicyError('invalid_path', '路径包含非法字符');
+    if (/[. ]$/u.test(segment)) throw new PathPolicyError('trailing_dot_or_space', '拒绝以点或空格结尾的路径组件');
   }
 }
 
@@ -468,6 +550,11 @@ export function validateRelativePath(input: string): void {
       throw new PathPolicyError('private_metadata_denied', '拒绝访问 .echolens 私有运行目录');
     }
   }
+}
+
+/** Patch 可接受工作区相对路径或显式授权根下的绝对路径；最终边界仍由 PathPolicy 校验。 */
+export function validatePatchPath(input: string): void {
+  validatePathInput(input, true);
 }
 
 interface FileIdentity {

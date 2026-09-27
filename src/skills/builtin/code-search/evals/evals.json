@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "skill": "code-search",
+  "version": "1.0.0",
+  "assertions": [
+    { "id": "entrypoint", "type": "file_exists", "path": "SKILL.md" },
+    { "id": "reference", "type": "file_contains", "path": "references/workflow.md", "text": "workspace_search" },
+    { "id": "manifest", "type": "manifest_valid", "name": "code-search", "descriptionIncludes": "when investigating" }
+  ]
+}

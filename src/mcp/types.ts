@@ -26,6 +26,7 @@ export interface McpServerConfig {
   trust: McpTrustLevel;
   protocolMode?: McpProtocolMode;
   timeoutMs?: number;
+  quota?: McpServerQuota;
   permissions?: {
     tools?: string[];
     resources?: boolean;
@@ -33,6 +34,28 @@ export interface McpServerConfig {
     autoApproveReadOnly?: boolean;
   };
   transport: McpStdioTransportConfig | McpHttpTransportConfig;
+}
+
+export interface McpServerQuota {
+  maxCallsPerTurn?: number;
+  maxCallsPerSession?: number;
+  maxOutputBytes?: number;
+}
+
+export interface McpQuotaUsage {
+  serverId: string;
+  callsPerSession: number;
+  callsByTurn: Record<string, number>;
+  maxCallsPerTurn?: number;
+  maxCallsPerSession?: number;
+  maxOutputBytes?: number;
+}
+
+export interface McpQuotaEvent {
+  serverId: string;
+  reasonCode: 'mcp_quota_calls_per_turn' | 'mcp_quota_calls_per_session' | 'mcp_quota_output_bytes';
+  callsPerSession: number;
+  callsThisTurn?: number;
 }
 
 export interface McpConfigFile {

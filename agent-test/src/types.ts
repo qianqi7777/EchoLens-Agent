@@ -40,6 +40,10 @@ export interface ProviderIssueResult {
   durationMs: number;
   exitCode?: number;
   timedOut?: boolean;
+  cancelled?: boolean;
+  outputTruncated?: boolean;
+  checks?: Array<{ id: string; passed: boolean; exitCode: number; output: string }>;
+  verification?: 'simulated' | 'passed' | 'failed' | 'missing' | 'not-run';
   output: string;
   error?: string;
 }

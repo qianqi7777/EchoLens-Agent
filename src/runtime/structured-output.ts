@@ -167,6 +167,13 @@ export const FINAL_SUMMARY_FORMAT = {
   strict: true as const,
 };
 
+export const PLAN_FORMAT = {
+  name: 'echolens_agent_plan',
+  description: 'An executable plan with objective, ordered steps, risks, and completion criteria.',
+  schema: PLAN_SCHEMA,
+  strict: true as const,
+};
+
 const planValidator = compileToolSchema('agent_plan', PLAN_SCHEMA);
 const verifierValidator = compileToolSchema('verifier_output', VERIFIER_SCHEMA);
 const finalSummaryValidator = compileToolSchema('final_summary', FINAL_SUMMARY_SCHEMA);

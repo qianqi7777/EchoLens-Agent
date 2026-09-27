@@ -28,7 +28,21 @@ export interface BackgroundTaskResult {
   summary: string;
   evidenceIds: string[];
   data?: unknown;
+  usage?: BackgroundTaskUsage;
+  estimatedCost?: BackgroundTaskEstimatedCost;
 }
+
+export interface BackgroundTaskUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens?: number;
+  modelSteps: number;
+  toolCalls: number;
+}
+
+export type BackgroundTaskEstimatedCost =
+  | { amount: number; currency: string }
+  | { unknown: true };
 
 export interface BackgroundTaskRecord {
   schemaVersion: 1;
@@ -45,6 +59,8 @@ export interface BackgroundTaskRecord {
   cancellationRequested?: boolean;
   waitingReason?: string;
   errorCode?: string;
+  usage?: BackgroundTaskUsage;
+  estimatedCost?: BackgroundTaskEstimatedCost;
   result?: BackgroundTaskResult;
 }
 
@@ -117,11 +133,25 @@ export class PersistentTaskQueue {
   // 认领即写入租约：Worker 需在租约期内持续 heartbeat，否则任务会被 recoverExpired 移交其他 Worker；
   // attempts 在认领时递增，用于重试计数与 release 时回退。
   async claim(workerId: string, leaseMs = 60_000): Promise<BackgroundTaskRecord | undefined> {
+    return this.claimNext(workerId, { leaseMs });
+  }
+
+  /** Atomically claims the first pending task whose workspace is not already active. */
+  async claimNext(
+    workerId: string,
+    options: { excludeWorkspaces?: readonly string[]; leaseMs?: number } = {},
+  ): Promise<BackgroundTaskRecord | undefined> {
     if (!workerId.trim()) throw new Error('workerId 不能为空');
+    const leaseMs = options.leaseMs ?? 60_000;
     boundedInteger(leaseMs, 1_000, 30 * 60_000, 'leaseMs');
     return this.serial(async () => {
       const file = await this.readUnlocked();
-      const task = file.tasks.find((item) => item.state === 'pending' && !item.cancellationRequested);
+      const unavailable = new Set(options.excludeWorkspaces ?? []);
+      for (const running of file.tasks) {
+        if (running.state === 'running') unavailable.add(workspaceKey(running));
+      }
+      const task = file.tasks.find((item) => item.state === 'pending' && !item.cancellationRequested
+        && !unavailable.has(workspaceKey(item)));
       if (!task) return undefined;
       const now = this.now();
       task.state = 'running';
@@ -146,6 +176,8 @@ export class PersistentTaskQueue {
       requireWorker(task, workerId);
       task.state = task.cancellationRequested ? 'cancelled' : 'completed';
       task.result = task.cancellationRequested ? undefined : sanitizeResult(result);
+      task.usage = task.result?.usage ? { ...task.result.usage } : undefined;
+      task.estimatedCost = task.result?.estimatedCost ? { ...task.result.estimatedCost } : undefined;
       clearLease(task);
     });
   }
@@ -156,6 +188,8 @@ export class PersistentTaskQueue {
       task.state = 'waiting_approval';
       task.waitingReason = reason.slice(0, 500);
       task.result = result ? sanitizeResult(result) : undefined;
+      task.usage = task.result?.usage ? { ...task.result.usage } : undefined;
+      task.estimatedCost = task.result?.estimatedCost ? { ...task.result.estimatedCost } : undefined;
       clearLease(task);
     });
   }
@@ -268,6 +302,12 @@ export class PersistentTaskQueue {
   }
 }
 
+// 显式 workspaceKey 用于同一工作目录的互斥；未指定时每个任务有独立的隔离租约目录。
+function workspaceKey(task: BackgroundTaskRecord): string {
+  const declared = task.payload.metadata?.workspaceKey;
+  return typeof declared === 'string' && declared.trim() ? declared.trim() : `task:${task.id}`;
+}
+
 function requireWorker(task: BackgroundTaskRecord, workerId: string): void {
   if (task.state !== 'running' || task.workerId !== workerId) {
     throw new Error(`任务 ${task.id} 不属于 Worker ${workerId}`);
@@ -308,6 +348,8 @@ function sanitizeResult(result: BackgroundTaskResult): BackgroundTaskResult {
       .slice(0, 1_000)
       .map((item) => item.slice(0, 1_000)),
     data: result.data,
+    usage: result.usage ? { ...result.usage } : undefined,
+    estimatedCost: result.estimatedCost ? { ...result.estimatedCost } : undefined,
   };
 }
 
@@ -338,6 +380,8 @@ function isTaskRecord(value: unknown): value is BackgroundTaskRecord {
   if (task.cancellationRequested !== undefined && typeof task.cancellationRequested !== 'boolean') return false;
   if (task.waitingReason !== undefined && (typeof task.waitingReason !== 'string' || task.waitingReason.length > 500)) return false;
   if (task.errorCode !== undefined && (typeof task.errorCode !== 'string' || task.errorCode.length > 128)) return false;
+  if (task.usage !== undefined && !isTaskUsage(task.usage)) return false;
+  if (task.estimatedCost !== undefined && !isEstimatedCost(task.estimatedCost)) return false;
   return task.result === undefined || isTaskResult(task.result);
 }
 
@@ -358,7 +402,31 @@ function isTaskResult(value: unknown): value is BackgroundTaskResult {
   const result = value as Partial<BackgroundTaskResult>;
   return typeof result.summary === 'string' && result.summary.length <= 20_000
     && Array.isArray(result.evidenceIds) && result.evidenceIds.length <= 1_000
-    && result.evidenceIds.every((item) => typeof item === 'string' && item.length <= 1_000);
+    && result.evidenceIds.every((item) => typeof item === 'string' && item.length <= 1_000)
+    && (result.usage === undefined || isTaskUsage(result.usage))
+    && (result.estimatedCost === undefined || isEstimatedCost(result.estimatedCost));
+}
+
+function isTaskUsage(value: unknown): value is BackgroundTaskUsage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const usage = value as Partial<BackgroundTaskUsage>;
+  return nonNegativeInteger(usage.inputTokens)
+    && nonNegativeInteger(usage.outputTokens)
+    && (usage.cachedTokens === undefined || nonNegativeInteger(usage.cachedTokens))
+    && nonNegativeInteger(usage.modelSteps)
+    && nonNegativeInteger(usage.toolCalls);
+}
+
+function isEstimatedCost(value: unknown): value is BackgroundTaskEstimatedCost {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const cost = value as Record<string, unknown>;
+  if (cost.unknown === true) return true;
+  return typeof cost.amount === 'number' && Number.isFinite(cost.amount) && cost.amount >= 0
+    && typeof cost.currency === 'string' && cost.currency.length > 0 && cost.currency.length <= 16;
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
 
 function validDate(value: unknown): value is string {

@@ -88,6 +88,22 @@ function assertGrader(kind: EvalTaskKind, grader: unknown): asserts grader is Ev
     assertStringArray(candidate.requiredGuardrailReasonCodes, 'requiredGuardrailReasonCodes');
     if (candidate.maxDeniedActions !== undefined
       && (!Number.isInteger(candidate.maxDeniedActions) || candidate.maxDeniedActions < 0)) fail('maxDeniedActions 无效');
+    if (candidate.maxDuplicateToolCallIds !== undefined
+      && (!Number.isInteger(candidate.maxDuplicateToolCallIds) || candidate.maxDuplicateToolCallIds < 0)) {
+      fail('maxDuplicateToolCallIds 无效');
+    }
+  }
+  if (candidate.type === 'patch' && candidate.fileChecks !== undefined) {
+    if (!Array.isArray(candidate.fileChecks) || candidate.fileChecks.length > 200) fail('patch fileChecks 无效');
+    for (const check of candidate.fileChecks) {
+      if (!check || typeof check.path !== 'string') fail('patch fileCheck 无效');
+      normalizeRelative(check.path);
+      if (check.exists !== undefined && typeof check.exists !== 'boolean') fail('patch fileCheck exists 无效');
+      if (check.contentIncludes !== undefined
+        && (typeof check.contentIncludes !== 'string' || check.contentIncludes.length > 20_000)) {
+        fail('patch fileCheck contentIncludes 无效');
+      }
+    }
   }
 }
 

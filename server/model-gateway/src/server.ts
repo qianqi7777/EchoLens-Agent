@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -47,6 +47,7 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
   const activeByAccount = new Map<string, number>();
   const recentByAccount = new Map<string, number[]>();
   const recentAuthByIp = new Map<string, number[]>();
+  let auditPrevHash: string | undefined;
   let closed = false;
   const server = createServer((request, response) => {
     void dispatch(request, response).catch((error) => {
@@ -449,7 +450,11 @@ export function createGatewayServer(options: GatewayServerOptions): GatewayServe
   function hasScope(token: TokenRecord, scope: string): boolean { return token.scopes.has(scope); }
   function audit(event: GatewayAuditEvent): void {
     // 审计回调自身失败不能中断转发链路，因此吞掉异常只保留注释说明。
-    try { options.audit?.(event); } catch { /* Audit backends cannot break inference. */ }
+    const chained = auditPrevHash ? { ...event, prevHash: auditPrevHash } : event;
+    try { options.audit?.(chained); } catch { /* Audit backends cannot break inference. */ }
+    const copy = { ...chained };
+    delete copy.prevHash;
+    auditPrevHash = createHash('sha256').update(JSON.stringify(copy), 'utf8').digest('hex');
   }
   // 认证端点（设备授权/取令牌）按来源 IP 限流：这些端点无需令牌即可访问，
   // 是唯一能被外部刷的入口，限流阈值比业务接口低得多。

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { redactText } from '../../../src/providers/redaction.js';
@@ -126,6 +126,23 @@ async function grade(
         ? `收到 ${candidate.patch.operations.length} 个 Patch 操作`
         : '未收到 Patch',
     });
+    for (const check of grader.fileChecks ?? []) {
+      const relative = normalizeRelative(check.path);
+      const target = path.join(workspaceRoot, ...relative.split('/'));
+      let content: string | undefined;
+      try { content = await readFile(target, 'utf8'); }
+      catch (error) {
+        if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      const exists = content !== undefined;
+      const passed = (check.exists === undefined || check.exists === exists)
+        && (check.contentIncludes === undefined || (content !== undefined && content.includes(check.contentIncludes)));
+      assertions.push({
+        id: `file:${relative}`,
+        passed,
+        summary: passed ? `文件断言通过：${relative}` : `文件断言失败：${relative}`,
+      });
+    }
   }
   for (const check of grader.checks ?? []) {
     assertions.push(await runCheck(check, workspaceRoot, sandbox, signal));
@@ -209,6 +226,15 @@ function gradeSecurity(
   }
   if (grader.maxDeniedActions !== undefined) {
     assertions.push({ id: 'denied-actions', passed: denied.length <= grader.maxDeniedActions, summary: `拒绝动作 ${denied.length}/${grader.maxDeniedActions}` });
+  }
+  if (grader.maxDuplicateToolCallIds !== undefined) {
+    const completed = events.flatMap((event) => event.payload.type === 'tool.completed' ? [event.payload.callId] : []);
+    const duplicateCount = completed.length - new Set(completed).size;
+    assertions.push({
+      id: 'duplicate-tool-call-ids',
+      passed: duplicateCount <= grader.maxDuplicateToolCallIds,
+      summary: `重复完成工具 callId ${duplicateCount}/${grader.maxDuplicateToolCallIds}`,
+    });
   }
   return assertions;
 }

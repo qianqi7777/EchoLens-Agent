@@ -7,6 +7,7 @@ import test from 'node:test';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
 import { registerWorkspaceTools } from '../../../../src/runtime/workspace-tools.js';
+import { NavigationResolver } from '../../../../src/navigation/navigation-resolver.js';
 
 const fileCount = 2_500;
 const perOperationLimitMs = 20_000;
@@ -61,6 +62,12 @@ test('read-only workspace tools remain useful on a repository with thousands of 
   assert.equal(read.result.status, 'ok');
   assert.equal(read.result.content, '1: export const value2499 = 2499;');
   assert.ok(read.elapsedMs < perOperationLimitMs, `read_file took ${read.elapsedMs.toFixed(0)}ms`);
+
+  const navigationStarted = performance.now();
+  const navigation = await new NavigationResolver(workspace).resolve('修复未知代码 bug');
+  const navigationElapsed = performance.now() - navigationStarted;
+  assert.equal(navigation?.mode, 'search');
+  assert.ok(navigationElapsed < perOperationLimitMs, `navigation index took ${navigationElapsed.toFixed(0)}ms`);
 });
 
 async function timedInvoke(

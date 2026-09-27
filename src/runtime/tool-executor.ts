@@ -1,4 +1,4 @@
-import type { ToolContext, ToolResult } from './types.js';
+import type { ToolContext, ToolResult, ToolSpec } from './types.js';
 import { ToolRegistry } from './tool-registry.js';
 import { toolFailure } from './tool-result.js';
 import { hardenToolResult } from './tool-output.js';
@@ -28,6 +28,17 @@ export interface ToolInvocationOutcome {
   result: ToolResult;
   decision: ProposedActionDecision;
 }
+
+export interface ToolPreflightDecision {
+  decision: 'deny';
+  reason: string;
+}
+
+export type ToolPreflight = (
+  tool: ToolSpec,
+  args: Readonly<Record<string, unknown>>,
+  context: ToolContext,
+) => Promise<ToolPreflightDecision | undefined>;
 
 /**
  * 所有内置工具和 MCP Adapter 的唯一执行入口。
@@ -74,6 +85,7 @@ export class ToolExecutor {
     context: ToolContext,
     onDecision?: (decision: ProposedActionDecision) => Promise<void>,
     onApprovalRequest?: (request: ApprovalRequest) => Promise<void>,
+    preflight?: ToolPreflight,
   ): Promise<ToolInvocationOutcome> {
     let tool;
     try {
@@ -101,6 +113,17 @@ export class ToolExecutor {
       await onDecision?.(decision);
       return wrap(decision, toolFailure('invalid', 'invalid_arguments', '工具参数不符合 Schema', {
         data: { issues: validation.issues },
+      }), this.maxOutputChars);
+    }
+
+    // 外部 Hook 只能在参数通过 Schema 后收紧动作。它没有 allow 分支，返回 undefined
+    // 仍会继续进入 guardrail 与审批，因此不能借 Hook 绕过既有安全边界。
+    const preflightDecision = await preflight?.(tool, structuredClone(args), context);
+    if (preflightDecision?.decision === 'deny') {
+      const decision = deniedDecision('hook_denied', preflightDecision.reason, args);
+      await onDecision?.(decision);
+      return wrap(decision, toolFailure('denied', 'hook_denied', preflightDecision.reason, {
+        data: { guardrailReasonCode: 'hook_denied' },
       }), this.maxOutputChars);
     }
 

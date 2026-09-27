@@ -112,7 +112,7 @@ export async function runWithRetry<T>(
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.round(seconds * 1000) : undefined;
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return undefined;
   return Math.max(0, timestamp - now);

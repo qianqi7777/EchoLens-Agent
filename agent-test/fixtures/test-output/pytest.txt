@@ -1,0 +1,10 @@
+=================================== FAILURES ===================================
+___________________________ test_adds_values ___________________________
+    def test_adds_values():
+>       assert add(2, 2) == 3
+E       assert 4 == 3
+
+tests/test_math.py:8: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_math.py::test_adds_values - assert 4 == 3
+============================== 1 failed in 0.03s ===============================
