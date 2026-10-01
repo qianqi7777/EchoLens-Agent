@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../../../src/session/events.js';
-import type { EvalRunRecord } from './types.js';
+import type { EvalLayerScore, EvalRunRecord, EvalRunScores } from './types.js';
 
 export interface ModelPrice {
   inputPerMillion: number;
@@ -29,6 +29,7 @@ export interface EvalRunMetrics {
   navigationConfidence: number;
   firstEffectiveToolStep?: number;
   explorationToolCallsBeforeEvidence: number;
+  scores: EvalRunScores;
 }
 
 export interface EvalAggregateMetrics {
@@ -52,6 +53,7 @@ export interface EvalAggregateMetrics {
   navigationMatchRate: number;
   averageFirstEffectiveToolStep?: number;
   averageExplorationToolCallsBeforeEvidence: number;
+  layerScores: EvalRunScores;
 }
 
 export function calculateRunMetrics(
@@ -99,7 +101,7 @@ export function calculateRunMetrics(
     && event.payload.status === 'ok'
     && ['read_file', 'outline_file', 'go_to_definition', 'get_diagnostics'].includes(event.payload.toolName));
   const explorationBoundary = directEvidenceIndex < 0 ? completedTools.length : directEvidenceIndex;
-  return {
+  const metrics = {
     taskId: record.taskId,
     passed: record.passed,
     toolCalls: completedTools.length,
@@ -133,6 +135,7 @@ export function calculateRunMetrics(
       .filter((event) => event.payload.type === 'tool.completed'
         && ['list_files', 'grep', 'workspace_search', 'find_symbols'].includes(event.payload.toolName)).length,
   };
+  return { ...metrics, scores: scoreRun(record, metrics.invalidToolCallRate, metrics.toolCalls) };
 }
 
 export function aggregateMetrics(
@@ -145,6 +148,7 @@ export function aggregateMetrics(
   const invalidCalls = sum(current, (metric) => metric.invalidToolCalls);
   const costs = current.map((metric) => metric.estimatedCostUsd).filter((value): value is number => value !== undefined);
   const firstToolSteps = current.map((metric) => metric.firstEffectiveToolStep).filter((value): value is number => value !== undefined);
+  const layerScores = aggregateScores(current.map((metric) => metric.scores));
   return {
     runs: current.length,
     successRate: ratio(current.filter((metric) => metric.passed).length, current.length),
@@ -170,6 +174,42 @@ export function aggregateMetrics(
     averageExplorationToolCallsBeforeEvidence: ratio(
       sum(current, (metric) => metric.explorationToolCallsBeforeEvidence), current.length,
     ),
+    layerScores,
+  };
+}
+
+/**
+ * 把评测拆成结构、行为、效率三层：结构/行为来自带 layer 的断言，效率来自无效工具调用率。
+ * efficiency 不参与 record.passed，避免把效率指标悄悄变成通过门禁；它只用于报告和回归比较。
+ */
+export function scoreRun(
+  record: EvalRunRecord,
+  invalidToolCallRate?: number,
+  toolCalls?: number,
+): EvalRunScores {
+  const byLayer = (layer: 'structure' | 'behavior'): EvalLayerScore => {
+    let assertions = record.assertions.filter((assertion) => assertion.layer === layer);
+    // 兼容旧 Candidate 结果：旧记录没有 layer 时按任务类型归类，保持报告可重算。
+    if (assertions.length === 0 && record.assertions.length > 0) {
+      const fallbackLayer = record.taskKind === 'answer' || record.taskKind === 'patch' ? 'structure' : 'behavior';
+      if (fallbackLayer === layer) assertions = record.assertions;
+    }
+    const passed = assertions.filter((assertion) => assertion.passed).length;
+    return { passed, total: assertions.length, rate: assertions.length ? passed / assertions.length : 0, covered: assertions.length > 0 };
+  };
+  const invalidRate = invalidToolCallRate ?? calculateInvalidToolRate(record);
+  const efficiencyRate = toolCalls === 0 || (toolCalls === undefined && noToolCalls(record))
+    ? 1
+    : Math.max(0, 1 - invalidRate);
+  const efficiency: EvalLayerScore = { passed: efficiencyRate === 1 ? 1 : 0, total: 1, rate: efficiencyRate, covered: true };
+  const structure = byLayer('structure');
+  const behavior = byLayer('behavior');
+  const coveredRates = [structure, behavior, efficiency].filter((score) => score.covered).map((score) => score.rate);
+  return {
+    structure,
+    behavior,
+    efficiency,
+    overallRate: coveredRates.reduce((total, rate) => total + rate, 0) / coveredRates.length,
   };
 }
 
@@ -183,4 +223,39 @@ function sum(values: readonly EvalRunMetrics[], select: (value: EvalRunMetrics) 
 
 function ratio(value: number, total: number): number {
   return total === 0 ? 0 : value / total;
+}
+
+function aggregateScores(scores: readonly EvalRunScores[]): EvalRunScores {
+  const averageLayer = (layer: keyof Pick<EvalRunScores, 'structure' | 'behavior' | 'efficiency'>): EvalLayerScore => {
+    const covered = scores.map((score) => score[layer]).filter((score) => score.covered);
+    if (covered.length === 0) return { passed: 0, total: 0, rate: 0, covered: false };
+    return {
+      passed: covered.reduce((total, score) => total + score.passed, 0),
+      total: covered.reduce((total, score) => total + score.total, 0),
+      rate: covered.reduce((total, score) => total + score.passed, 0)
+        / covered.reduce((total, score) => total + score.total, 0),
+      covered: true,
+    };
+  };
+  const structure = averageLayer('structure');
+  const behavior = averageLayer('behavior');
+  const efficiency = averageLayer('efficiency');
+  const coveredRates = [structure, behavior, efficiency].filter((score) => score.covered).map((score) => score.rate);
+  return {
+    structure,
+    behavior,
+    efficiency,
+    overallRate: coveredRates.reduce((total, rate) => total + rate, 0) / coveredRates.length,
+  };
+}
+
+function calculateInvalidToolRate(record: EvalRunRecord): number {
+  const completed = record.candidate.events?.filter((event) => event.payload.type === 'tool.completed') ?? [];
+  const invalid = completed.filter((event) => event.payload.type === 'tool.completed'
+    && ['unknown_tool', 'invalid_arguments', 'permission_denied'].includes(event.payload.result?.error?.code ?? '')).length;
+  return completed.length ? invalid / completed.length : 0;
+}
+
+function noToolCalls(record: EvalRunRecord): boolean {
+  return !(record.candidate.events ?? []).some((event) => event.payload.type === 'tool.completed');
 }

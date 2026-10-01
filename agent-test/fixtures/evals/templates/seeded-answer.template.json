@@ -14,6 +14,10 @@
     "prompt": "Variant {{token}} is an identifier. Return the constant eval-seed-ok.",
     "introducedAt": "2026-09-23T00:00:00.000Z",
     "leakageRisk": "low",
+    "domain": "protocol",
+    "difficulty": "easy",
+    "source": "generated",
+    "split": "fixed",
     "fixture": { "files": [] },
     "grader": { "type": "answer", "mode": "exact", "expected": "eval-seed-ok" }
   }

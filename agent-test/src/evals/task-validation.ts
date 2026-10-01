@@ -2,14 +2,22 @@ import type {
   EvalCommandCheck,
   EvalGrader,
   EvalTaskDefinition,
+  EvalTaskDifficulty,
+  EvalTaskDomain,
   EvalTaskKind,
   LeakageRisk,
+  EvalTaskSource,
+  EvalTaskSplit,
 } from './types.js';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/u;
 const KINDS = new Set<EvalTaskKind>(['answer', 'patch', 'terminal', 'security']);
 const RISKS = new Set<LeakageRisk>(['low', 'medium', 'high', 'known_leaked']);
+const DOMAINS = new Set<EvalTaskDomain>(['coding', 'session', 'security', 'orchestration', 'protocol', 'tooling', 'reliability']);
+const DIFFICULTIES = new Set<EvalTaskDifficulty>(['easy', 'medium', 'hard', 'expert']);
+const SOURCES = new Set<EvalTaskSource>(['hand-authored', 'generated', 'imported']);
+const SPLITS = new Set<EvalTaskSplit>(['fixed', 'smoke', 'regression', 'adversarial']);
 const MAX_FIXTURE_BYTES = 32 * 1024 * 1024;
 
 export function assertEvalTask(value: unknown): asserts value is EvalTaskDefinition {
@@ -25,6 +33,11 @@ export function assertEvalTask(value: unknown): asserts value is EvalTaskDefinit
   if (typeof task.introducedAt !== 'string' || !validDate(task.introducedAt)) fail('introducedAt 无效');
   if (task.lastUsedAt !== undefined && (typeof task.lastUsedAt !== 'string' || !validDate(task.lastUsedAt))) fail('lastUsedAt 无效');
   if (typeof task.leakageRisk !== 'string' || !RISKS.has(task.leakageRisk as LeakageRisk)) fail('leakageRisk 无效');
+  if (task.domain !== undefined && (typeof task.domain !== 'string' || !DOMAINS.has(task.domain as EvalTaskDomain))) fail('domain 无效');
+  if (task.difficulty !== undefined
+    && (typeof task.difficulty !== 'string' || !DIFFICULTIES.has(task.difficulty as EvalTaskDifficulty))) fail('difficulty 无效');
+  if (task.source !== undefined && (typeof task.source !== 'string' || !SOURCES.has(task.source as EvalTaskSource))) fail('source 无效');
+  if (task.split !== undefined && (typeof task.split !== 'string' || !SPLITS.has(task.split as EvalTaskSplit))) fail('split 无效');
   if (task.tags !== undefined && (!Array.isArray(task.tags) || task.tags.length > 64
     || task.tags.some((tag) => typeof tag !== 'string' || tag.length < 1 || tag.length > 128))) fail('tags 无效');
   if (!task.fixture || !Array.isArray(task.fixture.files) || task.fixture.files.length > 2_000) fail('fixture.files 无效');

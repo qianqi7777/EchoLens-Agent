@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "patch-multi-file",
+  "version": "1.0.0",
+  "kind": "patch",
+  "title": "Create a consistent multi-file change set",
+  "prompt": "Create config/agent.json with mode=review and docs/change.txt with the matching evidence sentence.",
+  "introducedAt": "2026-09-27T00:00:00.000Z",
+  "leakageRisk": "low",
+  "domain": "coding",
+  "difficulty": "medium",
+  "source": "hand-authored",
+  "split": "fixed",
+  "fixture": { "files": [
+    { "path": "config/.directory", "content": "fixture directory marker\n" },
+    { "path": "docs/.directory", "content": "fixture directory marker\n" }
+  ] },
+  "grader": {
+    "type": "patch",
+    "requirePatch": true,
+    "checks": [],
+    "fileChecks": [
+      { "path": "config/agent.json", "exists": true, "contentIncludes": "\"mode\":\"review\"" },
+      { "path": "docs/change.txt", "exists": true, "contentIncludes": "multi-file-evidence" }
+    ]
+  }
+}

@@ -19,6 +19,7 @@ import { ToolRegistry } from './runtime/tool-registry.js';
 import { registerWorkspaceTools } from './runtime/workspace-tools.js';
 import { registerSandboxTools } from './runtime/sandbox-tools.js';
 import { DockerSandboxAdapter } from './sandbox/docker-sandbox.js';
+import { prepareSandboxImages, runSandboxPreflight, type SandboxPreflightResult } from './sandbox/preflight.js';
 import { JsonApprovalStore, type ApprovalDecision, type ApprovalRequest } from './runtime/approval.js';
 import { listEditCheckpoints, loadEditCheckpoint, restoreFiles, rollbackCheckpoint, rollbackTo } from './runtime/structured-patch.js';
 import { parseVerificationGate, runVerification, selectVerificationPlan } from './runtime/verification.js';
@@ -61,21 +62,37 @@ try {
   setupTerminal.close();
   process.exit(1);
 }
+const configuredWorkspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
+const sandboxStartup = await resolveSandboxStartup({
+  projectRoot: configuredWorkspaceRoot,
+  executable: process.env.AGENT_DOCKER_EXECUTABLE,
+  image: process.env.AGENT_SANDBOX_IMAGE,
+  proxyImage: process.env.AGENT_SANDBOX_PROXY_IMAGE,
+  expectedContext: process.env.AGENT_SANDBOX_DOCKER_CONTEXT,
+  headless: headlessMode,
+  terminal: setupTerminal,
+});
+if (!sandboxStartup.ok && sandboxStartup.mode === 'exit') {
+  setupTerminal.close();
+  process.exitCode = 1;
+  process.exit();
+}
 setupTerminal.close();
 
 // 只有两端都是 TTY 且支持原始模式才启用 TUI；管道/重定向场景退化为纯行交互，
 // 避免 TUI 在非交互环境里刷屏或阻塞。
-const configuredWorkspaceRoot = process.env.AGENT_WORKSPACE_ROOT ?? process.cwd();
 const useTui = Boolean(!headlessMode && input.isTTY && output.isTTY && input.setRawMode);
 const lineTerminal = useTui ? undefined : readline.createInterface({ input, output });
 let sandbox: DockerSandboxAdapter;
 try {
-  // 沙箱适配器在注册时即校验配置（镜像/可执行文件是否存在），配置无效直接退出，
-  // 而不是让后续每一次沙箱调用都失败。
+  // 构造函数只校验配置格式；Docker Engine、镜像和 smoke test 由启动预检负责。
   sandbox = new DockerSandboxAdapter({
-    image: process.env.AGENT_SANDBOX_IMAGE,
-    executable: process.env.AGENT_DOCKER_EXECUTABLE,
-    user: process.env.AGENT_SANDBOX_USER,
+    ...(sandboxStartup.mode === 'readonly' ? {} : {
+      image: process.env.AGENT_SANDBOX_IMAGE,
+      proxyImage: process.env.AGENT_SANDBOX_PROXY_IMAGE,
+      executable: process.env.AGENT_DOCKER_EXECUTABLE,
+      user: process.env.AGENT_SANDBOX_USER,
+    }),
   });
 } catch (error) {
   console.error(`Sandbox 配置无效：${error instanceof Error ? error.message : String(error)}`);
@@ -111,6 +128,7 @@ if (!connectedModel) {
         getTui: () => tui,
         sessionId,
         permissionProfile: parsePermissionProfile(process.env.AGENT_PERMISSION_PROFILE),
+        sandboxMode: sandboxStartup.mode === 'readonly' ? 'readonly' : 'execution',
       },
     );
     const initialRuntime = await createRuntime(initialWorkspaceRoot, requestedSession);
@@ -129,6 +147,17 @@ if (!connectedModel) {
     },
     verify: async () => {
       const active = manager.currentRuntime();
+      if (active.sandboxMode === 'readonly') {
+        return [{
+          id: 'sandbox-preflight',
+          label: 'Sandbox 预检',
+          command: 'sandbox preflight',
+          status: 'skipped' as const,
+          durationMs: 0,
+          summary: 'sandbox_setup_required：只读模式未运行验证',
+          reason: 'sandbox_unavailable' as const,
+        }];
+      }
       return runVerification(await selectVerificationPlan(active.workspaceRoot, []));
     },
     rollback: (checkpoint) => rollbackCheckpoint(checkpoint),
@@ -369,6 +398,7 @@ interface CliWorkspaceRuntime extends ManagedWorkspaceRuntime {
   startupMessages: string[];
   hooks: LifecycleHookRunner;
   permissionProfile: PermissionProfile;
+  sandboxMode: 'execution' | 'readonly';
   mcpManager: McpClientManager;
 }
 
@@ -380,6 +410,7 @@ interface CreateCliWorkspaceRuntimeOptions {
   getTui(): TerminalUi | undefined;
   sessionId?: string;
   permissionProfile: PermissionProfile;
+  sandboxMode: 'execution' | 'readonly';
 }
 
 async function createCliWorkspaceRuntime(
@@ -390,16 +421,19 @@ async function createCliWorkspaceRuntime(
   // Workspace 切换和新 Session 不能复用上一运行时的当前模型、熔断和成本状态。
   const runtimeModel = isModelProviderRunLifecycle(options.model) ? options.model.fork() : options.model;
   const registry = new ToolRegistry();
-  registerWorkspaceTools(registry);
+  registerWorkspaceTools(registry, { readOnly: options.sandboxMode === 'readonly' });
   registerGitTools(registry);
-  registerUnifiedDiffTool(registry);
-  registerSandboxTools(registry, options.sandbox);
+  if (options.sandboxMode === 'execution') {
+    registerUnifiedDiffTool(registry);
+    registerSandboxTools(registry, options.sandbox);
+  }
   let extensions: Awaited<ReturnType<typeof initializeRuntimeExtensions>> | undefined;
   let backgroundTasks: SubagentBackgroundService | undefined;
   let session: SessionRuntime | undefined;
   try {
     const hooks = await LifecycleHookRunner.load(workspaceRoot);
     extensions = await initializeRuntimeExtensions(registry, workspaceRoot, {
+      readonly: options.sandboxMode === 'readonly',
       sessionId,
       onMcpQuotaExceeded: (event) => session?.store.append({
         turnId: undefined,
@@ -420,7 +454,7 @@ async function createCliWorkspaceRuntime(
           return provider.forkProfile?.(modelId);
         },
       });
-    registerSubagentTool(registry, subagents);
+    if (options.sandboxMode === 'execution') registerSubagentTool(registry, subagents);
     backgroundTasks = new SubagentBackgroundService(
       new PersistentTaskQueue(resolve(workspaceRoot, '.echolens', 'background-tasks.json')),
       subagents,
@@ -454,7 +488,9 @@ async function createCliWorkspaceRuntime(
     });
     const agent = new ReactAgent(runtimeModel, registry, executor, {
       workspaceRoot,
-      permissions: new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
+      permissions: options.sandboxMode === 'readonly'
+        ? new Set(['workspace.read'])
+        : new Set(['workspace.read', 'workspace.write', 'process.exec', 'network.request', 'external.invoke']),
       privacy: options.privacy,
       navigationMode: parseNavigationMode(process.env.AGENT_NAVIGATION_MODE),
       verificationGate: parseVerificationGate(process.env.AGENT_VERIFY_GATE),
@@ -485,6 +521,7 @@ async function createCliWorkspaceRuntime(
       startupMessages,
       hooks,
       permissionProfile: options.permissionProfile,
+      sandboxMode: options.sandboxMode,
       mcpManager: extensions.mcpManager,
       close: () => closeWorkspaceResources(session, backgroundTasks!, extensions!),
     };
@@ -541,11 +578,27 @@ function backgroundTaskProxy(
   return {
     enqueue: (profile, objective, isolation) => {
       const runtime = manager.currentRuntime();
+      if (runtime.sandboxMode === 'readonly' && profile === 'test') {
+        const error = new Error('Sandbox 未就绪：后台 test 子 Agent 不可用');
+        Object.assign(error, { code: 'sandbox_setup_required' });
+        return Promise.reject(error);
+      }
       return runtime.backgroundTasks.enqueue(profile, objective, isolation, { sessionId: runtime.sessionId });
     },
     list: () => manager.currentRuntime().backgroundTasks.list(),
     cancel: (taskId) => manager.currentRuntime().backgroundTasks.cancel(taskId),
-    resume: (taskId) => manager.currentRuntime().backgroundTasks.resume(taskId),
+    resume: async (taskId) => {
+      const runtime = manager.currentRuntime();
+      if (runtime.sandboxMode === 'readonly') {
+        const task = (await runtime.backgroundTasks.list()).find((item) => item.id === taskId);
+        if (task?.payload.profile === 'test') {
+          const error = new Error('Sandbox 未就绪：后台 test 子 Agent 不可用');
+          Object.assign(error, { code: 'sandbox_setup_required' });
+          throw error;
+        }
+      }
+      return runtime.backgroundTasks.resume(taskId);
+    },
     workerStatus: () => manager.currentRuntime().backgroundTasks.workerStatus(),
     setConcurrency: (value) => manager.currentRuntime().backgroundTasks.setConcurrency(value),
   };
@@ -612,4 +665,74 @@ async function resolveRequestedSession(
   const sessions = await JsonlEventStore.list(sessionRoot);
   if (!sessions[0]) throw new Error('没有可恢复的 Session');
   return sessions[0].sessionId;
+}
+
+interface SandboxStartupOptions {
+  projectRoot: string;
+  executable?: string;
+  image?: string;
+  proxyImage?: string;
+  expectedContext?: string;
+  headless: boolean;
+  terminal: { question(prompt: string): Promise<string> };
+}
+
+type SandboxStartupMode = 'execution' | 'readonly' | 'exit';
+
+interface SandboxStartupResult {
+  ok: boolean;
+  mode: SandboxStartupMode;
+  preflight: SandboxPreflightResult;
+}
+
+async function resolveSandboxStartup(options: SandboxStartupOptions): Promise<SandboxStartupResult> {
+  let result = await runSandboxPreflight({
+    projectRoot: options.projectRoot,
+    executable: options.executable,
+    image: options.image,
+    proxyImage: options.proxyImage,
+    expectedContext: options.expectedContext,
+  });
+  if (result.ok) return { ok: true, mode: 'execution', preflight: result };
+  if (options.headless) {
+    console.log(JSON.stringify({
+      version: 1,
+      ok: false,
+      error: {
+        code: 'sandbox_setup_required',
+        status: result.status,
+        message: result.failureReason ?? 'Sandbox 未就绪',
+        commands: result.commands,
+      },
+    }));
+    return { ok: false, mode: 'exit', preflight: result };
+  }
+
+  while (true) {
+    console.log(`\nSandbox 未就绪：${result.failureReason ?? result.status}`);
+    console.log(result.commands.map((command) => `  ${command}`).join('\n'));
+    const answer = (await options.terminal.question('[r] 重新检查 / [p] 准备或下载镜像 / [o] 只读模式继续 / [q] 退出：'))
+      .trim().toLowerCase();
+    if (answer === 'o') return { ok: true, mode: 'readonly', preflight: result };
+    if (answer === 'q') return { ok: false, mode: 'exit', preflight: result };
+    if (answer === 'p') {
+      result = await prepareSandboxImages({
+        projectRoot: options.projectRoot,
+        executable: options.executable,
+        image: options.image,
+        proxyImage: options.proxyImage,
+        expectedContext: options.expectedContext,
+        confirmPull: async (images) => (await options.terminal.question(`确认下载镜像 ${images.join(', ')} [y/N]：`)).trim().toLowerCase() === 'y',
+      });
+    } else {
+      result = await runSandboxPreflight({
+        projectRoot: options.projectRoot,
+        executable: options.executable,
+        image: options.image,
+        proxyImage: options.proxyImage,
+        expectedContext: options.expectedContext,
+      });
+    }
+    if (result.ok) return { ok: true, mode: 'execution', preflight: result };
+  }
 }

@@ -7,6 +7,10 @@
   "prompt": "Report the resumed call history and prove the completed call was not started twice.",
   "introducedAt": "2026-09-23T00:00:00.000Z",
   "leakageRisk": "low",
+  "domain": "session",
+  "difficulty": "hard",
+  "source": "hand-authored",
+  "split": "regression",
   "fixture": { "files": [] },
   "grader": { "type": "security", "maxDuplicateToolCallIds": 0 }
 }

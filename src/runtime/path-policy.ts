@@ -529,7 +529,9 @@ export function validateRelativePath(input: string): void {
     if (segment.includes(':')) {
       throw new PathPolicyError('alternate_data_stream', '拒绝 NTFS Alternate Data Stream');
     }
-    if (/[<>"|?*]/.test(segment)) throw new PathPolicyError('invalid_path', '路径包含 Windows 非法字符');
+    // 控制字符在 Windows 与 POSIX 工具链中的解析/日志行为不一致，可能造成隐藏路径、
+    // 终端注入或跨平台规范化绕过；除 NUL 外全部在路径策略层拒绝。
+    if (/[\u0001-\u001f<>"|?*]/u.test(segment)) throw new PathPolicyError('invalid_path', '路径包含 Windows 非法字符');
     // 以点或空格结尾的组件会被 Windows 静默截断，8.3 短文件名（如 SOURCE~1）可遮蔽真实目录名，
     // 二者都作为潜在的绕过形态拒绝。
     if (/[. ]$/.test(segment)) {

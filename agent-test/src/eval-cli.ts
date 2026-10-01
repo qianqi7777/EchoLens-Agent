@@ -30,6 +30,8 @@ try {
       },
     } : {});
     console.log(`suite=${result.report.suiteId}@${result.report.suiteVersion} tasks=${result.report.taskCount} passed=${result.report.passedCount} failed=${result.report.failedCount} successRate=${result.report.successRate.toFixed(4)} durationMs=${result.report.totalDurationMs}`);
+    console.log(`audit=${result.report.audit.passed ? 'passed' : 'failed'} uniqueTaskIds=${result.report.audit.uniqueTaskIds} duplicateIds=${result.report.audit.duplicateTaskIds.length} duplicateFingerprints=${result.report.audit.duplicateFingerprints.length}`);
+    console.log(`layers structure=${result.report.aggregateMetrics.layerScores.structure.rate.toFixed(4)} behavior=${result.report.aggregateMetrics.layerScores.behavior.rate.toFixed(4)} efficiency=${result.report.aggregateMetrics.layerScores.efficiency.rate.toFixed(4)}`);
     console.log(`results=${resultPath}`);
     console.log(`report=${result.reportPath}`);
     if (result.report.failedCount > 0) process.exitCode = 1;

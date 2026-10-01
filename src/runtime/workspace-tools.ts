@@ -46,8 +46,8 @@ interface WorkspaceSearchArguments {
   limit?: number;
 }
 
-/** 注册最小本地只读工具集。所有路径都锁定在 workspaceRoot 下。 */
-export function registerWorkspaceTools(registry: ToolRegistry): void {
+/** 注册工作区工具。只读模式故意不注册任何会写入工作区的工具。 */
+export function registerWorkspaceTools(registry: ToolRegistry, options: { readOnly?: boolean } = {}): void {
   registry.register({
     name: 'read_file',
     description: '读取工作区内文件的指定行范围。',
@@ -102,6 +102,7 @@ export function registerWorkspaceTools(registry: ToolRegistry): void {
     }, ['query']),
     execute: workspaceSearch,
   });
+  if (options.readOnly) return;
   registry.register({
     name: 'apply_patch',
     description: '预览并应用 UTF-8 文本文件的结构化 Patch；每次写入都需要显式审批。',

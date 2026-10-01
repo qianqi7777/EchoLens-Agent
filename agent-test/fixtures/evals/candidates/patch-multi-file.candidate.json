@@ -1,0 +1,9 @@
+{
+  "patch": {
+    "version": 1,
+    "operations": [
+      { "op": "create", "path": "config/agent.json", "content": "{\"mode\":\"review\"}\n" },
+      { "op": "create", "path": "docs/change.txt", "content": "multi-file-evidence\n" }
+    ]
+  }
+}

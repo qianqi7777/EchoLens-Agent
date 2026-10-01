@@ -51,9 +51,9 @@ test('固定 Eval Suite 按锁定任务和 seed 执行并归档可核对的结�
     aggregateMetrics: { runs: number; successRate: number };
     results: Array<{ taskId: string; model: string; metrics: { taskId: string; passed: boolean } }>;
   };
-  assert.equal(first.report.taskCount, 6);
-  assert.equal(first.report.passedCount + first.report.failedCount, 6);
-  assert.equal(firstRecords.length, 6);
+  assert.equal(first.report.taskCount, 10);
+  assert.equal(first.report.passedCount + first.report.failedCount, 10);
+  assert.equal(firstRecords.length, 10);
   assert.equal(persistedReport.taskCount, firstRecords.length);
   assert.equal(persistedReport.passedCount, firstRecords.filter((record) => record.passed).length);
   assert.equal(persistedReport.failedCount, firstRecords.length - persistedReport.passedCount);
@@ -62,6 +62,14 @@ test('固定 Eval Suite 按锁定任务和 seed 执行并归档可核对的结�
   assert.ok(persistedReport.results.every((record) => record.model === 'none (static-fixture)'
     && record.metrics.taskId === record.taskId));
   assert.equal(first.report.candidateMode, 'static-fixture');
+  assert.equal(first.report.audit.passed, true);
+  assert.equal(first.report.audit.entries, 10);
+  assert.equal(first.report.audit.uniqueTaskIds, 10);
+  assert.deepEqual(first.report.audit.duplicateTaskIds, []);
+  assert.deepEqual(first.report.audit.duplicateFingerprints, []);
+  assert.equal(first.report.breakdown.domain.coding?.runs, 2);
+  assert.equal(first.report.breakdown.domain.security?.successRate, 1);
+  assert.ok(first.report.results.every((record) => record.metadata.domain && record.metrics.scores.efficiency.covered));
 
   const second = await runEvalSuite('fixed-core', secondPath);
   const secondRecords = (await readFile(secondPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { taskId: string });
