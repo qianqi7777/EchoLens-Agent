@@ -48,6 +48,7 @@ export interface SandboxPreflightOptions {
 }
 
 export interface PrepareSandboxImagesOptions extends SandboxPreflightOptions {
+  pullTimeoutMs?: number;
   autoPull?: SandboxAutoPullPolicy;
   confirmPull?: (images: readonly string[]) => Promise<boolean>;
   notify?: (message: string) => void;
@@ -161,9 +162,21 @@ export async function prepareSandboxImages(options: PrepareSandboxImagesOptions 
   options.notify?.(`正在准备 Sandbox 镜像：${missing.join(', ')}`);
   const runner = options.runner ?? new NodeProcessRunner();
   for (const reference of missing) {
-    const pulled = await runDocker(runner, options.executable ?? 'docker', ['pull', reference], options);
+    const pulled = await runDocker(
+      runner,
+      options.executable ?? 'docker',
+      ['pull', reference],
+      { ...options, timeoutMs: options.pullTimeoutMs ?? 10 * 60_000 },
+    );
     if (pulled.spawnError || pulled.exitCode !== 0) {
-      return { ...initial, status: 'image_missing', failureReason: `镜像下载失败：${reference}` };
+      const detail = pulled.timedOut
+        ? `超过 ${Math.round((options.pullTimeoutMs ?? 10 * 60_000) / 1000)} 秒超时`
+        : trimReason(pulled.stderr || pulled.stdout || pulled.spawnError || `退出码 ${pulled.exitCode ?? 'unknown'}`);
+      return finish(options, {
+        ...initial,
+        status: 'image_missing',
+        failureReason: `镜像下载失败：${reference}（${detail}）`,
+      });
     }
   }
   // pull 成功不能视为可用，必须重新 inspect 并执行 smoke test。

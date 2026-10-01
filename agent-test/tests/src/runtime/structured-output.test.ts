@@ -173,6 +173,28 @@ test('natural-language final output is retained as raw but never treated as veri
   assert.equal(result.finalSummary.issues[0]?.code, 'invalid_json');
 });
 
+test('最终摘要 answer 的单层嵌套 JSON 会被规范化', async () => {
+  const provider: ModelProvider = {
+    model: 'nested-answer-model',
+    capabilities: { ...capabilities, supportsStructuredOutput: true },
+    async complete(): Promise<ProviderResult> {
+      return {
+        output: [textMessage('assistant-nested', 'assistant', JSON.stringify({
+          answer: JSON.stringify({ answer: '已完成修改。', changes: [], verification: [], unresolved: [], warnings: [] }),
+          changes: [], verification: [], unresolved: [], warnings: [],
+        }))],
+        stopReason: 'completed',
+      };
+    },
+  };
+  const registry = new ToolRegistry();
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: process.cwd(),
+  }).run('执行任务');
+  assert.equal(result.finalSummary.verified, true);
+  assert.equal(result.answer, '已完成修改。');
+});
+
 const capabilities: ProviderCapabilities = {
   maxContextTokens: 16_000,
   supportsStreaming: false,

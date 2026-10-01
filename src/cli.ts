@@ -42,7 +42,7 @@ import { parsePermissionProfile, type PermissionProfile } from './runtime/permis
 import { GitHistoryProvider } from './navigation/git-history.js';
 import { registerGitTools } from './runtime/git-tools.js';
 import { registerUnifiedDiffTool } from './runtime/unified-diff.js';
-import { headlessExitCode, headlessFailure, headlessPrompt, headlessSuccess } from './headless.js';
+import { headlessCommand, headlessExitCode, headlessFailure, headlessPrompt, headlessSuccess } from './headless.js';
 import type { McpClientManager } from './mcp/client-manager.js';
 import { PluginManager } from './plugins/plugin-manager.js';
 import { exportAuditLog, verifyAuditLog } from './session/audit.js';
@@ -208,8 +208,32 @@ if (!connectedModel) {
 
     if (headlessMode) {
       try {
-        const result = await manager.currentRuntime().session.run(headlessPrompt(process.argv));
-        const outputValue = headlessSuccess(result);
+        const requested = headlessPrompt(process.argv);
+        const commandContext = {
+          workspaceAvailable: true, backgroundTasksAvailable: true,
+          sessionDeletionAvailable: true, skillImportAvailable: true, skillsAvailable: true,
+          modelRoutingAvailable: true, hooksAvailable: true, goalAvailable: true,
+          mcpAvailable: true, pluginAvailable: true, auditAvailable: true,
+          interface: 'line' as const,
+        };
+        const parsed = parseCommandInput(requested, commandContext);
+        if (parsed.error) throw new Error(parsed.error);
+        const prompt = parsed.input;
+        let outputValue;
+        if (prompt === '/help') {
+          outputValue = headlessCommand(prompt, formatCommandHelp(commandContext));
+        } else if (prompt === '/exit' || prompt === '/quit') {
+          outputValue = headlessCommand(prompt, ['无头模式已结束。']);
+        } else if (isServiceCommand(prompt)) {
+          const commandResult = await executeServiceCommand(prompt, commandServices, {
+            currentSessionId: manager.currentRuntime().sessionId,
+            confirm: async () => false,
+          });
+          outputValue = headlessCommand(prompt, commandResult.lines);
+        } else {
+          const result = await manager.currentRuntime().session.run(prompt);
+          outputValue = headlessSuccess(result);
+        }
         console.log(JSON.stringify(outputValue));
         process.exitCode = headlessExitCode(outputValue);
       } catch (error) {

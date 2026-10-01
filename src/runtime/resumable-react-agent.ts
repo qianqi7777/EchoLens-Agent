@@ -131,6 +131,7 @@ interface RunMachine {
   hooks?: LifecycleHookRunner;
   hookContexts: RuntimeHookContext[];
   navigationHint?: NavigationHint;
+  navigationDiscoveryAttempted: boolean;
   approvedPlan?: AgentPlan;
   activeGoal?: AgentGoal;
   getActiveGoal?: () => AgentGoal | undefined;
@@ -219,6 +220,7 @@ export class ReactAgent {
       navigationHint: this.options.navigationMode === 'off'
         ? undefined
         : await this.navigationResolver.resolve(userMessage),
+      navigationDiscoveryAttempted: false,
       approvedPlan: runtime.approvedPlan,
       activeGoal: runtime.activeGoal,
       getActiveGoal: runtime.getActiveGoal,
@@ -274,6 +276,8 @@ export class ReactAgent {
       navigationHint: this.options.navigationMode === 'off'
         ? undefined
         : await this.navigationResolver.resolve(latestUserText(checkpoint.items)),
+      navigationDiscoveryAttempted: checkpoint.navigationDiscoveryAttempted
+        ?? hasToolResultInCurrentTurn(checkpoint.items),
       approvedPlan: runtime.approvedPlan,
       activeGoal: runtime.activeGoal,
       getActiveGoal: runtime.getActiveGoal,
@@ -348,12 +352,15 @@ export class ReactAgent {
 
       // 首轮强制只读只持续到首次工具结果。成功结果可作为证据；失败结果也必须交还模型解释或
       // 修正，不能再次强制工具调用并覆盖 permission_denied 等确定性结论。
-      const navigationPending = Boolean(machine.navigationHint) && !hasToolResultInCurrentTurn(machine.items);
+      const navigationPending = Boolean(machine.navigationHint)
+        && !machine.navigationDiscoveryAttempted
+        && !hasToolResultInCurrentTurn(machine.items);
       const requestPhase = isModelProviderRunLifecycle(this.model) ? this.model.currentPhase() : 'execute';
       const discoveryTools = providerTools(this.model, this.registry, runtimePermissions, true);
       const discovery = navigationPending && Boolean(discoveryTools?.length);
       const tools = discovery ? discoveryTools : providerTools(this.model, this.registry, runtimePermissions);
       const toolChoice = requestToolChoice(this.model, machine.navigationHint, discovery, tools);
+      if (discovery) machine.navigationDiscoveryAttempted = true;
       if (this.skillRuntime) {
         try {
           machine.activeSkills = [...(await this.skillRuntime.activateForPrompt(latestUserText(machine.items))).skills];
@@ -927,6 +934,7 @@ export class ReactAgent {
       state,
       items: structuredClone(machine.items),
       hookContexts: structuredClone(machine.hookContexts),
+      navigationDiscoveryAttempted: machine.navigationDiscoveryAttempted,
       routing: isModelProviderRunLifecycle(this.model) ? this.model.snapshot() : undefined,
     };
     const event = await emit(machine, eventSink, {
@@ -1197,7 +1205,7 @@ function finishRun(
   proposedPlan?: AgentRunResult['proposedPlan'],
 ): AgentRunResult {
   return {
-    answer: finalSummary.verified ? finalSummary.value.answer : rawAnswer,
+    answer: finalSummary.verified ? normalizeAnswer(finalSummary.value.answer) : rawAnswer,
     items: machine.items,
     trace: machine.trace,
     degraded,
@@ -1209,6 +1217,22 @@ function finishRun(
     finalSummary,
     proposedPlan,
   };
+}
+
+// 部分兼容不支持原生结构化输出的 Provider：有些模型会把最终摘要再次编码到
+// `answer` 字符串中。只解包形状明确的单层摘要，普通 JSON 代码片段保持原样。
+function normalizeAnswer(answer: string): string {
+  try {
+    const parsed = JSON.parse(answer) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return answer;
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.answer !== 'string') return answer;
+    const allowed = new Set(['answer', 'changes', 'verification', 'unresolved', 'warnings']);
+    if (Object.keys(record).some((key) => !allowed.has(key))) return answer;
+    return record.answer;
+  } catch {
+    return answer;
+  }
 }
 
 function itemIdFactory(runId: string, offset: number): (kind: string) => string {
