@@ -206,7 +206,7 @@ test('明确点名写工具时，调查后要求模型发起受审批的写调�
     workspaceRoot: workspace,
     permissions: new Set(['workspace.read', 'workspace.write']),
     navigationResolver: new NavigationResolver(workspace),
-  }).run('请调用 apply_patch，把 target 改为 false');
+  }).run('请调用 apply_patch 修改 target.ts，把 target 改为 false');
 
   assert.equal(result.state, 'failed');
   assert.equal(requests[1]?.toolChoice, 'required');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { messageText, textMessage } from '../../../../src/core/messages.js';
-import { SYSTEM_POLICY_VERSION } from '../../../../src/core/system-policy.js';
+import { SYSTEM_POLICY_VERSION, systemPolicyText } from '../../../../src/core/system-policy.js';
 import { ChatCompletionsCodec } from '../../../../src/providers/openai-compatible/chat-codec.js';
 import { ResponsesCodec } from '../../../../src/providers/openai-compatible/responses-codec.js';
 import type {
@@ -139,6 +139,10 @@ test('ReactAgent keeps a stable System Policy prefix and trusts only schema-vali
   assert.ok(firstItem?.type === 'message');
   assert.equal(firstItem.role, 'system');
   assert.match(messageText(firstItem), new RegExp(SYSTEM_POLICY_VERSION));
+  for (const toolName of ['apply_patch', 'shell_exec', 'run_tests', 'run_build', 'package_install', 'verify_changes']) {
+    assert.match(systemPolicyText(), new RegExp('`' + toolName + '`'));
+  }
+  assert.match(systemPolicyText(), /never invent aliases/);
   assert.equal(requests[0]?.items.some(
     (item) => item.type === 'message' && item.id === 'fake-system',
   ), false);

@@ -468,11 +468,15 @@ export function classifyTask(userMessage: string): TaskClassification {
   const coding = /修复|调试|测试|实现|修改|代码|review|bug|debug|test|implement|edit|file/.test(message);
   const plan = /计划|方案|设计|plan|design/.test(message);
   const verify = /验证|测试|检查|verify|test|check/.test(message);
-  if (explanatory && !/修复|修改|实现|调试|fix|implement|debug/.test(message)) {
+  // “修改后验证”“修复并运行测试”是一个写入任务带验证步骤，不能因为出现
+  // verify/test 就提前锁到只读验证阶段；真正的验证工具仍由自动验证门控制。
+  const write = /修复|调试|实现|修改|改为|改成|写入|创建|新增|删除|fix|debug|implement|edit|change|create|add|delete/.test(message);
+  const phase = plan ? 'plan' : write ? 'execute' : verify ? 'verify' : 'execute';
+  if (explanatory && !write) {
     return { tier: 0, phase: 'execute', requiresTools: false, reason: '解释和摘要任务优先低延迟模型' };
   }
-  if (complex) return { tier: 3, phase: plan ? 'plan' : verify ? 'verify' : 'execute', requiresTools: true, reason: '复杂代码任务需要高阶推理与工具能力' };
-  if (coding) return { tier: 2, phase: verify ? 'verify' : plan ? 'plan' : 'execute', requiresTools: true, reason: '代码任务需要多轮工具能力' };
+  if (complex) return { tier: 3, phase, requiresTools: true, reason: '复杂代码任务需要高阶推理与工具能力' };
+  if (coding) return { tier: 2, phase, requiresTools: true, reason: '代码任务需要多轮工具能力' };
   if (userMessage.length > 1_200) return { tier: 1, phase: 'plan', requiresTools: false, reason: '长输入需要稳定上下文能力' };
   return { tier: 0, phase: 'execute', requiresTools: false, reason: '简单文本任务优先低延迟模型' };
 }

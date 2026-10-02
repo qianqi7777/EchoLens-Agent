@@ -411,7 +411,7 @@ function fitLatestItems(
 function largestShrinkableItem(items: ConversationItem[], protectedIds: ReadonlySet<string>): ConversationItem | undefined {
   return items.slice(1)
     .filter((item) => !protectedIds.has(item.id))
-    .filter((item) => shrinkableLength(item) > 96)
+    .filter((item) => shrinkableLength(item) > 24)
     .sort((left, right) => shrinkableLength(right) - shrinkableLength(left))[0];
 }
 
@@ -422,7 +422,9 @@ function shrinkableLength(item: ConversationItem): number {
 }
 
 function shrinkItem(item: ConversationItem): void {
-  const target = Math.max(64, Math.floor(shrinkableLength(item) / 2));
+  // 在极小上下文预算下，保留 tool_call/tool_result 的协议骨架比保留长输出更重要；
+  // 允许压到短标记，证据摘要与 evidenceIds 仍由结构化字段保留。
+  const target = Math.max(16, Math.floor(shrinkableLength(item) / 2));
   if (item.type === 'message') {
     item.content = [{ type: 'text', text: truncateText(messageText(item), target) }];
   } else if (item.type === 'tool_result') {

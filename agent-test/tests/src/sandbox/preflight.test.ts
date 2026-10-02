@@ -78,7 +78,8 @@ test('镜像准备遵循确认策略，pull 后必须重新 inspect 和 smoke te
   const prepared = await prepareSandboxImages({ runner, autoPull: 'prompt', confirmPull: async () => true, persist: false });
   assert.equal(prepared.status, 'ready');
   assert.ok(runner.requests.some((request) => request.args[0] === 'pull'));
-  assert.equal(runner.requests.filter((request) => request.args[0] === 'image').length, 3);
+  // 默认 proxyImage 与工作镜像相同，预检按唯一引用检查；配置独立代理镜像时会再检查一项。
+  assert.equal(runner.requests.filter((request) => request.args[0] === 'image').length, 2);
 });
 
 test('pull 被拒绝或失败时不伪造 ready', async () => {
