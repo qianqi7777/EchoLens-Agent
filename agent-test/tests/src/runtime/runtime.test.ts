@@ -177,6 +177,43 @@ test('search 导航只限制首轮探测，随后恢复写工具可见性', asyn
   assert.equal(requests[1]?.tools?.some((tool) => tool.name === 'apply_patch'), true);
 });
 
+test('明确点名写工具时，调查后要求模型发起受审批的写调用', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-write-required-'));
+  await mkdir(join(workspace, 'src'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'target.ts'), 'export const target = true;\n');
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    model: 'navigation-write-required-model',
+    capabilities: { ...new ScriptedModel().capabilities, supportsStructuredOutput: true },
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
+      if (requests.length === 1) {
+        return {
+          output: [{
+            type: 'tool_call', id: 'write-discovery-item', callId: 'write-discovery', name: 'read_file',
+            arguments: { path: 'src/target.ts' }, callIndex: 0,
+          }],
+          stopReason: 'tool_calls',
+        };
+      }
+      // 故意返回最终文本，验证运行时不会把“没有工具”当作成功回答。
+      return { output: [textMessage('write-required-answer', 'assistant', '没有 apply_patch 工具')], stopReason: 'completed' };
+    },
+  };
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+    permissions: new Set(['workspace.read', 'workspace.write']),
+    navigationResolver: new NavigationResolver(workspace),
+  }).run('请调用 apply_patch，把 target 改为 false');
+
+  assert.equal(result.state, 'failed');
+  assert.equal(requests[1]?.toolChoice, 'required');
+  assert.deepEqual(requests[1]?.tools?.map((tool) => tool.name), ['apply_patch']);
+  assert.match(result.trace.map((item) => item.message).join('\n'), /tool_required/u);
+});
+
 test('ReactAgent fails once with tool_required when a required discovery call is omitted', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-required-'));
   await mkdir(join(workspace, 'src', 'runtime'), { recursive: true });

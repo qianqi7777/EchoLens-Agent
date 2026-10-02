@@ -358,8 +358,19 @@ export class ReactAgent {
       const requestPhase = isModelProviderRunLifecycle(this.model) ? this.model.currentPhase() : 'execute';
       const discoveryTools = providerTools(this.model, this.registry, runtimePermissions, true);
       const discovery = navigationPending && Boolean(discoveryTools?.length);
-      const tools = discovery ? discoveryTools : providerTools(this.model, this.registry, runtimePermissions);
-      const toolChoice = requestToolChoice(this.model, machine.navigationHint, discovery, tools);
+      const allTools = discovery ? discoveryTools : providerTools(this.model, this.registry, runtimePermissions);
+      // 明确编辑请求在首轮调查后不能被模型用“没有写工具”搪塞：只收窄本次
+      // Provider 请求到已授权的写工具并要求工具调用。实际写入仍经 ToolExecutor
+      // 的 Schema、PathPolicy、权限与审批链，不在此处绕过任何安全边界。
+      const writeRequired = !discovery
+        && machine.navigationDiscoveryAttempted
+        && hasToolResultInCurrentTurn(machine.items)
+        && explicitWriteIntent(latestUserText(machine.items))
+        && runtimePermissions.has('workspace.write');
+      const tools = writeRequired
+        ? providerTools(this.model, this.registry, runtimePermissions, false, 'write')
+        : allTools;
+      const toolChoice = requestToolChoice(this.model, machine.navigationHint, discovery, tools, writeRequired);
       if (discovery) machine.navigationDiscoveryAttempted = true;
       if (this.skillRuntime) {
         try {
@@ -1145,10 +1156,12 @@ function providerTools(
   registry: ToolRegistry,
   permissions: ReadonlySet<Permission>,
   readOnly = false,
+  effect?: ToolSpec['effect'],
 ): ModelToolDefinition[] | undefined {
   if (!model.capabilities.supportsToolCalls) return undefined;
   const tools = registry.list().filter((tool) => permissions.has(tool.permission))
     .filter((tool) => !readOnly || (tool.effect ?? (tool.permission === 'workspace.read' ? 'read' : 'external')) === 'read')
+    .filter((tool) => !effect || tool.effect === effect)
     .map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -1162,10 +1175,21 @@ function requestToolChoice(
   navigationHint: NavigationHint | undefined,
   discovery: boolean,
   tools: ModelToolDefinition[] | undefined,
+  writeRequired = false,
 ): ToolChoice | undefined {
   if (!tools?.length || model.capabilities.supportsToolChoice === false) return undefined;
+  if (writeRequired) return 'required';
   if (!discovery || !navigationHint) return 'auto';
   return navigationHint.mode === 'advisory' ? 'auto' : 'required';
+}
+
+function explicitWriteIntent(message: string): boolean {
+  // 只匹配用户明确要求写入或点名写工具的请求；“检查/分析/解释”不会触发，
+  // 避免把只读调查误变成强制写操作。最终写入仍需要独立审批。
+  if (/apply[_-]?(?:patch|unified[_-]?diff)/iu.test(message)) return true;
+  const hasWriteVerb = /(?:修改|改为|改成|写入|创建|新增|删除|修复|implement|edit|change|create|delete|fix)/iu.test(message);
+  const hasConcreteTarget = /(?:[A-Za-z0-9_@./\\-]+\.(?:ts|tsx|js|jsx|json|md|py|go|rs|java|cs|cpp|h|yaml|yml|toml)|文件|函数|方法|代码)/iu.test(message);
+  return hasWriteVerb && hasConcreteTarget;
 }
 
 function hasToolResultInCurrentTurn(items: readonly ConversationItem[]): boolean {
