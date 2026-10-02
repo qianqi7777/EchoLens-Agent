@@ -1,7 +1,8 @@
+#!/usr/bin/env node
 // 交互式 CLI 入口：负责装配运行时组件（工具、模型路由、审批、会话、TUI/行模式），
 // 自身不包含任何业务逻辑。--setup 只执行初始化，不进入对话循环。
 import * as readline from 'node:readline/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
@@ -46,6 +47,28 @@ import { headlessCommand, headlessExitCode, headlessFailure, headlessPrompt, hea
 import type { McpClientManager } from './mcp/client-manager.js';
 import { PluginManager } from './plugins/plugin-manager.js';
 import { exportAuditLog, verifyAuditLog } from './session/audit.js';
+
+const packageMetadata = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string };
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  console.log(`echolens-agent ${packageMetadata.version ?? 'unknown'}`);
+  process.exit(0);
+}
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log([
+    'EchoLens Agent',
+    '',
+    'Usage:',
+    '  echolens [--json --prompt <text>] [--resume <session>]',
+    '',
+    'Options:',
+    '  -p, --prompt <text>  headless prompt',
+    '  --json               emit one JSON result',
+    '  --resume <id>        resume a session',
+    '  -v, --version        print the installed version',
+    '  -h, --help           print this help',
+  ].join('\n'));
+  process.exit(0);
+}
 
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');

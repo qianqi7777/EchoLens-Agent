@@ -1,14 +1,24 @@
 {
   "name": "echolens-agent",
   "version": "0.7.0",
-  "private": true,
   "type": "module",
+  "bin": {
+    "echolens": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "setup": "tsx src/cli.ts --setup",
+    "build": "node scripts/build-package.mjs",
+    "pack:check": "node scripts/check-package.mjs",
     "gateway:server": "tsx server/model-gateway/src/main.ts",
     "gateway:build": "tsc -p server/model-gateway/tsconfig.json",
     "gateway:test": "tsx --test agent-test/tests/server/model-gateway/src/server.test.ts",

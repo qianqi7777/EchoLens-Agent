@@ -84,6 +84,34 @@ jobs:
           path: coverage/lcov.info
           if-no-files-found: error
 
+  package:
+    name: npm package smoke test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build publishable CLI
+        run: npm run build
+      - name: Pack and install smoke test
+        run: npm run pack:check
+      - name: Upload package manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package-manifest
+          path: package-manifest.json
+          if-no-files-found: error
+
   docker-verify:
     name: Docker Sandbox verification (manual)
     if: github.event_name == 'workflow_dispatch'

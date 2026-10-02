@@ -72,6 +72,29 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 
 要求 Node.js 22 或更高版本。
 
+### 全局安装（已发布包）
+
+从 npm 安装稳定版后，可在任意工作区直接调用 CLI：
+
+```powershell
+npm install -g echolens-agent
+echolens
+```
+
+预发布版本使用 `next` 通道，稳定版使用 `latest` 通道：
+
+```powershell
+npm install -g echolens-agent@next
+npm install -g echolens-agent@latest
+echolens --version
+echolens --help
+```
+
+全局安装只负责分发 CLI 及内置 Skill，不会替用户安装 Docker、启动 Docker
+Engine 或配置模型凭据；首次运行仍会执行 Sandbox 预检和模型配置向导。
+
+### 从源码开发
+
 ```powershell
 npm install
 npm run dev
@@ -121,6 +144,27 @@ TUI 可用 `Shift+Tab` 循环 `plan → execute → auto`；终端无法区分 S
 紧随其后的首个执行 Turn；活动目标则在后续执行中持续注入，但不会授予权限、跳过审批或扩大工具范围。
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
+
+## npm 发布通道
+
+受信任的 GitHub Actions 发布流程使用 npm Trusted Publishing（OIDC），仓库中不保存长期
+npm Token。合并或推送到 `dev` 会先执行完整质量门禁，再发布带 `next` 标签的预发布版本；
+这不代表稳定版质量。推送与 `package.json` 版本一致的 `vX.Y.Z` 标签，才会发布到 `latest`。
+
+发布前可在本地复现构建、打包内容检查和安装验收：
+
+```powershell
+npm run typecheck
+npm test
+npm run test:performance
+npm run build
+npm run pack:check
+npm pack
+```
+
+`npm run pack:check` 会从临时 tarball 安装并验证 `echolens --version`，同时确认发布包不含
+`.env`、`AGENTS.md`、`studydocs/`、测试目录或服务器内部资料。生成的 tarball 和清单仅用于
+验证，不提交到仓库。
 
 ## 首轮工具导航
 
