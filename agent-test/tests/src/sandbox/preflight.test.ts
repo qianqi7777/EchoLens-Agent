@@ -73,7 +73,7 @@ test('镜像准备遵循确认策略，pull 后必须重新 inspect 和 smoke te
     ...healthyResponses().slice(0, 4),
     result({ exitCode: 1, stderr: 'No such image' }),
     result({ exitCode: 0, stdout: 'pulled' }),
-    ...healthyResponses().slice(1),
+    ...healthyResponses(),
   ]);
   const prepared = await prepareSandboxImages({ runner, autoPull: 'prompt', confirmPull: async () => true, persist: false });
   assert.equal(prepared.status, 'ready');

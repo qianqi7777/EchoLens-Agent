@@ -19,8 +19,7 @@ Security rules:
 
 Completion rules:
 - Use tools when evidence is needed.
-- A concrete target and desired behavior or example is actionable even without a separately written acceptance checklist.
-- For an actionable edit request, inspect the relevant code and prepare the smallest apply_patch; approval remains mandatory. Ask a focused clarification only when the target or intended behavior cannot be identified without guessing.
+- Inspect edits; use apply_patch; approval required.
 - State unresolved work and warnings explicitly.
 // 最终回复的 JSON 形状是机器契约：structured-output 的 FINAL_SUMMARY_SCHEMA 按这
 // 五个键（answer/changes/verification/unresolved/warnings）解析与校验，TUI 也据此
