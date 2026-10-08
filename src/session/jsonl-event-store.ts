@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, readdir, realpath, stat, truncate, unlink, type FileHandle } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { lstat, mkdir, open, readFile, readdir, stat, truncate, unlink, type FileHandle } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { redactValueWithReport } from '../providers/redaction.js';
 import { acquireFileLock, type FileLock } from '../runtime/file-lock.js';
 import {
@@ -169,9 +169,14 @@ export class JsonlEventStore implements AgentEventSink {
     if (sessionId === currentSessionId) throw new Error('不能删除当前会话，请先退出或切换工作目录');
     if (expected.sessionId !== sessionId) throw new Error('会话确认信息不匹配');
     const root = resolve(rootDirectory);
-    const canonical = await realpath(root);
-    const same = process.platform === 'win32' ? canonical.toLowerCase() === root.toLowerCase() : canonical === root;
-    if (!same) throw new Error('拒绝通过符号链接目录删除会话');
+    // Windows 的 8.3 短路径与 realpath 返回值可能不同，不能据字符串差异判定链接。
+    // 逐级 lstat 保留对根目录和父目录中符号链接/Junction 的拒绝。
+    for (let directory = root; ; directory = dirname(directory)) {
+      const info = await lstat(directory);
+      if (info.isSymbolicLink()) throw new Error('拒绝通过符号链接目录删除会话');
+      if (!info.isDirectory()) throw new Error('会话根路径不是目录');
+      if (dirname(directory) === directory) break;
+    }
     const target = resolve(root, `${sessionId}.jsonl`);
     const lock = await acquireFileLock(`${target}.lock`, { timeoutMs: 0 });
     try {

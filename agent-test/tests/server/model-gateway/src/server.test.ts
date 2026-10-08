@@ -301,7 +301,7 @@ test('月度额度按 UTC 月份隔离', async (context) => {
   assert.equal(usage.requests, 1);
 });
 
-test('上游限流、响应大小和超时返回稳定代理错误', async (context) => {
+test('上游限流和响应大小返回稳定代理错误', async (context) => {
   const upstream = createServer((request, response) => {
     void (async () => {
       const chunks: Buffer[] = [];
@@ -322,7 +322,8 @@ test('上游限流、响应大小和超时返回稳定代理错误', async (cont
   assert.ok(address && typeof address !== 'string');
   const gateway = await startGatewayServer({
     port: 0,
-    maxUpstreamDurationMs: 25,
+    // 此处验证限流和大小边界，避免 Windows CI 调度延迟抢先触发超时。
+    maxUpstreamDurationMs: 5_000,
     maxUpstreamResponseBytes: 128,
     models: [model],
     upstreams: {
@@ -345,8 +346,29 @@ test('上游限流、响应大小和超时返回稳定代理错误', async (cont
   assert.equal(large.status, 502);
   assert.equal((await large.json() as { error: { code: string } }).error.code, 'upstream_response_too_large');
 
-  // timeout 场景没有上游响应分支，依赖真实时钟触发 25ms 的 maxUpstreamDurationMs 上限；
-  // 三个场景共同固定错误码映射：429 可重试 / 502 响应超限 / 503 超时。
+});
+
+test('上游超时返回稳定代理错误', async (context) => {
+  // 消费请求但不发送响应，由独立网关的短超时触发取消。
+  const upstream = createServer((request) => request.resume());
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  const address = upstream.address();
+  assert.ok(address && typeof address !== 'string');
+  const gateway = await startGatewayServer({
+    port: 0,
+    maxUpstreamDurationMs: 25,
+    models: [model],
+    upstreams: {
+      [model.id]: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: 'secret',
+        protocol: 'chat_completions',
+      },
+    },
+  });
+  context.after(async () => { await gateway.close(); upstream.close(); await once(upstream, 'close'); });
+  const token = await issueToken(gateway);
   const timeout = await requestInference(gateway.baseUrl, token.access_token, 'timeout');
   assert.equal(timeout.status, 503);
   assert.equal((await timeout.json() as { error: { code: string } }).error.code, 'upstream_timeout');
