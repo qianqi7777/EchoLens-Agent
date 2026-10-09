@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -13,9 +13,10 @@ const patchTool: ToolSpec = {
   inputSchema: { type: 'object', additionalProperties: true }, execute: async () => ({ status: 'ok', content: '', summary: '', evidenceIds: [] }),
 };
 
+// 测试边界与 PathPolicy 一样使用真实路径，避免 Windows TEMP 中的 8.3 别名造成误判。
 test('未配置授权根时，工作区外路径仍硬拒绝', async (t) => {
-  const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-'));
-  const outside = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-'));
+  const workspace = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-')));
+  const outside = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-')));
   t.after(() => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
   const target = path.join(outside, 'file.txt'); await writeFile(target, 'outside\n');
   const policy = await PathPolicy.create(workspace);
@@ -28,8 +29,8 @@ test('未配置授权根时，工作区外路径仍硬拒绝', async (t) => {
 });
 
 test('显式授权根允许读取但写入逐次进入审批，且只读根拒绝写入', async (t) => {
-  const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-'));
-  const outside = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-'));
+  const workspace = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-')));
+  const outside = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-')));
   t.after(() => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
   await mkdir(path.join(workspace, '.echolens'), { recursive: true });
   const target = path.join(outside, 'file.txt'); await writeFile(target, 'outside\n');
@@ -50,8 +51,8 @@ test('显式授权根允许读取但写入逐次进入审批，且只读根拒�
 });
 
 test('授权根不允许重解析点、.git 与越界语法', async (t) => {
-  const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-'));
-  const outside = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-'));
+  const workspace = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-')));
+  const outside = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-')));
   const linked = path.join(workspace, '.echolens', 'linked-root');
   t.after(() => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
   await mkdir(path.join(workspace, '.echolens'), { recursive: true });
@@ -73,8 +74,8 @@ test('授权根不允许重解析点、.git 与越界语法', async (t) => {
 });
 
 test('授权根配置目录自身为链接时不加载外部配置', async (t) => {
-  const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-'));
-  const outside = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-'));
+  const workspace = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-workspace-')));
+  const outside = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-outside-')));
   t.after(() => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
   await writeFile(path.join(outside, 'roots.json'), JSON.stringify({ version: 1, roots: [{ path: outside, allowWrite: true }] }));
   const privateLink = path.join(workspace, '.echolens');
@@ -91,8 +92,8 @@ test('授权根配置目录自身为链接时不加载外部配置', async (t) =
 });
 
 test('PathPolicy 仅在显式可写授权根内创建和删除文件', async (t) => {
-  const workspace = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-write-workspace-'));
-  const outside = await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-write-outside-'));
+  const workspace = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-write-workspace-')));
+  const outside = await realpath(await mkdtemp(path.join(tmpdir(), 'echolens-extra-root-write-outside-')));
   t.after(() => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
   await mkdir(path.join(workspace, '.echolens'));
   await writeFile(path.join(workspace, '.echolens', 'roots.json'), JSON.stringify({

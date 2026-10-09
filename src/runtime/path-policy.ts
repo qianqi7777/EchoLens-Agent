@@ -221,7 +221,7 @@ export class PathPolicy {
   async createFile(input: string): Promise<VerifiedCreateFile> {
     validatePathInput(input, true);
     await this.assertRootIdentity();
-    const classification = this.classifyPath(input);
+    const classification = await this.classifyPathForAccess(input, true);
     if (classification.scope === 'denied') throw new PathPolicyError('path_outside_workspace', '目标路径不在工作区或显式授权根内');
     if (classification.scope === 'workspace' && isAbsoluteInput(input)) throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
     if (classification.scope === 'authorized' && !classification.root?.allowWrite) throw new PathPolicyError('path_outside_workspace', '授权根未允许写入');
@@ -307,7 +307,7 @@ export class PathPolicy {
   private async resolveExistingWithIntent(input: string, kind: 'file' | 'directory' | 'any', intent: 'read' | 'write'): Promise<ResolvedPath> {
     validatePathInput(input, true);
     await this.assertRootIdentity();
-    const classification = this.classifyPath(input);
+    const classification = await this.classifyPathForAccess(input, false);
     if (classification.scope === 'denied') throw new PathPolicyError('path_outside_workspace', '目标路径不在工作区或显式授权根内');
     if (classification.scope === 'workspace' && isAbsoluteInput(input)) throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
     if (intent === 'write' && classification.scope === 'authorized' && !classification.root?.allowWrite) {
@@ -334,6 +334,20 @@ export class PathPolicy {
       input, candidatePath, canonicalPath, stat: pathStat,
       baseRoot, external: classification.scope === 'authorized', allowWrite: classification.root?.allowWrite ?? true, intent,
     };
+  }
+
+  /** Resolve Windows 8.3 aliases before applying lexical root checks. */
+  private async classifyPathForAccess(input: string, allowMissingLeaf: boolean) {
+    const initial = this.classifyPath(input);
+    if (initial.scope !== 'denied' || !isAbsoluteInput(input)) return initial;
+    const candidate = initial.absolutePath;
+    const probe = allowMissingLeaf ? path.dirname(candidate) : candidate;
+    const canonicalProbe = await realpath(probe).catch(() => undefined);
+    if (!canonicalProbe) return initial;
+    const canonicalCandidate = allowMissingLeaf
+      ? path.join(canonicalProbe, path.basename(candidate))
+      : canonicalProbe;
+    return this.classifyPath(canonicalCandidate);
   }
 
   private async verifyHandle(
@@ -383,7 +397,7 @@ export class PathPolicy {
     if (!handleStat.isFile()) throw new PathPolicyError('not_a_file', '新建目标不是普通文件');
     await this.assertRootIdentity();
     const parentPath = path.dirname(candidatePath);
-    const classification = this.classifyPath(input);
+    const classification = await this.classifyPathForAccess(input, true);
     const baseRoot = classification.scope === 'workspace' ? this.workspaceRoot : classification.root?.canonicalPath ?? this.workspaceRoot;
     await this.assertNoLinkComponents(parentPath, baseRoot);
     const canonicalPath = await realpath(candidatePath).catch((error) => {
