@@ -91,7 +91,9 @@ echolens --help
 ```
 
 全局安装只负责分发 CLI 及内置 Skill，不会替用户安装 Docker、启动 Docker
-Engine 或配置模型凭据；首次运行仍会执行 Sandbox 预检和模型配置向导。
+Engine 或配置模型凭据；首次运行仍会执行 Sandbox 预检和模型配置向导。全局安装模式会把
+模型路由配置保存到用户目录的 `.echolens/.env.local`（Windows 为
+`%USERPROFILE%\.echolens\.env.local`），因此从不同工作区启动时会复用同一份配置。
 
 ### 从源码开发
 
@@ -104,9 +106,25 @@ npm run dev
 运行，`Ctrl+C` 取消当前 Turn。非 TTY 环境自动保留 readline 兼容模式。
 
 首次启动会进入终端设置向导，可选择 DeepSeek、自定义 OpenAI-compatible API
-或 EchoLens Gateway。配置写入已被 Git 忽略的 `.env.local`，后续启动会自动加载。
+或 EchoLens Gateway。全局安装时配置写入用户目录 `.echolens/.env.local`；从源码开发并显式传入
+项目根目录时才使用项目 `.env.local`。旧版本工作区中的 `.env.local` 会在首次启动时自动迁移。
 需要更换模型路由时运行 `npm run setup`。完整变量示例见 `.env.example`；shell、
 IDE 和进程管理器显式注入的环境变量仍可使用。
+
+### 空目录创建 TypeScript 文件
+
+空目录不是 Git 仓库时，`git_status` 报错属于预期结果；没有文件时 `list_files` 也会返回空列表。
+建议先创建项目清单，再安装依赖和验证：
+
+```powershell
+npm init -y
+npm install --save-dev typescript
+npx tsc --init
+```
+
+如果 Sandbox 中的 `package_install` 失败，先查看 npm 的完整 stderr，再重试验证；验证器不会把缺少
+`node_modules/.bin/tsc` 自动当作安装成功。Sandbox 命令失败时会保留 stdout/stderr，便于定位网络、
+权限或包管理器错误。
 
 远程模型 URL 必须使用 HTTPS，本机 loopback 调试地址除外。运行期 Session 数据
 保存在工作区的 `.echolens/sessions/`，该目录默认被 Git 忽略且不可由 Agent 工具读取。

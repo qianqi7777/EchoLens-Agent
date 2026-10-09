@@ -1,6 +1,7 @@
-import { chmod, mkdir, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { loadEnvFile } from 'node:process';
 import { parsePermissionProfile } from '../runtime/permission-profile.js';
 
@@ -23,28 +24,45 @@ export interface StartupConfigurationResult {
   route: 'direct' | 'gateway';
 }
 
+/** 工作区开发模式使用工作区配置；全局安装模式使用用户目录配置。 */
+export function startupConfigPath(projectRoot?: string): string {
+  return projectRoot
+    ? resolve(projectRoot, '.env.local')
+    : resolve(process.env.ECHOLENS_HOME?.trim() || join(homedir(), '.echolens'), '.env.local');
+}
+
 export async function ensureStartupConfiguration(
   options: StartupConfigurationOptions,
 ): Promise<StartupConfigurationResult> {
   const env = options.env ?? process.env;
   parsePermissionProfile(env.AGENT_PERMISSION_PROFILE);
-  const configPath = resolve(options.projectRoot ?? process.cwd(), '.env.local');
+  const workspaceRootFromEnvironment = env.AGENT_WORKSPACE_ROOT;
+  const configPath = startupConfigPath(options.projectRoot);
+  const legacyConfigPath = resolve(process.cwd(), '.env.local');
+  const sourceConfigPath = !options.projectRoot && !existsSync(configPath) && existsSync(legacyConfigPath)
+    ? legacyConfigPath
+    : configPath;
 
-  if (!options.force && existsSync(configPath)) {
-    loadLocalEnv(configPath, env);
+  if (!options.force && existsSync(sourceConfigPath)) {
+    loadLocalEnv(sourceConfigPath, env);
+    // 平滑迁移旧版按工作区保存的配置；后续从任意目录启动都读取用户级配置。
+    if (!options.projectRoot && sourceConfigPath !== configPath && env === process.env) {
+      await writePrivateEnvFile(configPath, await readFile(sourceConfigPath, 'utf8'));
+    }
   }
 
   const currentRoute = routeValue(env.AGENT_MODEL_ROUTE);
   // 已配置过有效路由时直接复用并跳过向导，重复启动不应改写既有配置；
   // 只有显式 force 才允许覆盖重配。
   if (!options.force && currentRoute) {
+    if (!options.projectRoot && !workspaceRootFromEnvironment) env.AGENT_WORKSPACE_ROOT = process.cwd();
     return { configured: false, configPath, route: currentRoute };
   }
 
   const notify = options.notify ?? console.log;
   notify('');
   notify('EchoLens Agent 首次启动设置');
-  notify('配置只保存在本机 .env.local；该文件已被 Git 忽略。');
+  notify('配置只保存在本机 .env.local。');
 
   const routeChoice = await askChoice(
     options.terminal,
@@ -61,6 +79,7 @@ export async function ensureStartupConfiguration(
   const write = options.write ?? writePrivateEnvFile;
   await write(configPath, content);
   Object.assign(env, values);
+  if (!options.projectRoot && !workspaceRootFromEnvironment) env.AGENT_WORKSPACE_ROOT = process.cwd();
 
   notify(`配置已保存：${configPath}`);
   // 完成后只上报配置路径与路由，凭据取值（如 API Key）不打印到终端或日志。
