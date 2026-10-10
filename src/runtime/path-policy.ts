@@ -221,7 +221,7 @@ export class PathPolicy {
   async createFile(input: string): Promise<VerifiedCreateFile> {
     validatePathInput(input, true);
     await this.assertRootIdentity();
-    const classification = this.classifyPath(input);
+    const classification = await this.classifyPathForAccess(input, true);
     if (classification.scope === 'denied') throw new PathPolicyError('path_outside_workspace', '目标路径不在工作区或显式授权根内');
     if (classification.scope === 'workspace' && isAbsoluteInput(input)) throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
     if (classification.scope === 'authorized' && !classification.root?.allowWrite) throw new PathPolicyError('path_outside_workspace', '授权根未允许写入');
@@ -307,7 +307,7 @@ export class PathPolicy {
   private async resolveExistingWithIntent(input: string, kind: 'file' | 'directory' | 'any', intent: 'read' | 'write'): Promise<ResolvedPath> {
     validatePathInput(input, true);
     await this.assertRootIdentity();
-    const classification = this.classifyPath(input);
+    const classification = await this.classifyPathForAccess(input, false);
     if (classification.scope === 'denied') throw new PathPolicyError('path_outside_workspace', '目标路径不在工作区或显式授权根内');
     if (classification.scope === 'workspace' && isAbsoluteInput(input)) throw new PathPolicyError('absolute_path', '只允许工作区相对路径');
     if (intent === 'write' && classification.scope === 'authorized' && !classification.root?.allowWrite) {
@@ -334,6 +334,20 @@ export class PathPolicy {
       input, candidatePath, canonicalPath, stat: pathStat,
       baseRoot, external: classification.scope === 'authorized', allowWrite: classification.root?.allowWrite ?? true, intent,
     };
+  }
+
+  /** Resolve Windows 8.3 aliases before applying lexical root checks. */
+  private async classifyPathForAccess(input: string, allowMissingLeaf: boolean) {
+    const initial = this.classifyPath(input);
+    if (initial.scope !== 'denied' || !isAbsoluteInput(input)) return initial;
+    const candidate = initial.absolutePath;
+    const probe = allowMissingLeaf ? path.dirname(candidate) : candidate;
+    const canonicalProbe = await realpath(probe).catch(() => undefined);
+    if (!canonicalProbe) return initial;
+    const canonicalCandidate = allowMissingLeaf
+      ? path.join(canonicalProbe, path.basename(candidate))
+      : canonicalProbe;
+    return this.classifyPath(canonicalCandidate);
   }
 
   private async verifyHandle(
@@ -383,7 +397,7 @@ export class PathPolicy {
     if (!handleStat.isFile()) throw new PathPolicyError('not_a_file', '新建目标不是普通文件');
     await this.assertRootIdentity();
     const parentPath = path.dirname(candidatePath);
-    const classification = this.classifyPath(input);
+    const classification = await this.classifyPathForAccess(input, true);
     const baseRoot = classification.scope === 'workspace' ? this.workspaceRoot : classification.root?.canonicalPath ?? this.workspaceRoot;
     await this.assertNoLinkComponents(parentPath, baseRoot);
     const canonicalPath = await realpath(candidatePath).catch((error) => {
@@ -529,7 +543,9 @@ export function validateRelativePath(input: string): void {
     if (segment.includes(':')) {
       throw new PathPolicyError('alternate_data_stream', '拒绝 NTFS Alternate Data Stream');
     }
-    if (/[<>"|?*]/.test(segment)) throw new PathPolicyError('invalid_path', '路径包含 Windows 非法字符');
+    // 控制字符在 Windows 与 POSIX 工具链中的解析/日志行为不一致，可能造成隐藏路径、
+    // 终端注入或跨平台规范化绕过；除 NUL 外全部在路径策略层拒绝。
+    if (/[\u0001-\u001f<>"|?*]/u.test(segment)) throw new PathPolicyError('invalid_path', '路径包含 Windows 非法字符');
     // 以点或空格结尾的组件会被 Windows 静默截断，8.3 短文件名（如 SOURCE~1）可遮蔽真实目录名，
     // 二者都作为潜在的绕过形态拒绝。
     if (/[. ]$/.test(segment)) {

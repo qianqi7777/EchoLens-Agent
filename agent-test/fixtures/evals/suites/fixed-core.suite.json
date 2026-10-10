@@ -7,6 +7,10 @@
     { "task": "tasks/patch-create.task.json", "candidate": "candidates/patch-create.candidate.json" },
     { "task": "tasks/session-dedup.task.json", "candidate": "candidates/session-dedup.candidate.json" },
     { "task": "tasks/approval-denial.task.json", "candidate": "candidates/approval-denial.candidate.json" },
+    { "task": "tasks/answer-casefold.task.json", "candidate": "candidates/answer-casefold.candidate.json" },
+    { "task": "tasks/patch-multi-file.task.json", "candidate": "candidates/patch-multi-file.candidate.json" },
+    { "task": "tasks/security-forbidden-tool.task.json", "candidate": "candidates/security-forbidden-tool.candidate.json" },
+    { "task": "tasks/security-symlink-target.task.json", "candidate": "candidates/security-symlink-target.candidate.json" },
     { "template": "templates/seeded-answer.template.json", "seed": "fixed-seed-001", "candidate": "candidates/seeded-answer.candidate.json" },
     { "template": "templates/seeded-answer.template.json", "seed": "fixed-seed-002", "candidate": "candidates/seeded-answer.candidate.json" }
   ]

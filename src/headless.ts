@@ -10,7 +10,13 @@ export interface HeadlessOutput {
   sessionId?: string;
   verified?: boolean;
   degraded?: boolean;
+  command?: string;
+  lines?: string[];
   error?: { code: string; message: string };
+}
+
+export function headlessCommand(command: string, lines: readonly string[]): HeadlessOutput {
+  return { version: HEADLESS_OUTPUT_VERSION, ok: true, command, lines: [...lines] };
 }
 
 export function headlessSuccess(result: AgentRunResult): HeadlessOutput {

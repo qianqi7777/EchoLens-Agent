@@ -1,23 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { redactValueWithReport } from '../../../src/providers/redaction.js';
 import type { EvalRunRecord } from './types.js';
 import { runEvalFiles } from './file-runner.js';
 import { aggregateMetrics, calculateRunMetrics, type EvalAggregateMetrics, type EvalRunMetrics } from './metrics.js';
-
-const FIXTURE_ROOT = path.resolve('agent-test/fixtures/evals');
-
-interface EvalSuiteManifest {
-  schemaVersion: 1;
-  id: string;
-  version: string;
-  entries: Array<{
-    task?: string;
-    template?: string;
-    seed?: string;
-    candidate: string;
-  }>;
-}
+import { auditEvalSuite, readSuiteManifest, resolveEvalFixture, type EvalSuiteAudit } from './suite-audit.js';
 
 export interface EvalSuiteResult {
   schemaVersion: 1;
@@ -31,6 +18,11 @@ export interface EvalSuiteResult {
   successRate: number;
   totalDurationMs: number;
   aggregateMetrics: EvalAggregateMetrics;
+  audit: EvalSuiteAudit;
+  breakdown: {
+    domain: Record<string, EvalDimensionAggregate>;
+    difficulty: Record<string, EvalDimensionAggregate>;
+  };
   results: Array<{
     taskId: string;
     model: 'none (static-fixture)';
@@ -40,7 +32,15 @@ export interface EvalSuiteResult {
     metrics: EvalRunMetrics;
     assertions: EvalRunRecord['assertions'];
     candidate: EvalRunRecord['candidate'];
+    metadata: EvalSuiteAudit['tasks'][number];
   }>;
+}
+
+export interface EvalDimensionAggregate {
+  runs: number;
+  passed: number;
+  successRate: number;
+  layerScores: EvalAggregateMetrics['layerScores'];
 }
 
 export async function runEvalSuite(
@@ -48,14 +48,14 @@ export async function runEvalSuite(
   resultPath: string,
   options: { docker?: { executable?: string; image?: string; user?: string } } = {},
 ): Promise<{ report: EvalSuiteResult; reportPath: string }> {
-  if (!/^[a-z0-9][a-z0-9-]{0,63}$/u.test(suiteId)) throw new Error('Suite 名称无效');
-  const suitePath = path.join(FIXTURE_ROOT, 'suites', `${suiteId}.suite.json`);
-  const manifest = await readManifest(suitePath, suiteId);
+  const manifest = await readSuiteManifest(suiteId);
+  const audit = await auditEvalSuite(suiteId);
+  if (!audit.passed) throw new Error(`Eval Suite 审计失败：${formatAuditFailure(audit)}`);
   const records: Array<{ record: EvalRunRecord; seed?: string }> = [];
 
   for (const entry of manifest.entries) {
-    const taskPath = entry.task ? resolveFixture(entry.task) : undefined;
-    const templatePath = entry.template ? resolveFixture(entry.template) : undefined;
+    const taskPath = entry.task ? resolveEvalFixture(entry.task) : undefined;
+    const templatePath = entry.template ? resolveEvalFixture(entry.template) : undefined;
     if (Boolean(taskPath) === Boolean(templatePath)) throw new Error('Suite 每项必须且只能引用静态任务或动态模板');
     if (templatePath && typeof entry.seed !== 'string') throw new Error('Suite 动态任务必须固定 seed');
     if (taskPath && entry.seed !== undefined) throw new Error('静态任务不得声明 seed');
@@ -63,7 +63,7 @@ export async function runEvalSuite(
       taskPath,
       templatePath,
       seed: entry.seed,
-      candidatePath: resolveFixture(entry.candidate),
+      candidatePath: resolveEvalFixture(entry.candidate),
       resultPath,
       suiteId: `${manifest.id}@${manifest.version}`,
       docker: options.docker,
@@ -73,6 +73,7 @@ export async function runEvalSuite(
 
   const passedCount = records.filter(({ record }) => record.passed).length;
   const runMetrics = records.map(({ record }) => calculateRunMetrics(record));
+  const metadataByTask = new Map(audit.tasks.map((metadata) => [metadata.taskId, metadata]));
   const report: EvalSuiteResult = {
     schemaVersion: 1,
     suiteId: manifest.id,
@@ -85,6 +86,11 @@ export async function runEvalSuite(
     successRate: records.length ? passedCount / records.length : 0,
     totalDurationMs: records.reduce((total, { record }) => total + record.durationMs, 0),
     aggregateMetrics: aggregateMetrics(runMetrics),
+    audit,
+    breakdown: {
+      domain: dimensionBreakdown(records, runMetrics, metadataByTask, 'domain'),
+      difficulty: dimensionBreakdown(records, runMetrics, metadataByTask, 'difficulty'),
+    },
     results: records.map(({ record, seed }) => ({
       taskId: record.taskId,
       model: 'none (static-fixture)',
@@ -94,6 +100,7 @@ export async function runEvalSuite(
       metrics: calculateRunMetrics(record),
       assertions: record.assertions,
       candidate: record.candidate,
+      metadata: { ...metadataByTask.get(record.taskId)! },
     })),
   };
   const reportPath = `${resultPath}.report.json`;
@@ -103,23 +110,36 @@ export async function runEvalSuite(
   return { report, reportPath };
 }
 
-async function readManifest(filePath: string, expectedId: string): Promise<EvalSuiteManifest> {
-  const manifest = JSON.parse(await readFile(filePath, 'utf8')) as Partial<EvalSuiteManifest>;
-  if (manifest.schemaVersion !== 1 || manifest.id !== expectedId
-    || typeof manifest.version !== 'string' || !Array.isArray(manifest.entries)
-    || manifest.entries.length < 1 || manifest.entries.length > 500) {
-    throw new Error(`Eval Suite 清单无效：${expectedId}`);
-  }
-  return manifest as EvalSuiteManifest;
+function dimensionBreakdown(
+  records: Array<{ record: EvalRunRecord }>,
+  metrics: readonly EvalRunMetrics[],
+  metadataByTask: ReadonlyMap<string, EvalSuiteAudit['tasks'][number]>,
+  dimension: 'domain' | 'difficulty',
+): Record<string, EvalDimensionAggregate> {
+  const grouped = new Map<string, EvalRunMetrics[]>();
+  records.forEach(({ record }, index) => {
+    const value = metadataByTask.get(record.taskId)?.[dimension];
+    if (!value) return;
+    const items = grouped.get(value) ?? [];
+    items.push(metrics[index]!);
+    grouped.set(value, items);
+  });
+  return Object.fromEntries([...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([value, items]) => {
+    const passed = items.filter((item) => item.passed).length;
+    return [value, {
+      runs: items.length,
+      passed,
+      successRate: items.length ? passed / items.length : 0,
+      layerScores: aggregateMetrics(items).layerScores,
+    }];
+  }));
 }
 
-function resolveFixture(relative: string): string {
-  if (typeof relative !== 'string' || relative.length > 512 || path.isAbsolute(relative)
-    || relative.split(/[\\/]/u).some((segment) => !segment || segment === '.' || segment === '..')) {
-    throw new Error('Suite fixture 路径必须是干净的相对路径');
-  }
-  const resolved = path.resolve(FIXTURE_ROOT, relative);
-  const rel = path.relative(FIXTURE_ROOT, resolved);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Suite fixture 路径越界');
-  return resolved;
+function formatAuditFailure(audit: EvalSuiteAudit): string {
+  return [
+    audit.duplicateTaskIds.length ? `重复 ID=${audit.duplicateTaskIds.join(',')}` : '',
+    audit.duplicateFingerprints.length ? `重复内容=${audit.duplicateFingerprints.length}` : '',
+    audit.versionMismatches.length ? `版本不一致=${audit.versionMismatches.join(',')}` : '',
+    audit.metadataMissing.length ? `缺少元数据=${audit.metadataMissing.join(',')}` : '',
+  ].filter(Boolean).join('；');
 }

@@ -87,8 +87,15 @@ export async function executeBackgroundTaskCommand(
   if (!objective) {
     return { handled: true, lines: ['用法：/task <explore|test|review> [sandbox|worktree] <目标>'] };
   }
-  const task = await service.enqueue(action, objective, isolation);
-  return { handled: true, lines: [`已创建后台任务：${formatBackgroundTask(task)}`] };
+  try {
+    const task = await service.enqueue(action, objective, isolation);
+    return { handled: true, lines: [`已创建后台任务：${formatBackgroundTask(task)}`] };
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'sandbox_setup_required') {
+      return { handled: true, lines: ['sandbox_setup_required：Sandbox 未就绪，后台 test 子 Agent 不可用；请先完成启动预检。'] };
+    }
+    throw error;
+  }
 }
 
 export function formatBackgroundTask(task: BackgroundTaskRecord): string {

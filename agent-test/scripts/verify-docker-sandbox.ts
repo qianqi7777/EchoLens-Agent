@@ -1,18 +1,22 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyPatch } from '../../src/runtime/structured-patch.js';
 import { DockerSandboxAdapter } from '../../src/sandbox/docker-sandbox.js';
 import { NodeProcessRunner } from '../../src/sandbox/process-runner.js';
+import { runSandboxPreflight } from '../../src/sandbox/preflight.js';
 import type { SandboxExecuteRequest, SandboxExecuteResult } from '../../src/sandbox/types.js';
 
 const executable = process.env.AGENT_DOCKER_EXECUTABLE?.trim() || 'docker';
 const image = process.env.AGENT_SANDBOX_IMAGE?.trim() || 'node:22-bookworm-slim';
 const proxyImage = process.env.AGENT_SANDBOX_PROXY_IMAGE?.trim() || image;
 const runner = new NodeProcessRunner();
-await requireDocker(runner, executable, image, proxyImage);
+const preflight = await runSandboxPreflight({
+  projectRoot: process.cwd(), executable, image, proxyImage, runner,
+});
+if (!preflight.ok) throw new Error(`Sandbox 预检失败 [${preflight.status}]：${preflight.failureReason ?? '未知原因'}`);
 
 // 工作区建在宿主 OS 临时目录，挂载为容器内的 /workspace；容器内路径始终是 POSIX，宿主侧（Windows）使用盘符路径。
 const root = await mkdtemp(join(tmpdir(), 'echolens-docker-smoke-'));
@@ -65,8 +69,13 @@ try {
   const denied = await sandbox.execute(networkRequest(root, 'example.com', 'deny', '/'));
   assert.equal(denied.status, 'passed', details(denied));
 
-  console.log(JSON.stringify({
-    docker: 'available',
+  const evidence = {
+    version: 1,
+    checkedAt: preflight.checkedAt,
+    docker: preflight.docker,
+    images: preflight.images,
+    smokeTest: preflight.smokeTest,
+    dockerStatus: 'available',
     image,
     readOnlyWriteBlocked: true,
     directNetworkBlocked: true,
@@ -74,7 +83,12 @@ try {
     patchOperations: generated.patch?.operations.length ?? 0,
     allowedDomainConnected: true,
     unlistedDomainDenied: true,
-  }, null, 2));
+  };
+  const evidenceDirectory = join(process.cwd(), '.echolens', 'evals', 'results');
+  await mkdir(evidenceDirectory, { recursive: true });
+  const evidencePath = join(evidenceDirectory, `docker-preflight-${new Date().toISOString().replace(/[:.]/gu, '-')}.json`);
+  await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  console.log(JSON.stringify({ ...evidence, evidencePath }, null, 2));
 } finally {
   await rm(root, { recursive: true, force: true });
 }
@@ -99,32 +113,6 @@ function networkRequest(root: string, hostname: string, expected: 'allow' | 'den
     network: { mode: 'allowlist', allowedDomains: ['registry.npmjs.org'], allowedPorts: [443] },
     resources: { timeoutMs: 60_000, memoryMiB: 512, cpuCount: 1, processLimit: 64, maxOutputBytes: 64 * 1024 },
   });
-}
-
-// 镜像必须已预先在本地准备，脚本不触发 image pull，避免把网络拉取失败混杂进沙箱隔离校验。
-async function requireDocker(
-  processRunner: NodeProcessRunner,
-  docker: string,
-  ...images: string[]
-): Promise<void> {
-  const info = await processRunner.run({
-    executable: docker,
-    args: ['info', '--format', '{{.ServerVersion}}'],
-    timeoutMs: 15_000,
-    maxOutputBytes: 8_192,
-  });
-  if (info.spawnError || info.exitCode !== 0) throw new Error('Docker Engine 不可用');
-  for (const current of new Set(images)) {
-    const inspect = await processRunner.run({
-      executable: docker,
-      args: ['image', 'inspect', current, '--format', '{{.Id}}'],
-      timeoutMs: 15_000,
-      maxOutputBytes: 8_192,
-    });
-    if (inspect.spawnError || inspect.exitCode !== 0) {
-      throw new Error(`Docker 镜像未预先准备：${current}`);
-    }
-  }
 }
 
 function details(result: SandboxExecuteResult): string {

@@ -39,6 +39,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 写操作可由 `AGENT_VERIFY_GATE=off|auto|strict` 控制自动验证；执行仍通过 ToolExecutor 与 Sandbox，失败会回灌 Agent，连续两次失败后暂停
 - 自动验证可将 TAP、Jest、pytest、Go test 和 Cargo test 的失败输出解析为有界结构化摘要；未知格式仍保留脱敏后的原始输出
 - Docker Sandbox 默认禁网、只读容器根、清空 Capability、禁止提权并限制 CPU、内存和 PID
+- 启动预检记录 Docker Engine、context、镜像摘要和 smoke test；未就绪时可明确进入受限只读模式
 - Sandbox 只挂载过滤后的临时工作区快照，排除 `.env*`、`.git`、`.echolens` 和 Git 忽略文件
 - Sandbox 写入以 Artifact Bundle 返回，并通过独立审批的结构化 Patch 回放到宿主工作区
 - `package_install` 使用内部 Docker 网络和域名 allowlist 代理，不向工作容器提供直连公网
@@ -46,7 +47,7 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - MCP Server 可配置每回合/每会话调用次数与输出字节配额；超限拒绝、写入 Session Event Store，并可用 `/mcp` 查看用量
 - 提供 `outline_file`、`find_symbols`、`go_to_definition`、`find_references`、`get_diagnostics`
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
-- 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换和质量/成本/安全指标
+- 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换、任务域/难度元数据、结构/行为/效率分层评分和质量/成本/安全指标
 - 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
 - 支持版本锁定的 Eval Suite（静态任务 + 固定 seed 动态变体），归档逐任务原始结果与汇总报告；复现命令 `npm run eval:fixed`
 - 提供带跨进程锁的持久后台任务队列、可配置 Worker 池并发、工作区互斥、租约恢复、显式取消/恢复和状态通知
@@ -70,6 +71,29 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 ## 快速开始
 
 要求 Node.js 22 或更高版本。
+
+### 全局安装（已发布包）
+
+从 npm 安装稳定版后，可在任意工作区直接调用 CLI：
+
+```powershell
+npm install -g echolens-agent
+echolens
+```
+
+预发布版本使用 `next` 通道，稳定版使用 `latest` 通道：
+
+```powershell
+npm install -g echolens-agent@next
+npm install -g echolens-agent@latest
+echolens --version
+echolens --help
+```
+
+全局安装只负责分发 CLI 及内置 Skill，不会替用户安装 Docker、启动 Docker
+Engine 或配置模型凭据；首次运行仍会执行 Sandbox 预检和模型配置向导。
+
+### 从源码开发
 
 ```powershell
 npm install
@@ -121,6 +145,27 @@ TUI 可用 `Shift+Tab` 循环 `plan → execute → auto`；终端无法区分 S
 
 Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` 可关闭。
 
+## npm 发布通道
+
+受信任的 GitHub Actions 发布流程使用 npm Trusted Publishing（OIDC），仓库中不保存长期
+npm Token。合并或推送到 `dev` 会先执行完整质量门禁，再发布带 `next` 标签的预发布版本；
+这不代表稳定版质量。推送与 `package.json` 版本一致的 `vX.Y.Z` 标签，才会发布到 `latest`。
+
+发布前可在本地复现构建、打包内容检查和安装验收：
+
+```powershell
+npm run typecheck
+npm test
+npm run test:performance
+npm run build
+npm run pack:check
+npm pack
+```
+
+`npm run pack:check` 会从临时 tarball 安装并验证 `echolens --version`，同时确认发布包不含
+`.env`、`AGENTS.md`、`studydocs/`、测试目录或服务器内部资料。生成的 tarball 和清单仅用于
+验证，不提交到仓库。
+
 ## 首轮工具导航
 
 代码、配置、测试和仓库维护类请求会先在本地匹配功能目录与工作区索引，再把有限的候选文件、
@@ -162,15 +207,35 @@ npm run agent-test:web
 
 ## Sandbox
 
-模型触发的 Shell、测试、构建和安装动作默认需要审批。高隔离执行要求本机安装并启动
-Docker，同时预先准备 `AGENT_SANDBOX_IMAGE` 指定的镜像；运行时使用 `--pull never`，
-不会隐式下载镜像，也不会在 Docker 不可用时回退到宿主 Shell。
+模型触发的 Shell、测试、构建和安装动作默认需要审批。启动时会先检查 Docker CLI、Engine、
+context、工作/代理镜像摘要并运行一次禁网 smoke test；预检未通过时默认阻塞，可明确选择只读模式。
+交互式引导提供重新检查、确认下载镜像或退出选项；普通任务执行期间不会隐式拉取，也不会在 Docker
+不可用时回退到宿主 Shell。
+
+Docker 缺失时可复制执行（Windows）：
+
+```powershell
+winget install --id Docker.DockerDesktop -e
+```
+
+启动 Docker Desktop 后执行：
+
+```powershell
+docker info
+docker pull node:22-bookworm-slim
+npm run verify:docker
+```
+
+镜像默认是主机级 Docker 缓存，容器则在每次调用时临时创建并 `--rm` 回收。可用
+`AGENT_SANDBOX_IMAGE`、`AGENT_SANDBOX_PROXY_IMAGE` 覆盖镜像引用；`AGENT_SANDBOX_AUTO_PULL` 支持
+`prompt`（默认，询问后下载）、`off`（只展示命令）和 `on`（显式无人值守场景）。
+预检诊断写入 `.echolens/sandbox/preflight.json`，仅用于展示，不作为安全授权依据。
 
 网络策略支持 `none` 和 `allowlist`。只有 `package_install` 可以申请域名 allowlist；工作容器
 只连接 Docker 内部网络，通过受限代理访问经 DNS 和公网地址检查后的域名。Sandbox 写入先保存
 到 `.echolens/artifacts/`，再由 `apply_sandbox_patch` 展示 diff、审批、创建 Checkpoint 并应用。
 
-运行真实 Docker 验收前需预先准备镜像，然后执行：
+运行真实 Docker 验收的最终命令：
 
 ```powershell
 npm run verify:docker
@@ -219,8 +284,8 @@ npm run audit
 
 测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
 由 `package.json` 和 `.github/workflows/ci.yml` 定义。
-Security 当前为 35 个已登记测试用例；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
-`npm run eval:fixed` 运行 6 项固定版本地静态 Candidate 套件，并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；该套件验证本地 Grader/结构化 Patch/安全事件判据，不代表真实模型完成率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
+Security 当前为 72 个已登记测试用例（覆盖 PathPolicy、Guardrail、授权根和 Skill 边界；不等同于 72 个真实 Docker Sandbox 验收）；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
+`npm run eval:fixed` 运行 10 项固定版本地静态 Candidate 套件，并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；摘要包含固定任务 ID/版本/内容去重审计、域与难度分组、结构/行为/效率分层分数。该套件验证本地 Grader/结构化 Patch/安全事件判据，不代表真实模型完成率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
 CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage 分为独立 job；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
 
 ## 目录
@@ -267,6 +332,9 @@ contracts/
 ## 当前边界
 
 v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree 基线和更严格的静态检查。
+启动预检未就绪时只读模式仅保留 `read_file`、`list_files`、`grep`、`workspace_search`、代码智能和 Git
+只读工具；Shell、测试、构建、安装、验证、Patch、MCP 与后台 Test 子 Agent 不会暴露。无头模式返回
+`sandbox_setup_required` 及可复制修复命令。
 自动验证默认开启（`AGENT_VERIFY_GATE=auto`）：本回合写入返回变更文件后，受控验证命令经 Sandbox 执行；缺少验证计划或 Sandbox 不可用时记录 skipped，不代表通过。`strict` 在 Sandbox 不可用时暂停；连续两次验证失败后均会暂停。此闭环依赖 Docker Sandbox 可用，自动验证也消耗单回合最多 24 次工具预算。
 失败解析目前依据 TAP、Jest、pytest、Go test 与 Cargo test 的文本形态；非标准/custom reporter 可能无法结构化，此时仍回传原有脱敏截断输出，不代表覆盖所有测试运行器。
 后台子 Agent 使用异步 I/O Worker 池；并发默认 `max(1, floor(os.cpus().length / 2))`，允许 1–32 并可由 `AGENT_WORKER_CONCURRENCY` 或 `/task concurrency` 覆盖。同一显式 workspace key 在队列认领时互斥，缺省任务由 allocator 分配独立 Sandbox/Worktree。Docker 主机建议从并发 2–4 起步并按内存/CPU 配额调节；该建议不是压力测试结论。
@@ -274,18 +342,18 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
 按索引回退使用当前工作区检查点目录中按 `createdAt` 排序的检查点，索引从 0 开始；中途失败会停止并报告已处理范围，不提供跨工作区或强制覆盖用户后续修改的回退。
 手动暂停只在工具批次完成后、下一次模型调用前生效；模型请求或工具执行中不会被硬中断。命令行非交互执行不能在已阻塞的同步输入期间注入 `/pause`，TUI 支持运行中输入该命令。
-最近一次完整且全绿的覆盖率实测为全量 `src/` Statements/Lines 89.03%、Functions 94.15%、Branches 81.47%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）为 Statements/Lines 94.91%（14382/15153），距离 95% 仍差 14 条。之后新增测试尚未完成一次全绿覆盖率重跑（Windows 并发锁用例曾两次以 EPERM 中断），不能把未验证结果写成达标。覆盖率门禁按行 84%、函数 88%、分支 76% 设置；复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+最近一次完整且全绿的覆盖率实测为全量 `src/` Statements/Lines 89.24%、Functions 94.40%、Branches 81.77%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）为 Statements/Lines 95.16%（14445/15180）。覆盖率门禁按行 84%、函数 88%、分支 76% 设置；复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，
 仍必须由后续运行时通过 ToolExecutor/Sandbox 接入。HTTP/MCP/Prompt/Agent 型 Hook 尚未实现；`/rewind` 的检查点索引按当前 Session 事件顺序，仅覆盖已持久化的 Agent 检查点。Patch 回滚对删除后被用户重建的同名文件会保守跳过；旧检查点缺少应用后状态证据时不执行覆盖性恢复。
-固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。断点恢复基准可用 `npm run eval:resume-soak -- --rounds 3` 复现，结果包含分母、成功数、逐轮故障明细；工具执行中途故障通过真实子进程终止注入，其余故障使用本地 Provider 注入，不代表真实模型服务或宿主进程 kill 的成功率。
+固定 Eval Suite 目前使用本地静态 Candidate Fixture 验证确定性评分路径，不是模型能力基准；当前锁定 10 项任务，不能等同于 120 项模型能力任务集，也不会用重复模板补足数量。每次运行先审计任务元数据、版本、ID 和规范化内容指纹，审计失败会拒绝运行。沙箱任务需要显式 Docker 环境，未实际执行时不会记为通过。断点恢复基准可用 `npm run eval:resume-soak -- --rounds 10` 复现；最近一次 40 个故障注入样本全部恢复（40/40），结果包含分母、成功数、逐轮故障明细。工具执行中途故障通过真实子进程终止注入，其余故障使用本地 Provider 注入，不代表真实模型服务或宿主进程 kill 的长期成功率。
 `/context` 报告只反映最近一次已构建的模型上下文；尚未运行 Turn 时没有报告，token 仍是现有字节近似值，不等同于任一具体模型 tokenizer 的精确计数。
 插件当前采用工作区内受限目录包而非压缩归档；导出只收集公开组件，导入不会自动启用其中的 Hook 或 MCP Server，仍需通过现有配置与信任流程加载。MCP 配额会话计数持久化在 `.echolens/mcp-quota-<session-id>.json`（无 Session ID 的独立管理器使用 `.echolens/mcp-quota.json`），配额未配置时保持原有行为。
 Git 历史候选默认关闭，设置 `AGENT_GIT_HISTORY=true` 才会读取；`metadata` 隐私模式始终禁用，历史条目只作为候选提示而非事实依据。
-事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝。
+事件哈希链用于检测日志篡改，不提供签名或外部不可变存储；无头模式要求显式 `--prompt`，退出码区分成功、验证失败与权限拒绝；`/help`、`/verify` 等服务命令会返回 `lines`，不会再交给模型生成“已暂停”的回答。结构化摘要中的单层嵌套 `answer` 会被安全解包，其他 JSON 文本保持原样。
 审计导出只接受完整链，导出包可由 `verifyAuditExport` 离线校验；本地审计文件可被整体替换，因此哈希链不提供不可抵赖性。工作区外授权根默认为空，只能由用户控制的 `.echolens/roots.json` 配置，且每次写入都必须单独审批，不支持永久放行整个根。
-并发压测与路由基准使用本地 Provider，压测脚本允许显式设置最多 50 个并发任务；长期运行时报告保留全部尝试的分母与观测计数，仅保留失败详情，避免把成功样本无限累积到内存。结果仍只代表实际运行参数，不等同于真实模型服务的长期可用性或质量保证；未实际运行 24 小时就不能写成 24 小时稳定性结论。
+并发压测与路由基准使用本地 Provider，压测脚本允许显式设置最多 50 个并发任务；最近一次 50 并发、每 worker 1 轮的运行共 50 个样本，用户修改保留 50/50、任务可恢复 50/50、重复工具执行 0，耗时约 701ms。长期运行时报告保留全部尝试的分母与观测计数，仅保留失败详情，避免把成功样本无限累积到内存。结果仍只代表实际运行参数，不等同于真实模型服务的长期可用性或质量保证；未实际运行 24 小时就不能写成 24 小时稳定性结论。
 可复现命令：`npm run eval:concurrency-soak -- --seconds 10 --concurrency 4`、`npm run eval:routing-benchmark`；无头执行使用 `npx tsx src/cli.ts --json --prompt "..."`，无模型配置时 fail-closed。
 
 Gateway 本地 MVP 可使用 `npm run gateway:server` 启动，使用 `npm run gateway:login -- --url <地址>`

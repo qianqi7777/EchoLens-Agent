@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -13,8 +14,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { PathPolicy, PathPolicyError, validatePatchPath, validateRelativePath } from '../../../../src/runtime/path-policy.js';
 
+// 测试边界与 PathPolicy 一样使用真实路径，避免 Windows TEMP 中的 8.3 别名造成误判。
 test('PathPolicy rejects Windows namespace, ADS, short-name, reserved, and escape syntax', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-policy-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-policy-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const policy = await PathPolicy.create(root);
   // 每个用例都是一个攻击样本，覆盖 Windows 命名空间、UNC、ADS、8.3 短名、保留设备名、
@@ -44,7 +46,7 @@ test('PathPolicy rejects Windows namespace, ADS, short-name, reserved, and escap
 });
 
 test('PathPolicy reads normal files through a verified handle and preserves Windows case-insensitivity', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-normal-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-normal-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'CaseFile.ts'), 'export const value = 1;\n', 'utf8');
   await writeFile(join(root, 'value~1copy.ts'), 'export const allowed = true;\n', 'utf8');
@@ -62,8 +64,8 @@ test('PathPolicy reads normal files through a verified handle and preserves Wind
 });
 
 test('PathPolicy rejects directory junctions', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-links-'));
-  const outside = await mkdtemp(join(tmpdir(), 'echolens-path-outside-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-links-')));
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-outside-')));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),
@@ -84,8 +86,8 @@ test('PathPolicy rejects directory junctions', async (t) => {
 });
 
 test('PathPolicy rejects file symlinks when the environment supports creating them', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-file-link-'));
-  const outside = await mkdtemp(join(tmpdir(), 'echolens-path-file-outside-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-file-link-')));
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-file-outside-')));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),
@@ -114,7 +116,7 @@ test('PathPolicy rejects file symlinks when the environment supports creating th
 });
 
 test('PathPolicy detects target replacement after the file handle is opened', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-race-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-race-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = join(root, 'target.ts');
   const replacement = join(root, 'replacement.ts');
@@ -141,7 +143,7 @@ test('PathPolicy detects target replacement after the file handle is opened', as
 });
 
 test('PathPolicy rejects text files above the configured read limit', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-size-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-size-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'large.ts'), 'x'.repeat(11), 'utf8');
   const policy = await PathPolicy.create(root);
@@ -156,7 +158,7 @@ test('PathPolicy rejects text files above the configured read limit', async (t) 
 });
 
 test('PathPolicy 根目录被替换后拒绝继续读写', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-root-race-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-root-race-')));
   const moved = `${root}-moved`;
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
@@ -175,8 +177,8 @@ test('PathPolicy 根目录被替换后拒绝继续读写', async (t) => {
 });
 
 test('workspace tools reject explicit junction traversal with a structured path policy code', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-workspace-links-'));
-  const outside = await mkdtemp(join(tmpdir(), 'echolens-workspace-outside-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-workspace-links-')));
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'echolens-workspace-outside-')));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),
@@ -206,7 +208,7 @@ test('workspace tools reject explicit junction traversal with a structured path 
 });
 
 test('PathPolicy enforces handle kinds, read limits, classifications, and absolute-path syntax', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-boundaries-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-boundaries-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'folder'));
   await writeFile(join(root, 'file.txt'), 'content');
@@ -225,7 +227,7 @@ test('PathPolicy enforces handle kinds, read limits, classifications, and absolu
 });
 
 test('PathPolicy performs verified create, byte-read, directory-read, and delete operations', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'echolens-path-io-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-io-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'nested'));
   const policy = await PathPolicy.create(root);
@@ -245,7 +247,7 @@ test('PathPolicy performs verified create, byte-read, directory-read, and delete
 });
 
 test('PathPolicy creation fails closed for missing, non-directory, and reparse roots', async (t) => {
-  const parent = await mkdtemp(join(tmpdir(), 'echolens-path-roots-'));
+  const parent = await realpath(await mkdtemp(join(tmpdir(), 'echolens-path-roots-')));
   t.after(() => rm(parent, { recursive: true, force: true }));
   await assert.rejects(PathPolicy.create(join(parent, 'missing')), (error: unknown) => error instanceof PathPolicyError && error.code === 'path_not_found');
 

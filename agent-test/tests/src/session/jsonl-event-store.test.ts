@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { appendFile, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { FileLockError } from '../../../../src/runtime/file-lock.js';
 import { EventStoreCorruptionError, JsonlEventStore } from '../../../../src/session/jsonl-event-store.js';
 
@@ -23,8 +25,11 @@ test('删除仅移除确认的历史日志，保留相邻数据并释放文件�
 
 test('删除拒绝当前会话、活跃写者、路径穿越和确认后变化', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-delete-guard-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const active = new JsonlEventStore(root, 'active');
+  t.after(async () => {
+    await active.close();
+    await rm(root, { recursive: true, force: true });
+  });
   await active.read();
   const expected = (await JsonlEventStore.list(root))[0]!;
   await assert.rejects(JsonlEventStore.delete(root, 'active', 'active', expected), /当前/u);
@@ -51,6 +56,42 @@ test('删除拒绝符号链接会话目录和非普通文件', async (t) => {
   await mkdir(join(actual, 'directory.jsonl'));
   await assert.rejects(JsonlEventStore.delete(actual, 'directory', 'current', { ...expected, sessionId: 'directory' }), /普通文件/u);
   assert.equal(await readFile(join(actual, 'old.jsonl'), 'utf8'), 'retained');
+});
+
+test('删除拒绝父目录中的符号链接或 Junction', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-parent-link-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const actual = join(root, 'actual');
+  const sessions = join(actual, 'sessions');
+  await mkdir(sessions, { recursive: true });
+  await writeFile(join(sessions, 'old.jsonl'), 'retained');
+  const expected = (await JsonlEventStore.list(sessions))[0]!;
+  const linked = join(root, 'linked');
+  await symlink(actual, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(JsonlEventStore.delete(join(linked, 'sessions'), 'old', 'current', expected), /符号链接/u);
+  assert.equal(await readFile(join(sessions, 'old.jsonl'), 'utf8'), 'retained');
+  await assert.rejects(lstat(join(sessions, 'old.jsonl.lock')), { code: 'ENOENT' });
+});
+
+test('Windows 短路径可以删除普通目录中的历史会话', { skip: process.platform !== 'win32' }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-delete-short-path-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // 查询真实的 8.3 别名；卷禁用短名称时无需伪造文件系统行为。
+  const { stdout } = await promisify(execFile)('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ECHOLENS_TEST_DIRECTORY).ShortPath',
+  ], { env: { ...process.env, ECHOLENS_TEST_DIRECTORY: root }, windowsHide: true });
+  const shortRoot = stdout.trim();
+  assert.ok(shortRoot);
+  if (shortRoot.toLowerCase() === root.toLowerCase()) {
+    t.skip('当前卷未生成 8.3 短路径');
+    return;
+  }
+  await writeFile(join(root, 'old.jsonl'), 'old log\n');
+  const expected = (await JsonlEventStore.list(shortRoot))[0]!;
+  await JsonlEventStore.delete(shortRoot, 'old', 'current', expected);
+  await assert.rejects(lstat(join(root, 'old.jsonl')), { code: 'ENOENT' });
+  await assert.rejects(lstat(join(root, 'old.jsonl.lock')), { code: 'ENOENT' });
 });
 
 test('并行 append 由单写者分配连续 seq 且每行完整', async (context) => {

@@ -1,0 +1,79 @@
+name: npm Release
+
+on:
+  push:
+    branches:
+      - dev
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish npm package
+    if: github.repository == 'qianqi7777/EchoLens-Agent'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run release quality gates
+        run: npm run check:ci
+
+      - name: Set release version and dist-tag
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "${package_version}" != "${tag_version}" ]]; then
+              echo "Tag ${tag_version} does not match package.json ${package_version}" >&2
+              exit 1
+            fi
+            echo "NPM_DIST_TAG=latest" >> "${GITHUB_ENV}"
+          else
+            npm version --no-git-tag-version "${package_version}-dev.${GITHUB_RUN_NUMBER}"
+            echo "NPM_DIST_TAG=next" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Build publishable CLI
+        run: npm run build
+
+      - name: Validate package contents and global bin
+        run: npm run pack:check
+
+      - name: Create release tarball
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/echolens-release"
+          npm pack --json --pack-destination "${RUNNER_TEMP}/echolens-release" > "${RUNNER_TEMP}/echolens-pack.json"
+          tarball="$(find "${RUNNER_TEMP}/echolens-release" -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "${tarball}"
+          echo "NPM_TARBALL=${tarball}" >> "${GITHUB_ENV}"
+
+      - name: Publish with npm Trusted Publishing
+        run: npm publish "${NPM_TARBALL}" --tag "${NPM_DIST_TAG}" --provenance --access public
+
+      - name: Upload package evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-${{ github.run_id }}
+          path: |
+            package-manifest.json
+            ${{ runner.temp }}/echolens-pack.json
+            ${{ runner.temp }}/echolens-release/*.tgz
+          if-no-files-found: warn

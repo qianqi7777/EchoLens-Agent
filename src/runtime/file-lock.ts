@@ -72,10 +72,11 @@ export async function acquireFileLock(
       };
     } catch (error) {
       // Windows 在并发 `open(..., 'wx')` 时可能把共享冲突报告为 EPERM/EACCES，
-      // 而不是 POSIX 常见的 EEXIST。只有确认锁路径仍存在时才把它归为竞争，
-      // 避免把真实目录权限错误静默重试。
+      // 而不是 POSIX 常见的 EEXIST。锁刚被另一个调用者删除时，文件句柄的共享
+      // 冲突还可能短暂存在，此时锁路径已经返回 ENOENT；只要父目录仍可见，就把
+      // 这个短暂窗口归为竞争，避免并发持久化在 Windows 上偶发失败。
       if (!(isNodeError(error, 'EEXIST')
-        || ((isNodeError(error, 'EPERM') || isNodeError(error, 'EACCES')) && await lockPathExists(path)))) throw error;
+        || ((isNodeError(error, 'EPERM') || isNodeError(error, 'EACCES')) && await lockPathContention(path)))) throw error;
       if (await removeStaleLock(path, staleMs, now, processAlive)) continue;
       const remaining = deadline - now();
       if (remaining <= 0) throw new FileLockError(path);
@@ -84,12 +85,22 @@ export async function acquireFileLock(
   }
 }
 
-async function lockPathExists(path: string): Promise<boolean> {
+async function lockPathContention(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
   } catch (error) {
-    if (isNodeError(error, 'ENOENT')) return false;
+    if (isNodeError(error, 'ENOENT')) {
+      // `open(wx)` 与前一个调用者的 unlink 之间可能存在一个 Windows
+      // 共享冲突窗口。父目录可访问时，ENOENT 只表示锁刚释放，不是权限错误。
+      try {
+        const parent = await stat(dirname(path));
+        return parent.isDirectory();
+      } catch (parentError) {
+        if (isNodeError(parentError, 'ENOENT')) return false;
+        throw parentError;
+      }
+    }
     throw error;
   }
 }

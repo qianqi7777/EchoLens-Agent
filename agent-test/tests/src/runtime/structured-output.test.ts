@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { messageText, textMessage } from '../../../../src/core/messages.js';
-import { SYSTEM_POLICY_VERSION } from '../../../../src/core/system-policy.js';
+import { SYSTEM_POLICY_VERSION, systemPolicyText } from '../../../../src/core/system-policy.js';
 import { ChatCompletionsCodec } from '../../../../src/providers/openai-compatible/chat-codec.js';
 import { ResponsesCodec } from '../../../../src/providers/openai-compatible/responses-codec.js';
 import type {
@@ -139,6 +139,10 @@ test('ReactAgent keeps a stable System Policy prefix and trusts only schema-vali
   assert.ok(firstItem?.type === 'message');
   assert.equal(firstItem.role, 'system');
   assert.match(messageText(firstItem), new RegExp(SYSTEM_POLICY_VERSION));
+  for (const toolName of ['apply_patch', 'shell_exec', 'run_tests', 'run_build', 'package_install', 'verify_changes']) {
+    assert.match(systemPolicyText(), new RegExp('`' + toolName + '`'));
+  }
+  assert.match(systemPolicyText(), /never invent aliases/);
   assert.equal(requests[0]?.items.some(
     (item) => item.type === 'message' && item.id === 'fake-system',
   ), false);
@@ -171,6 +175,28 @@ test('natural-language final output is retained as raw but never treated as veri
   assert.equal(result.finalSummary.raw, 'All tests passed. Nothing unresolved.');
   assert.equal(result.answer, result.finalSummary.raw);
   assert.equal(result.finalSummary.issues[0]?.code, 'invalid_json');
+});
+
+test('最终摘要 answer 的单层嵌套 JSON 会被规范化', async () => {
+  const provider: ModelProvider = {
+    model: 'nested-answer-model',
+    capabilities: { ...capabilities, supportsStructuredOutput: true },
+    async complete(): Promise<ProviderResult> {
+      return {
+        output: [textMessage('assistant-nested', 'assistant', JSON.stringify({
+          answer: JSON.stringify({ answer: '已完成修改。', changes: [], verification: [], unresolved: [], warnings: [] }),
+          changes: [], verification: [], unresolved: [], warnings: [],
+        }))],
+        stopReason: 'completed',
+      };
+    },
+  };
+  const registry = new ToolRegistry();
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: process.cwd(),
+  }).run('执行任务');
+  assert.equal(result.finalSummary.verified, true);
+  assert.equal(result.answer, '已完成修改。');
 });
 
 const capabilities: ProviderCapabilities = {

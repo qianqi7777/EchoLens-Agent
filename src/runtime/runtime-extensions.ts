@@ -9,6 +9,7 @@ import {
 import { ToolRegistry } from './tool-registry.js';
 
 export interface RuntimeExtensionsOptions {
+  readonly?: boolean;
   codeIntelligence?: CodeIntelligenceService;
   mcpManager?: McpClientManager;
   mcpConfig?: McpConfigFile;
@@ -40,6 +41,15 @@ export async function initializeRuntimeExtensions(
   // 配置解析失败不阻断启动：MCP 是增强能力，缺失或损坏的配置只记入 notices，
   // 不因此让整个 Agent 无法初始化。
   let config: McpConfigFile = { version: 1, servers: [] };
+  if (options.readonly) {
+    return {
+      codeIntelligence,
+      mcpManager,
+      connectedMcpServers: [],
+      notices: ['Sandbox 未就绪：MCP 工具已禁用'],
+      close: () => Promise.allSettled([mcpManager.close(), codeIntelligence.close()]).then(() => undefined),
+    };
+  }
   try {
     config = options.mcpConfig ?? await loadMcpConfig(workspaceRoot);
   } catch (error) {

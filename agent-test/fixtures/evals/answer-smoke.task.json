@@ -7,6 +7,10 @@
   "prompt": "Return echolens-eval-ok",
   "introducedAt": "2026-08-29T00:00:00.000Z",
   "leakageRisk": "low",
+  "domain": "protocol",
+  "difficulty": "easy",
+  "source": "hand-authored",
+  "split": "smoke",
   "tags": ["smoke", "local"],
   "fixture": { "files": [] },
   "grader": {

@@ -24,6 +24,7 @@ import { ReactAgent } from '../../../../src/runtime/resumable-react-agent.js';
 import { ToolExecutor } from '../../../../src/runtime/tool-executor.js';
 import { ToolRegistry } from '../../../../src/runtime/tool-registry.js';
 import { registerWorkspaceTools } from '../../../../src/runtime/workspace-tools.js';
+import { NavigationResolver } from '../../../../src/navigation/navigation-resolver.js';
 
 class ScriptedModel implements ModelProvider {
   readonly model = 'test-model';
@@ -138,6 +139,79 @@ test('ReactAgent uses navigation hints to require a read-only first tool round',
   assert.equal(requests[1]?.toolChoice, 'auto');
   assert.equal(requests[1]?.tools?.some((tool) => tool.name === 'apply_patch'), true);
   assert.equal(requests[1]?.responseFormat?.name, 'echolens_final_summary');
+});
+
+test('search 导航只限制首轮探测，随后恢复写工具可见性', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-search-runtime-'));
+  await mkdir(join(workspace, 'src'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'target.ts'), 'export const target = true;\n');
+  const requests: ProviderRequest[] = [];
+  const summary = JSON.stringify({ answer: '已完成。', changes: [], verification: [], unresolved: [], warnings: [] });
+  const provider: ModelProvider = {
+    model: 'navigation-search-model',
+    capabilities: { ...new ScriptedModel().capabilities, supportsStructuredOutput: true },
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
+      if (requests.length === 1) {
+        return {
+          output: [{
+            type: 'tool_call', id: 'search-call-item', callId: 'search-call', name: 'read_file',
+            arguments: { path: 'src/target.ts' }, callIndex: 0,
+          }],
+          stopReason: 'tool_calls',
+        };
+      }
+      return { output: [textMessage('search-answer', 'assistant', summary)], stopReason: 'completed' };
+    },
+  };
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+    permissions: new Set(['workspace.read', 'workspace.write']),
+    navigationResolver: new NavigationResolver(workspace),
+  }).run('修复未知 bug');
+
+  assert.equal(result.state, 'completed');
+  assert.equal(requests[0]?.tools?.some((tool) => tool.name === 'apply_patch'), false);
+  assert.equal(requests[1]?.tools?.some((tool) => tool.name === 'apply_patch'), true);
+});
+
+test('明确点名写工具时，调查后要求模型发起受审批的写调用', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-navigation-write-required-'));
+  await mkdir(join(workspace, 'src'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'target.ts'), 'export const target = true;\n');
+  const requests: ProviderRequest[] = [];
+  const provider: ModelProvider = {
+    model: 'navigation-write-required-model',
+    capabilities: { ...new ScriptedModel().capabilities, supportsStructuredOutput: true },
+    async complete(request): Promise<ProviderResult> {
+      requests.push(request);
+      if (requests.length === 1) {
+        return {
+          output: [{
+            type: 'tool_call', id: 'write-discovery-item', callId: 'write-discovery', name: 'read_file',
+            arguments: { path: 'src/target.ts' }, callIndex: 0,
+          }],
+          stopReason: 'tool_calls',
+        };
+      }
+      // 故意返回最终文本，验证运行时不会把“没有工具”当作成功回答。
+      return { output: [textMessage('write-required-answer', 'assistant', '没有 apply_patch 工具')], stopReason: 'completed' };
+    },
+  };
+  const registry = new ToolRegistry();
+  registerWorkspaceTools(registry);
+  const result = await new ReactAgent(provider, registry, new ToolExecutor(registry), {
+    workspaceRoot: workspace,
+    permissions: new Set(['workspace.read', 'workspace.write']),
+    navigationResolver: new NavigationResolver(workspace),
+  }).run('请调用 apply_patch 修改 target.ts，把 target 改为 false');
+
+  assert.equal(result.state, 'failed');
+  assert.equal(requests[1]?.toolChoice, 'required');
+  assert.deepEqual(requests[1]?.tools?.map((tool) => tool.name), ['apply_patch']);
+  assert.match(result.trace.map((item) => item.message).join('\n'), /tool_required/u);
 });
 
 test('ReactAgent fails once with tool_required when a required discovery call is omitted', async () => {

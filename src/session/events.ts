@@ -27,6 +27,8 @@ export interface AgentCheckpoint {
   state: RunState;
   items: ConversationItem[];
   hookContexts?: RuntimeHookContext[];
+  // 导航探测是否已在当前回合尝试过；旧检查点缺失时按 tool_result 向后兼容推断。
+  navigationDiscoveryAttempted?: boolean;
   routing?: ModelRoutingSnapshot;
 }
 

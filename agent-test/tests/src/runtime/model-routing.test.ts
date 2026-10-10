@@ -67,10 +67,27 @@ function answer(model: string): Promise<ProviderResult> {
 test('classifies simple, coding, and complex tasks deterministically', () => {
   assert.deepEqual(classifyTask('解释这段代码').tier, 0);
   assert.deepEqual(classifyTask('修复这个 bug 并运行测试').tier, 2);
+  assert.equal(classifyTask('修改 greet.js 后用 node 验证输出').phase, 'execute');
+  assert.equal(classifyTask('验证测试结果并检查退出码').phase, 'verify');
   const complex = classifyTask('为多文件架构迁移制定安全方案');
   assert.equal(complex.tier, 3);
   assert.equal(complex.phase, 'plan');
   assert.equal(complex.requiresTools, true);
+});
+
+test('混合修改与验证的任务保留写权限上限', () => {
+  const model = new StubProvider('mixed-write', () => answer('mixed-write'));
+  const provider = new RoutedModelProvider([
+    { id: 'mixed', provider: model, tier: 2, privacy: 'full-context' },
+  ], { mode: 'balanced', defaultProfileId: 'mixed' });
+
+  provider.beginRun('修改 greet.js 后用 node 验证输出');
+  assert.equal(provider.currentPhase(), 'execute');
+  assert.equal(provider.allowedPermissions(), undefined);
+
+  provider.beginRun('验证 node 输出并检查测试结果');
+  assert.equal(provider.currentPhase(), 'verify');
+  assert.deepEqual([...provider.allowedPermissions()!].sort(), ['process.exec', 'workspace.read']);
 });
 
 test('selects a model at turn boundary and reports selection to ReactAgent events', async () => {

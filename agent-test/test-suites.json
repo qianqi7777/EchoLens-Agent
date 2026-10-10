@@ -39,10 +39,12 @@
     "agent-test/tests/src/runtime/tool-errors.test.ts",
     "agent-test/tests/src/runtime/tool-scheduler.test.ts",
     "agent-test/tests/src/runtime/tool-schema.test.ts",
+    "agent-test/tests/src/runtime/verifier.test.ts",
     "agent-test/tests/src/runtime/verification.test.ts",
     "agent-test/tests/src/runtime/workspace-manager.test.ts",
     "agent-test/tests/src/sandbox/artifact-store.test.ts",
     "agent-test/tests/src/sandbox/process-runner.test.ts",
+    "agent-test/tests/src/sandbox/preflight.test.ts",
     "agent-test/tests/src/tui.test.ts"
   ],
   "contract": [
@@ -73,7 +75,9 @@
     "agent-test/tests/src/skills/loader.test.ts",
     "agent-test/tests/src/runtime/automatic-verification.test.ts",
     "agent-test/tests/src/runtime/guardrail.test.ts",
+    "agent-test/tests/src/runtime/guardrail-matrix.test.ts",
     "agent-test/tests/src/runtime/path-policy.test.ts",
+    "agent-test/tests/src/runtime/security-boundaries.test.ts",
     "agent-test/tests/src/runtime/extra-roots.test.ts",
     "agent-test/tests/src/runtime/tool-output.test.ts"
   ],

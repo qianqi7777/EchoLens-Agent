@@ -3,6 +3,11 @@ import type { StructuredPatch } from '../../../src/runtime/structured-patch.js';
 
 export type EvalTaskKind = 'answer' | 'patch' | 'terminal' | 'security';
 export type LeakageRisk = 'low' | 'medium' | 'high' | 'known_leaked';
+export type EvalTaskDomain = 'coding' | 'session' | 'security' | 'orchestration' | 'protocol' | 'tooling' | 'reliability';
+export type EvalTaskDifficulty = 'easy' | 'medium' | 'hard' | 'expert';
+export type EvalTaskSource = 'hand-authored' | 'generated' | 'imported';
+export type EvalTaskSplit = 'fixed' | 'smoke' | 'regression' | 'adversarial';
+export type EvalScoreLayer = 'structure' | 'behavior' | 'efficiency';
 
 export interface EvalFixtureFile {
   path: string;
@@ -48,6 +53,11 @@ export interface EvalTaskDefinition {
   introducedAt: string;
   lastUsedAt?: string;
   leakageRisk: LeakageRisk;
+  /** 用于按任务域、难度和数据切分聚合报告；旧的单任务调用保持可选。 */
+  domain?: EvalTaskDomain;
+  difficulty?: EvalTaskDifficulty;
+  source?: EvalTaskSource;
+  split?: EvalTaskSplit;
   tags?: string[];
   fixture: { files: EvalFixtureFile[] };
   grader: EvalGrader;
@@ -61,6 +71,9 @@ export interface EvalCandidateTask {
   title: string;
   prompt: string;
   tags: string[];
+  domain?: EvalTaskDomain;
+  difficulty?: EvalTaskDifficulty;
+  split?: EvalTaskSplit;
 }
 
 export interface EvalCandidateResult {
@@ -90,6 +103,21 @@ export interface EvalAssertionResult {
   id: string;
   passed: boolean;
   summary: string;
+  layer?: EvalScoreLayer;
+}
+
+export interface EvalLayerScore {
+  passed: number;
+  total: number;
+  rate: number;
+  covered: boolean;
+}
+
+export interface EvalRunScores {
+  structure: EvalLayerScore;
+  behavior: EvalLayerScore;
+  efficiency: EvalLayerScore;
+  overallRate: number;
 }
 
 export interface EvalRunRecord {

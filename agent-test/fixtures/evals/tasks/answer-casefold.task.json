@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "answer-casefold",
+  "version": "1.0.0",
+  "kind": "answer",
+  "title": "Normalize a protocol token without case sensitivity",
+  "prompt": "Return the protocol token ECHOLENS-CANONICAL regardless of letter case.",
+  "introducedAt": "2026-09-27T00:00:00.000Z",
+  "leakageRisk": "low",
+  "domain": "protocol",
+  "difficulty": "easy",
+  "source": "hand-authored",
+  "split": "fixed",
+  "fixture": { "files": [] },
+  "grader": { "type": "answer", "mode": "exact", "expected": "echolens-canonical", "caseSensitive": false }
+}
