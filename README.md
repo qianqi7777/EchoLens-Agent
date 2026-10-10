@@ -81,10 +81,9 @@ npm install -g echolens-agent
 echolens
 ```
 
-预发布版本使用 `next` 通道，稳定版使用 `latest` 通道：
+主分支构建使用 `latest` 通道；稳定版标签也使用 `latest` 通道：
 
 ```powershell
-npm install -g echolens-agent@next
 npm install -g echolens-agent@latest
 echolens --version
 echolens --help
@@ -166,8 +165,9 @@ Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` �
 ## npm 发布通道
 
 受信任的 GitHub Actions 发布流程使用 npm Trusted Publishing（OIDC），仓库中不保存长期
-npm Token。合并或推送到 `dev` 会先执行完整质量门禁，再发布带 `next` 标签的预发布版本；
-这不代表稳定版质量。推送与 `package.json` 版本一致的 `vX.Y.Z` 标签，才会发布到 `latest`。
+npm Token。`dev` 分支只运行 CI；推送到 `main` 会先执行完整质量门禁，再发布唯一的
+`<package-version>-main.<run-number>` 版本到 `latest`。推送与 `package.json` 版本一致的
+`vX.Y.Z` 标签，也会发布到 `latest`。
 
 发布前可在本地复现构建、打包内容检查和安装验收：
 
