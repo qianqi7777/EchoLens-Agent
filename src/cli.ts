@@ -8,7 +8,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { createEventRenderer } from './cli-event-renderer.js';
 import { previewApprovalRequest } from './approval-preview.js';
-import { ensureStartupConfiguration } from './config/startup-config.js';
+import { ensureStartupConfiguration, startupConfigPath } from './config/startup-config.js';
 import { TerminalUi } from './tui.js';
 import { JsonlEventStore } from './session/jsonl-event-store.js';
 import { ModelRouter, type PrivacyLevel } from './runtime/model-router.js';
@@ -73,7 +73,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
 const setupTerminal = readline.createInterface({ input, output });
 const forceSetup = process.argv.includes('--setup');
 const headlessMode = process.argv.includes('--json') || process.argv.includes('-p');
-if (headlessMode && !forceSetup && !process.env.AGENT_MODEL_ROUTE && !existsSync(resolve(process.cwd(), '.env.local'))) {
+if (headlessMode && !forceSetup && !process.env.AGENT_MODEL_ROUTE
+  && !existsSync(startupConfigPath()) && !existsSync(resolve(process.cwd(), '.env.local'))) {
   console.log(JSON.stringify({ version: 1, ok: false, error: { code: 'startup_config_required', message: '无头模式需要已有模型配置或显式环境变量' } }));
   setupTerminal.close();
   process.exit(1);

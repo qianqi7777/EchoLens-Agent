@@ -3,7 +3,7 @@ name: npm Release
 on:
   push:
     branches:
-      - dev
+      - main
     tags:
       - 'v*.*.*'
 
@@ -45,8 +45,9 @@ jobs:
             fi
             echo "NPM_DIST_TAG=latest" >> "${GITHUB_ENV}"
           else
-            npm version --no-git-tag-version "${package_version}-dev.${GITHUB_RUN_NUMBER}"
-            echo "NPM_DIST_TAG=next" >> "${GITHUB_ENV}"
+            # 每次 main 推送都发布唯一版本，避免重复发布 package.json 中的基础版本。
+            npm version --no-git-tag-version "${package_version}-main.${GITHUB_RUN_NUMBER}"
+            echo "NPM_DIST_TAG=latest" >> "${GITHUB_ENV}"
           fi
 
       - name: Build publishable CLI

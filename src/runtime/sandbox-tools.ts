@@ -296,7 +296,10 @@ async function executeSandboxRequest(
     // 上层（ToolExecutor）据此区分是可重试超时还是真正取消。
     const status = result.status === 'timeout' ? 'timeout' : result.status === 'cancelled' ? 'cancelled' : 'failed';
     const code = result.status === 'timeout' ? 'timeout' : result.status === 'cancelled' ? 'cancelled' : 'command_failed';
-    return toolFailure(status, code, `${request.kind} ${result.status}`, { data, evidenceIds: [`sandbox:${request.kind}`] });
+    // 保留命令的 stdout/stderr，尤其是 package_install 的 npm 错误；只返回
+    // “package_install failed” 会让上层继续盲目重试，随后才暴露 tsc not found。
+    const failureSummary = content || `${request.kind} ${result.status}`;
+    return toolFailure(status, code, failureSummary, { data, evidenceIds: [`sandbox:${request.kind}`] });
   } catch (error) {
     // SandboxError 分类：请求非法→invalid、网络被禁→denied、其余视为基础设施失败→failed；
     // 非 SandboxError 统一 sandbox_launch_failed，避免把底层异常细节上抛。
