@@ -1,6 +1,6 @@
 # Eval 评测与动态任务链路
 
-> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-09-03
+> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-10-18
 
 ## 1. 目标与默认边界
 
@@ -28,7 +28,7 @@ sequenceDiagram
   H->>W: 默认清理，失败诊断可选择保留
 ```
 
-Candidate 看不到 grader、fixture 定义和 generator 元数据，只得到公开任务字段，防止直接针对评分答案作弊。
+CandidateRunner 接口只收到公开任务字段与隔离工作区路径，不直接接收 grader、fixture 定义和 generator 元数据。工作区内仍可读取题目文件；仓库中公开的任务与参考答案不是保密评分集，这个接口隔离不能保证防泄题。
 
 ## 3. Task 数据字典
 
@@ -39,6 +39,7 @@ Candidate 看不到 grader、fixture 定义和 generator 元数据，只得到�
 | `introducedAt/lastUsedAt?` | 生命周期 |
 | `leakageRisk` | low/medium/high/known_leaked |
 | `tags?` | 分类 |
+| `domain/difficulty/source/split?` | 任务域、难度、来源和切分，用于报告分组 |
 | `fixture.files[]` | 写入隔离工作区的文件 |
 | `grader` | answer/patch/terminal/security 隐藏评分 |
 | `generator?` | templateId、seed、变量，仅动态任务存在 |
@@ -54,7 +55,8 @@ Fixture 路径必须是安全相对路径，拒绝 `.git`、`.echolens`、`study
 
 ## 4. Candidate 与结果记录
 
-Candidate 可返回：`answer`、`patch`、`events`、`evidenceIds`、有限类型 `metadata`。
+静态 Candidate 可返回 `answer`、`patch`、`events`、`evidenceIds` 和有限类型 `metadata`；其中事件是输入样本，只能用于 Harness 的结构与契约回归，不能据此声称实际运行过工具。
+`runtime-scripted` 模式输入为 `{calls:[{name,arguments}]}` 脚本，结果与事件由真实运行时产生，不接受 Candidate 自报事件。
 
 `EvalRunRecord` 字段：
 
@@ -82,9 +84,9 @@ Candidate 可返回：`answer`、`patch`、`events`、`evidenceIds`、有限类�
 
 同一模板和 seed 必须产生完全相同的任务 ID 和内容，便于跨运行比较。
 
-## 6. Eval Catalog
+## 6. 动态轮换 Catalog
 
-文件结构：`{ "version": 1, "entries": [...] }`。
+此 Catalog 保存动态模板的轮换状态，文件结构为 `{ "version": 1, "entries": [...] }`；它不同于第 9 节存放固定任务定义的 `.tasks.json` catalog。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -109,3 +111,27 @@ npm run eval -- --template <template.json> --seed <seed> --candidate <candidate.
 ```
 
 关键测试：`eval-harness.test.ts`、`file-runner.test.ts`、`dynamic-metrics.test.ts`、`engine.test.ts`。
+
+
+## 9. 120 项固定运行时任务
+
+`npm run eval:fixed` 选择 `fixed-coding@1.0.0`，共 120 项：文本修复 10、数值修复 10、集合修复 10、
+协议处理修复 10、可靠性修复 10、配置修复 10，以及危险路径在读取与写入两种操作面的 60 项安全任务。
+任务及参考脚本分别存放于 `agent-test/fixtures/evals/catalogs/fixed-coding.tasks.json` 和
+`fixed-coding.candidates.json`；suite 清单逐项锁定 task ID，没有随机 seed 或运行时扩容。
+
+每项在新建工作区内使用本地脚本 Provider 驱动生产 ReactAgent、ToolExecutor、审批和 Patch/Guardrail。
+仅暴露工作区文件工具，未注册 Shell、安装、外部服务或 MCP 工具；无需模型凭据、网络或 Docker。
+参考修复通过正常审批和文件哈希校验实际写入，Harness 不会第二次应用同一补丁。
+安全 Candidate 不能自行提交事件，评分只读取运行时实际产生的拒绝事件。
+
+工程变更的 `contentEquals` 比较完整文件内容，验证锁定参考修复及无额外改动，不执行任意候选代码，
+也不接受所有行为等价的代码实现。它属于确定性的结构验收，不能冒充通用代码语义评分。
+需要执行隐藏命令的行为验收仍必须显式提供 Docker；缺失时失败关闭。
+
+审计对新套件的 fixture 与 grader 做内容去重；修改标题、日期或 prompt 不增加独立任务数。
+所有参考解已公开，leakageRisk 标为 known_leaked。结果报告明确标记 `runtime-scripted` 与
+`local-scripted-provider`，120/120 只代表参考脚本与运行时通过，不能作为真实模型完成率。
+契约测试逐项确认空 Candidate、未修复补丁及没有真实拒绝事件的正常请求不能通过。
+
+旧 `fixed-core@1.0.0` 保持原有静态 Fixture 及审计契约，通过 `npm run eval -- --suite fixed-core` 运行。

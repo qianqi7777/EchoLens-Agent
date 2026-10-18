@@ -31,7 +31,7 @@ export type EvalGrader =
       type: 'patch';
       requirePatch: boolean;
       checks: EvalCommandCheck[];
-      fileChecks?: Array<{ path: string; exists?: boolean; contentIncludes?: string }>;
+      fileChecks?: Array<{ path: string; exists?: boolean; contentIncludes?: string; contentEquals?: string }>;
     }
   | { type: 'terminal'; checks: EvalCommandCheck[] }
   | {

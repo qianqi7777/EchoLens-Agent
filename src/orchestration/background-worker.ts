@@ -8,11 +8,13 @@ import type {
 
 export type BackgroundExecutionResult =
   | { state: 'completed'; result: BackgroundTaskResult }
+  | { state: 'paused'; reason: string; result?: BackgroundTaskResult }
   | { state: 'waiting_approval'; reason: string; result?: BackgroundTaskResult }
   | { state: 'failed'; code: string; retryable: boolean };
 
 export interface BackgroundTaskExecutor {
   execute(task: BackgroundTaskRecord, signal: AbortSignal): Promise<BackgroundExecutionResult>;
+  pause?(taskId: string): void | Promise<void>;
 }
 
 export interface BackgroundWorkerOptions {
@@ -77,6 +79,13 @@ export class BackgroundTaskWorker {
     return task;
   }
 
+  async pause(taskId: string): Promise<BackgroundTaskRecord> {
+    const task = await this.queue.requestPause(taskId);
+    if (task.state === 'running') await this.executor.pause?.(taskId);
+    await this.notify(task);
+    return task;
+  }
+
   async runOnce(): Promise<boolean> {
     const started = await this.startNext();
     if (!started) return false;
@@ -130,6 +139,7 @@ export class BackgroundTaskWorker {
       let updated: BackgroundTaskRecord;
       if (controller.signal.aborted) updated = await this.settleAborted(task.id, controller.signal.reason);
       else if (result.state === 'completed') updated = await this.queue.complete(task.id, this.workerId, result.result);
+      else if (result.state === 'paused') updated = await this.queue.pause(task.id, this.workerId, result.reason, result.result);
       else if (result.state === 'waiting_approval') {
         updated = await this.queue.waitForApproval(task.id, this.workerId, result.reason, result.result);
       } else updated = await this.queue.fail(task.id, this.workerId, result.code, result.retryable);

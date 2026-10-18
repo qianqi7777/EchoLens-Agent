@@ -10,6 +10,7 @@ export interface BackgroundTaskCommands {
   enqueue(profile: string, objective: string, isolation?: BackgroundTaskIsolation, metadata?: Record<string, string | number | boolean | null>): Promise<BackgroundTaskRecord>;
   list(): Promise<BackgroundTaskRecord[]>;
   cancel(taskId: string): Promise<BackgroundTaskRecord>;
+  pause?(taskId: string): Promise<BackgroundTaskRecord>;
   resume(taskId: string): Promise<BackgroundTaskRecord>;
   workerStatus?(): Promise<{ concurrency: number; running: number; pending: number }>;
   setConcurrency?(value: number): void;
@@ -67,10 +68,12 @@ export async function executeBackgroundTaskCommand(
     const status = await service.workerStatus();
     return { handled: true, lines: [`Worker 并发已设为 ${status.concurrency}（${status.running} running，${status.pending} queued）`] };
   }
-  if (action === 'cancel' || action === 'resume') {
+  if (action === 'cancel' || action === 'resume' || action === 'pause') {
     const taskId = parts[2];
     if (!taskId || parts.length !== 3) return { handled: true, lines: [`用法：/task ${action} <task-id>`] };
-    const task = action === 'cancel' ? await service.cancel(taskId) : await service.resume(taskId);
+    if (action === 'pause' && !service.pause) return { handled: true, lines: ['当前后台执行器不支持安全点暂停'] };
+    const task = action === 'cancel' ? await service.cancel(taskId)
+      : action === 'pause' ? await service.pause!(taskId) : await service.resume(taskId);
     return { handled: true, lines: [formatBackgroundTask(task)] };
   }
   if (action !== 'explore' && action !== 'test' && action !== 'review') {
@@ -136,6 +139,7 @@ function taskHelp(): string[] {
     '/task concurrency <1-32>：设置 Worker 池并发上限',
     '/task <explore|test|review> [sandbox|worktree] <目标>：创建并启动任务',
     '/task cancel <task-id>：取消任务',
+    '/task pause <task-id>：在工具批次安全点暂停任务',
     '/task resume <task-id>：显式恢复任务',
   ];
 }

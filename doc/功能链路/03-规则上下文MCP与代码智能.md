@@ -1,6 +1,6 @@
 # 规则、上下文、MCP 与代码智能链路
 
-> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-09-03
+> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-10-18
 
 ## 1. 上下文构建
 
@@ -36,7 +36,7 @@ flowchart TD
 | `evidence` | 状态、摘要、证据 ID、内容哈希、截断标志 | 清空 | 保留 |
 | `metadata` | 状态、摘要、工具名 | 清空 | 清空 |
 
-Context 先固定 System Policy 和规则前缀，再按最近 Turn 保留历史；超预算时把旧 Turn 折叠成 milestone summary，并继续缩短正文项，不移动或删除安全前缀。Token 预算按序列化字节数除以 4 近似估算，并为输出预留默认 4096 tokens。
+Context 先固定 System Policy 和规则前缀，再按最近 Turn 保留历史；超预算时把旧 Turn 折叠成 milestone summary，并缩短未受保护的正文项；用户约束、当前请求及白名单证据不参与缩短，保护内容仍超预算时显式失败。Token 预算按序列化字节数除以 4 近似估算，并为输出预留默认 4096 tokens。
 
 ## 4. MCP 配置数据字典
 
@@ -50,6 +50,8 @@ Context 先固定 System Policy 和规则前缀，再按最近 Turn 保留历史
 | `trust` | `untrusted` 或 `trusted` |
 | `protocolMode` | `legacy`、`auto` 或固定版本 |
 | `timeoutMs` | 单请求超时 |
+| `quota.maxCallsPerTurn/maxCallsPerSession` | 可选的每回合/每会话调用上限 |
+| `quota.maxOutputBytes` | 可选的单次响应 JSON 字节上限；超限拒绝返回内容 |
 | `permissions.tools` | 允许暴露的远程工具白名单 |
 | `permissions.resources/prompts` | 是否暴露资源和 Prompt |
 | `permissions.autoApproveReadOnly` | trusted 且明确只读时才可减少审批 |
@@ -76,6 +78,8 @@ sequenceDiagram
   REG->>MM: callTool/readResource/getPrompt
   MM->>S: 带超时、取消和 progress token 的请求
 ```
+
+配额计数写入工作区 `.echolens/mcp-quota-<session-id>.json`；没有 Session ID 时使用 `mcp-quota.json`。超限产生 `mcp.quota.exceeded` 事件，`/mcp` 可查看用量；未配置配额时不添加这些上限。
 
 单个 Server 连接失败只写 notice。远程描述、Schema 和结果会被收紧并按不可信内容处理；最终执行仍经过本地 `ToolExecutor`、权限、审批、预算和输出加固。
 

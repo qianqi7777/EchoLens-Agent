@@ -1,6 +1,6 @@
 # 子 Agent、后台任务与隔离工作区链路
 
-> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-09-03
+> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-10-18
 
 ## 1. 两种委派入口
 
@@ -44,11 +44,15 @@ stateDiagram-v2
   [*] --> pending: enqueue/resume
   pending --> running: claim + attempts++ + lease
   running --> completed: 成功
-  running --> waiting_approval: 子 Agent paused
+  running --> waiting_approval: 审批等待
+  running --> paused: 用户暂停或预算耗尽
+  pending --> paused: 暂停排队任务
+  paused --> pending: 显式 resume
   running --> pending: 可重试失败且未超次数
   running --> failed: 不可重试或次数耗尽
   running --> cancelled: 用户取消
-  running --> pending: Worker 正常停止并 release
+  running --> pending: Worker 停止且无暂停请求
+  running --> paused: Worker 停止或租约到期时保留暂停请求
   waiting_approval --> pending: 显式 resume
   failed --> pending: 显式 resume
   cancelled --> pending: 显式 resume
@@ -61,14 +65,16 @@ stateDiagram-v2
 | 字段 | 含义 |
 | --- | --- |
 | `schemaVersion/id` | 任务 schema 和 UUID |
-| `state` | pending/running/waiting_approval/completed/failed/cancelled |
+| `state` | pending/running/paused/waiting_approval/completed/failed/cancelled |
 | `isolation` | sandbox/worktree |
 | `payload.profile/objective/metadata?` | 执行目标 |
 | `createdAt/updatedAt` | 时间 |
 | `attempts/maxAttempts` | 已认领次数/上限，默认上限 2 |
 | `workerId/leaseExpiresAt` | 当前执行者和租约 |
 | `cancellationRequested` | 取消标记 |
+| `pauseRequested` | 运行中请求在安全点暂停；租约恢复和 Worker 停止时保留 |
 | `waitingReason/errorCode` | 等待或失败原因 |
+| `usage/estimatedCost` | Token、模型步数、工具调用和成本估算；缺少单价时为 unknown |
 | `result.summary/evidenceIds/data?` | 脱敏后的结果 |
 
 每次读改写同时经过实例内 Promise 队列和跨进程文件锁，最后临时文件 rename。文件读取会校验版本、状态、隔离类型和记录结构。
@@ -78,14 +84,14 @@ stateDiagram-v2
 1. `claim` 找第一个 pending 任务，写 running、workerId、租约，并递增 attempts。
 2. Worker 每约 `leaseMs/3` heartbeat，默认租约 60 秒。
 3. heartbeat 失败视为 lease lost，立即取消当前执行，防止两个 Worker 重复跑。
-4. 启动时 `recoverExpired` 把过期 running 任务恢复为 pending；已请求取消则变 cancelled。
-5. Worker 正常关闭会 release 到 pending，并把本次 attempts 回退，不把关机当失败。
+4. 启动时 `recoverExpired` 把过期 running 任务恢复为 pending；已请求取消则变 cancelled，已请求暂停则变 paused。
+5. Worker 正常关闭会 release，并把本次 attempts 回退；已请求暂停的任务保留 paused，其余回到 pending，不把关机当失败。
 
 ## 6. 隔离工作区
 
 ### sandbox
 
-创建过滤后的临时副本。任务结束后删除，`changedFiles()` 恒为空，适合探索和测试。
+创建过滤后的副本。同步任务结束后删除；后台任务暂停或可恢复失败时保留，完成后删除。`changedFiles()` 恒为空，适合探索和测试。
 
 ### worktree
 
@@ -102,8 +108,24 @@ stateDiagram-v2
 - `/tasks`：按创建时间倒序展示最近 20 条。
 - `/task ...`：入队并唤醒 Worker。
 - `/task cancel <id>`：写 cancelled，并 Abort 正在执行的任务。
-- `/task resume <id>`：waiting_approval/failed/cancelled 变回 pending 并唤醒 Worker。
+- `/task pause <id>`：排队任务立即变 paused；运行中任务设置持久暂停请求，在工具批次结束后的安全点暂停。
+- `/task resume <id>`：paused/waiting_approval/failed/cancelled 变回 pending 并唤醒 Worker；复用同一子会话检查点，不从头执行。
 
 ## 8. 关键测试
 
-`subagent.test.ts`、`task-queue.test.ts`、`task-command.test.ts`。工作区隔离还由 Sandbox、PathPolicy 和 Artifact 相关测试交叉覆盖。
+`subagent.test.ts`、`task-queue.test.ts`、`task-command.test.ts`、`task-usage.test.ts`、`worker-pool.test.ts`。工作区隔离还由 Sandbox、PathPolicy 和 Artifact 相关测试交叉覆盖。
+
+
+## 9. 后台检查点与持久隔离工作区
+
+后台任务以 task ID 作为子会话 ID，JSONL 事件保存在 `.echolens/background-sessions/`，
+复用主会话的单写者锁、检查点恢复和已完成工具结果合并。暂停、取消和可恢复失败时保留隔离工作区；
+完成后清理工作区，子会话事件继续保留以供审计。已完成检查点被再次调度时直接恢复完成结果，不再调用模型。
+
+`.echolens/background-workspaces/<task-id>.json` 保存隔离类型及 Worktree 的过滤后基线；
+路径由工作区与 task ID 重新计算，不接受清单提供的绝对路径。清单无效、目录缺失或路径包含符号链接/Junction 时失败关闭。
+恢复前逐级检查目标目录及父目录，兼容 Windows 8.3 临时路径，不以路径字符串和 `realpath` 不同作为链接证据。
+Sandbox 使用原有过滤快照目录，Worktree 使用固定任务路径，恢复时不会重新复制主工作区覆盖子任务状态。
+租约过期或 Worker 正常停止时，尚未完成的用户暂停请求仍保留为 paused，不会自动重新执行。
+
+取消保留检查点供显式恢复；暂停也不等于停止在途模型请求或命令。模型已输出、工具在途和租约归属仍遵守原有边界。

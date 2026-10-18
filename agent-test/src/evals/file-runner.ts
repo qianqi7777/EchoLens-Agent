@@ -5,15 +5,18 @@ import { DynamicTaskGenerator, type EvalTaskTemplate } from './dynamic-task.js';
 import { EvalHarness } from './harness.js';
 import { calculateRunMetrics, type EvalRunMetrics } from './metrics.js';
 import { EvalResultStore } from './result-store.js';
+import { readEvalTask } from './task-catalog.js';
+import { runtimeCandidate } from './runtime-candidate.js';
 import type {
   EvalCandidateResult,
   EvalCandidateRunner,
   EvalRunRecord,
-  EvalTaskDefinition,
 } from './types.js';
 
 export interface EvalFileRunOptions {
   taskPath?: string;
+  taskId?: string;
+  candidateMode?: 'static-fixture' | 'runtime-scripted';
   templatePath?: string;
   seed?: string;
   candidatePath: string;
@@ -40,19 +43,26 @@ export async function runEvalFiles(options: EvalFileRunOptions): Promise<EvalFil
   }
   if (options.templatePath && options.seed === undefined) throw new Error('动态模板必须指定 seed');
   const task = options.taskPath
-    ? await readJson<EvalTaskDefinition>(options.taskPath)
+    ? await readEvalTask(options.taskPath, options.taskId)
     : new DynamicTaskGenerator().generate(
       await readJson<EvalTaskTemplate>(options.templatePath!),
       options.seed!,
     );
-  const candidate = normalizeCandidate(await readJson<unknown>(options.candidatePath));
-  const runner: EvalCandidateRunner = {
-    run: async () => structuredClone(candidate),
-  };
+  const rawCandidate = await readJson<unknown>(options.candidatePath);
+  const catalog = rawCandidate as { schemaVersion?: unknown; candidates?: unknown } | null;
+  const selected = catalog && catalog.schemaVersion === 1 && catalog.candidates
+    && typeof catalog.candidates === 'object' && !Array.isArray(catalog.candidates)
+    ? (Object.hasOwn(catalog.candidates, task.id)
+      ? (catalog.candidates as Record<string, unknown>)[task.id] : undefined)
+    : rawCandidate;
+  const runner: EvalCandidateRunner = options.candidateMode === 'runtime-scripted'
+    ? runtimeCandidate(selected)
+    : { run: async () => structuredClone(normalizeCandidate(selected)) };
   const resultStore = new EvalResultStore(options.resultPath);
   try {
     const harness = new EvalHarness(runner, {
       resultStore,
+      candidateAppliesPatch: options.candidateMode === 'runtime-scripted',
       retainFailedWorkspace: options.retainFailedWorkspace,
       sandbox: options.docker ? new DockerSandboxAdapter(options.docker) : undefined,
     });

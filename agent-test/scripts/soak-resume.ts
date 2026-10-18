@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
@@ -30,22 +30,33 @@ async function main(): Promise<void> {
   const output = option(process.argv, '--output') ?? join(process.cwd(), '.echolens', 'evals', 'results', `resume-faults-${new Date().toISOString().replace(/[:.]/gu, '-')}.json`);
   const cases: FaultCase[] = ['tool-execution-process-kill', 'model-timeout', 'tool-failure', 'approval-wait'];
   const attempts: AttemptResult[] = [];
+  await mkdir(resolve(output, '..'), { recursive: true });
+  // Check persistence before expensive fault injection, and retain bounded progress on interruption.
+  const save = async (status: 'running' | 'completed'): Promise<void> => {
+    const recovered = attempts.filter((item) => item.recovered).length;
+    const report = {
+      version: 1, suite: 'resume-faults', status, plannedAttempts: rounds * cases.length,
+      generatedAt: new Date().toISOString(), roundsPerCase: rounds,
+      denominator: attempts.length, recovered, recoveryRate: attempts.length ? recovered / attempts.length : 0,
+      cases: cases.map((caseId) => {
+        const selected = attempts.filter((item) => item.caseId === caseId);
+        return { id: caseId, denominator: selected.length, recovered: selected.filter((item) => item.recovered).length, attempts: selected };
+      }),
+    };
+    const temporary = `${output}.${process.pid}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, output);
+  };
+  await save('running');
   for (const caseId of cases) for (let round = 1; round <= rounds; round += 1) {
     console.error(`resume-soak case=${caseId} round=${round}`);
     attempts.push(await withTimeout(runAttempt(caseId, round), 15_000, caseId, round));
+    if (round % 10 === 0 || round === rounds) await save('running');
   }
   const recovered = attempts.filter((item) => item.recovered).length;
-  const report = {
-    version: 1, suite: 'resume-faults', generatedAt: new Date().toISOString(), roundsPerCase: rounds,
-    denominator: attempts.length, recovered, recoveryRate: attempts.length ? recovered / attempts.length : 0,
-    cases: cases.map((caseId) => {
-      const selected = attempts.filter((item) => item.caseId === caseId);
-      return { id: caseId, denominator: selected.length, recovered: selected.filter((item) => item.recovered).length, attempts: selected };
-    }),
-  };
-  await mkdir(resolve(output, '..'), { recursive: true });
-  await writeFile(output, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  console.log(JSON.stringify({ output, denominator: report.denominator, recovered: report.recovered, recoveryRate: report.recoveryRate }));
+  await save('completed');
+  console.log(JSON.stringify({ output, denominator: attempts.length, recovered, recoveryRate: recovered / attempts.length }));
+  if (recovered !== attempts.length) process.exitCode = 1;
 }
 
 async function runAttempt(caseId: FaultCase, round: number): Promise<AttemptResult> {

@@ -6,6 +6,41 @@ import test from 'node:test';
 import { BackgroundTaskWorker } from '../../../../src/orchestration/background-worker.js';
 import { PersistentTaskQueue } from '../../../../src/orchestration/task-queue.js';
 
+test('Worker 暂停等待安全点，不以取消代替暂停，并保留可恢复的结果和用量', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-worker-pause-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = new PersistentTaskQueue(join(root, 'tasks.json'));
+  const task = await queue.enqueue({ isolation: 'sandbox', payload: { profile: 'explore', objective: 'inspect' } });
+  let started!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  const boundary = new Promise<void>((resolve) => { release = resolve; });
+  let requested = false;
+  const worker = new BackgroundTaskWorker(queue, {
+    pause: (id) => { assert.equal(id, task.id); requested = true; },
+    async execute(_task, signal) {
+      started();
+      await boundary;
+      assert.equal(signal.aborted, false);
+      assert.equal(requested, true);
+      return { state: 'paused', reason: 'user_paused', result: { summary: 'checkpoint saved', evidenceIds: ['cp'],
+        usage: { inputTokens: 2, outputTokens: 1, modelSteps: 1, toolCalls: 1 }, estimatedCost: { unknown: true } } };
+    },
+  });
+  const execution = worker.runOnce();
+  await ready;
+  assert.equal((await worker.pause(task.id)).state, 'running');
+  release();
+  await execution;
+  const saved = await new PersistentTaskQueue(join(root, 'tasks.json')).get(task.id);
+  assert.equal(saved?.state, 'paused');
+  assert.equal(saved?.result?.summary, 'checkpoint saved');
+  assert.equal(saved?.usage?.toolCalls, 1);
+  assert.equal(saved?.attempts, 0);
+  await queue.resume(task.id);
+  assert.equal((await queue.get(task.id))?.state, 'pending');
+});
+
 test('Worker 池达到配置并发且同 workspaceKey 只运行一个任务', { timeout: 5_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-worker-pool-'));
   t.after(() => rm(root, { recursive: true, force: true }));

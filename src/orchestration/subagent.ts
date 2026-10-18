@@ -21,6 +21,11 @@ import {
   type TaskWorkspaceAllocator,
 } from './workspace-allocator.js';
 import { AgentMemoryStore } from './agent-memory.js';
+import path from 'node:path';
+import { SessionRuntime } from '../session/session-runtime.js';
+import { parseFinalSummary } from '../runtime/structured-output.js';
+import { messageText } from '../core/messages.js';
+import type { AgentRunResult } from '../runtime/resumable-react-agent.js';
 
 export type BuiltinSubagentProfile = 'explore' | 'test' | 'review';
 
@@ -40,6 +45,7 @@ export interface SubagentRequest {
   profile: string;
   objective: string;
   workspaceMode?: BackgroundTaskIsolation;
+  taskId?: string;
 }
 
 export interface SubagentResult {
@@ -47,6 +53,7 @@ export interface SubagentResult {
   profile: string;
   workspaceMode: BackgroundTaskIsolation;
   state: 'completed' | 'paused' | 'cancelled' | 'failed';
+  pauseReason?: string;
   summary: string;
   changedFiles: string[];
   tests: Array<{ command: string; status: string; summary: string }>;
@@ -88,6 +95,13 @@ export const BUILTIN_SUBAGENT_PROFILES: Readonly<Record<BuiltinSubagentProfile, 
 
 export class SubagentOrchestrator {
   private readonly profiles = new Map<string, SubagentProfile>();
+  private readonly activeAgents = new Map<string, ReactAgent>();
+  private readonly pauseRequests = new Set<string>();
+
+  requestPause(taskId: string): void {
+    this.pauseRequests.add(taskId);
+    this.activeAgents.get(taskId)?.requestPause();
+  }
 
   constructor(
     private readonly model: ModelProvider,
@@ -124,9 +138,11 @@ export class SubagentOrchestrator {
     if (!objective || objective.length > 50_000) throw new Error('子 Agent 目标无效');
     const workspaceMode = request.workspaceMode ?? profileDefinition.workspaceMode;
     const memory = this.options.memory ?? new AgentMemoryStore();
-    const lease = await this.allocator.allocate(this.workspaceRoot, workspaceMode);
+    const lease = await this.allocator.allocate(this.workspaceRoot, workspaceMode, request.taskId);
     const events: AgentEvent[] = [];
     let registryLease: SubagentRegistryLease | undefined;
+    let session: SessionRuntime | undefined;
+    let retainWorkspace = Boolean(request.taskId);
     try {
       registryLease = await this.registryFactory(lease.root, profileDefinition, this.sourceRegistry);
       const { registry } = registryLease;
@@ -150,18 +166,43 @@ export class SubagentOrchestrator {
         maxSteps: profileDefinition.maxSteps,
         privacy: 'full-context',
       });
-      const result = await agent.run(subagentPrompt(profileDefinition, objective, memoryPrompt), [], signal, {
-        onEvent: (event) => { events.push(event); },
-      });
+      const onEvent = (event: AgentEvent) => {
+        events.push(event);
+        if (request.taskId && this.pauseRequests.delete(request.taskId)) agent.requestPause();
+      };
+      let result: AgentRunResult;
+      if (request.taskId) {
+        this.activeAgents.set(request.taskId, agent);
+        session = await SessionRuntime.open(agent, {
+          workspaceRoot: lease.root, rootDirectory: path.join(this.workspaceRoot, '.echolens', 'background-sessions'), sessionId: request.taskId,
+        });
+        const previous = await session.store.read();
+        events.push(...previous);
+        const saved = previous.findLast((event) => event.payload.type === 'checkpoint.saved');
+        const checkpoint = saved?.payload.type === 'checkpoint.saved' ? saved.payload.checkpoint : undefined;
+        if (checkpoint?.state === 'completed') {
+          // A crash after the terminal checkpoint must never start the task again.
+          const terminal = previous.findLast((event) => event.payload.type === 'run.completed');
+          const lastMessage = checkpoint.items.findLast((item) => item.type === 'message' && item.role === 'assistant');
+          const answer = terminal?.payload.type === 'run.completed' ? terminal.payload.answer
+            : lastMessage?.type === 'message' ? messageText(lastMessage) : '';
+          result = { answer, state: 'completed', degraded: false, items: checkpoint.items, trace: [], checkpoint,
+            sessionId: checkpoint.sessionId, turnId: checkpoint.turnId, runId: checkpoint.runId, finalSummary: parseFinalSummary(answer) };
+        } else result = checkpoint ? await session.resume(signal, onEvent)
+          : await session.run(subagentPrompt(profileDefinition, objective, memoryPrompt), signal, onEvent);
+      } else result = await agent.run(subagentPrompt(profileDefinition, objective, memoryPrompt), [], signal, { onEvent });
+      retainWorkspace = Boolean(request.taskId) && result.state !== 'completed';
       // 仅 worktree 才回传改动文件；sandbox 是随清理丢弃的暂存副本，变更不映射回主工作区。
       const changedFiles = workspaceMode === 'worktree' ? await lease.changedFiles() : [];
       const summary = result.finalSummary.verified ? result.finalSummary.value : undefined;
       const usage = metrics(events);
+      const paused = events.findLast((event) => event.payload.type === 'run.paused');
       const output: SubagentResult = {
         schemaVersion: 1,
         profile: profileDefinition.id,
         workspaceMode,
         state: result.state === 'completed' || result.state === 'paused' || result.state === 'cancelled' ? result.state : 'failed',
+        ...(result.state === 'paused' && paused?.payload.type === 'run.paused' ? { pauseReason: paused.payload.reason } : {}),
         summary: (summary?.answer ?? result.answer).slice(0, 20_000),
         changedFiles,
         tests: summary?.verification.map((item) => ({
@@ -178,8 +219,13 @@ export class SubagentOrchestrator {
       await memory.append(profileDefinition.id, `- ${new Date().toISOString()}：${output.summary.slice(0, 1_000)}`).catch(() => undefined);
       return output;
     } finally {
-      await registryLease?.close().catch(() => undefined);
-      await lease.cleanup();
+      if (request.taskId) this.activeAgents.delete(request.taskId);
+      try { await session?.close(); }
+      finally {
+        await registryLease?.close().catch(() => undefined);
+        if (retainWorkspace && lease.suspend) await lease.suspend();
+        else await lease.cleanup();
+      }
     }
   }
 }

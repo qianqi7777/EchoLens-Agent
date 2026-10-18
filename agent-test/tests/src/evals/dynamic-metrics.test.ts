@@ -7,6 +7,17 @@ import type { AgentEvent, AgentEventPayload } from '../../../../src/session/even
 import { DynamicTaskGenerator, EvalTaskCatalog, type EvalTaskTemplate } from '../../../src/evals/dynamic-task.js';
 import { aggregateMetrics, calculateRunMetrics } from '../../../src/evals/metrics.js';
 import type { EvalRunRecord } from '../../../src/evals/types.js';
+import { coreCoverage } from '../../../src/evals/core-coverage.js';
+
+test('核心覆盖率门禁固定六个目录，拒绝缺目录、重复文件和低于 95% 的结果', () => {
+  const directories = ['runtime', 'orchestration', 'providers', 'session', 'sandbox', 'skills'];
+  const records = directories.map((name) => `SF:src/${name}/sample.ts\nLF:100\nLH:95\nend_of_record\n`);
+  assert.deepEqual(coreCoverage(records.join('')), { covered: 570, total: 600, percent: 95, passed: true });
+  assert.equal(coreCoverage(records.join('').replace('LH:95', 'LH:94')).passed, false);
+  assert.throws(() => coreCoverage(records.slice(1).join('')), /缺少/u);
+  assert.throws(() => coreCoverage(records.join('') + records[0]), /重复/u);
+  assert.throws(() => coreCoverage(records.join('').replace('LH:95', 'LH:101')), /无效/u);
+});
 
 test('动态任务按 seed 可复现，并轮换低泄漏且最少使用的模板', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-eval-catalog-'));

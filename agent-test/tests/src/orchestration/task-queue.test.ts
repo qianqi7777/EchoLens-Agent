@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,174 @@ import { PersistentTaskQueue } from '../../../../src/orchestration/task-queue.js
 import { DefaultTaskWorkspaceAllocator } from '../../../../src/orchestration/workspace-allocator.js';
 
 const execute = promisify(execFile);
+
+test('暂停请求跨队列实例保留，运行中到期与 Worker 停止不能自动重启用户暂停任务', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-task-pause-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let now = new Date('2026-10-17T00:00:00.000Z');
+  const file = join(root, 'tasks.json');
+  const queue = new PersistentTaskQueue(file, () => now);
+  const task = await queue.enqueue({ isolation: 'sandbox', payload: { profile: 'explore', objective: 'inspect' } });
+  await queue.requestPause(task.id);
+  assert.equal((await new PersistentTaskQueue(file).get(task.id))?.state, 'paused');
+  assert.equal(await queue.claim('worker'), undefined);
+  await queue.resume(task.id);
+  await queue.claim('worker', 1_000);
+  await queue.requestPause(task.id);
+  now = new Date(now.getTime() + 2_000);
+  await queue.recoverExpired();
+  assert.equal((await queue.get(task.id))?.state, 'paused');
+  await queue.resume(task.id);
+  await queue.claim('worker');
+  await queue.requestPause(task.id);
+  await queue.release(task.id, 'worker');
+  assert.equal((await queue.get(task.id))?.state, 'paused');
+});
+
+test('持久 Sandbox 工作区重开时保留修改，拒绝同任务并发租约并在完成后清理', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-durable-lease-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'source.txt'), 'initial');
+  const taskId = '11111111-1111-4111-8111-111111111111';
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  const first = await allocator.allocate(root, 'sandbox', taskId);
+  await writeFile(join(first.root, 'source.txt'), 'retained');
+  await assert.rejects(allocator.allocate(root, 'sandbox', taskId), /占用/u);
+  assert.equal(await readFile(join(first.root, 'source.txt'), 'utf8'), 'retained');
+  await first.suspend!();
+  const reopened = await new DefaultTaskWorkspaceAllocator().allocate(root, 'sandbox', taskId);
+  assert.equal(reopened.root, first.root);
+  assert.equal(await readFile(join(reopened.root, 'source.txt'), 'utf8'), 'retained');
+  await reopened.cleanup();
+  await assert.rejects(readFile(join(first.root, 'source.txt')), { code: 'ENOENT' });
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'initial');
+});
+
+test('持久 Worktree 重开后仍按最初过滤基线报告变更，源工作区后续修改不被复制覆盖', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-durable-worktree-'));
+  let cleanup: (() => Promise<void>) | undefined;
+  t.after(async () => { await cleanup?.(); await rm(root, { recursive: true, force: true }); });
+  await execute('git', ['init', root]);
+  await execute('git', ['-C', root, 'config', 'user.email', 'test@example.invalid']);
+  await execute('git', ['-C', root, 'config', 'user.name', 'EchoLens Test']);
+  await writeFile(join(root, 'file.txt'), 'initial');
+  await execute('git', ['-C', root, 'add', 'file.txt']);
+  await execute('git', ['-C', root, 'commit', '-m', 'initial']);
+  const id = '33333333-3333-4333-8333-333333333333';
+  const first = await new DefaultTaskWorkspaceAllocator().allocate(root, 'worktree', id);
+  cleanup = () => first.cleanup();
+  await writeFile(join(first.root, 'file.txt'), 'agent change');
+  await first.suspend!();
+  await writeFile(join(root, 'file.txt'), 'new user change');
+  const second = await new DefaultTaskWorkspaceAllocator().allocate(root, 'worktree', id);
+  cleanup = () => second.cleanup();
+  assert.equal(second.root, first.root);
+  assert.equal(await readFile(join(second.root, 'file.txt'), 'utf8'), 'agent change');
+  assert.deepEqual(await second.changedFiles(), ['file.txt']);
+  assert.equal(await readFile(join(root, 'file.txt'), 'utf8'), 'new user change');
+});
+
+test('持久工作区拒绝篡改后的类型、基线和缺失工作区，不静默重建', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-durable-tamper-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const id = '44444444-4444-4444-8444-444444444444';
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  await assert.rejects(allocator.allocate(root, 'sandbox', '../bad'), /ID/u);
+  const lease = await allocator.allocate(root, 'sandbox', id);
+  await lease.suspend!();
+  const marker = join(root, '.echolens', 'background-workspaces', `${id}.json`);
+  const original = await readFile(marker, 'utf8');
+  await assert.rejects(allocator.allocate(root, 'worktree', id), /不匹配/u);
+  await writeFile(marker, JSON.stringify({ version: 1, mode: 'sandbox', baseline: [{ path: '../escape', mode: 420, content: '' }] }));
+  await assert.rejects(allocator.allocate(root, 'sandbox', id), /拒绝/u);
+  await writeFile(marker, original);
+  await rm(lease.root, { recursive: true, force: true });
+  await assert.rejects(allocator.allocate(root, 'sandbox', id), { code: 'ENOENT' });
+});
+
+test('Windows 短路径下的持久工作区可重开且保留任务修改', { skip: process.platform !== 'win32' }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-durable-short-path-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { stdout } = await execute('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ECHOLENS_TEST_DIRECTORY).ShortPath',
+  ], { env: { ...process.env, ECHOLENS_TEST_DIRECTORY: root }, windowsHide: true });
+  const shortRoot = stdout.trim();
+  assert.ok(shortRoot);
+  if (shortRoot.toLowerCase() === root.toLowerCase()) {
+    t.skip('当前卷未生成 8.3 短路径');
+    return;
+  }
+  await writeFile(join(root, 'source.txt'), 'initial');
+  const id = '55555555-5555-4555-8555-555555555555';
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  const lease = await allocator.allocate(shortRoot, 'sandbox', id);
+  await writeFile(join(lease.root, 'source.txt'), 'retained');
+  await assert.rejects(allocator.allocate(shortRoot, 'sandbox', id), /占用/u);
+  await lease.suspend!();
+  const reopened = await new DefaultTaskWorkspaceAllocator().allocate(shortRoot, 'sandbox', id);
+  assert.equal(reopened.root, lease.root);
+  assert.equal(await realpath(reopened.root), await realpath(lease.root));
+  assert.equal(await readFile(join(reopened.root, 'source.txt'), 'utf8'), 'retained');
+  await reopened.cleanup();
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'initial');
+});
+
+test('持久工作区拒绝根目录与父目录的链接重定向，且保留原始数据', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-durable-redirect-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const id = '66666666-6666-4666-8666-666666666666';
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  const lease = await allocator.allocate(root, 'sandbox', id);
+  await writeFile(join(lease.root, 'retained.txt'), 'keep');
+  await lease.suspend!();
+  const taskRoot = join(root, '.echolens', 'sandboxes', `echolens-${id}`);
+  // Replacing either the leaf or its parent must fail, even when both resolve to the retained data.
+  for (const target of [lease.root, taskRoot]) {
+    const retained = `${target}-retained`;
+    await rename(target, retained);
+    try {
+      await symlink(retained, target, process.platform === 'win32' ? 'junction' : 'dir');
+      await assert.rejects(allocator.allocate(root, 'sandbox', id), /路径发生变化/u);
+    } finally {
+      await rm(target, { recursive: true, force: true });
+      await rename(retained, target);
+    }
+  }
+  const reopened = await allocator.allocate(root, 'sandbox', id);
+  assert.equal(await readFile(join(reopened.root, 'retained.txt'), 'utf8'), 'keep');
+  await reopened.cleanup();
+});
+
+test('持久工作区清单损坏时拒绝继续，不覆盖清单和任务数据', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-durable-invalid-manifest-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const id = '77777777-7777-4777-8777-777777777777';
+  const allocator = new DefaultTaskWorkspaceAllocator();
+  const lease = await allocator.allocate(root, 'sandbox', id);
+  await writeFile(join(lease.root, 'retained.txt'), 'keep');
+  await lease.suspend!();
+  const marker = join(root, '.echolens', 'background-workspaces', `${id}.json`);
+  const original = await readFile(marker, 'utf8');
+  const cases = [
+    '{broken',
+    JSON.stringify(null),
+    JSON.stringify({ version: 1, mode: 'sandbox', baseline: [null] }),
+    JSON.stringify({ version: 1, mode: 'sandbox', baseline: [{ path: 'safe.txt', mode: 420, content: Buffer.alloc(2 * 1024 * 1024 + 1).toString('base64') }] }),
+  ];
+  for (const content of cases) {
+    await writeFile(marker, content);
+    await assert.rejects(allocator.allocate(root, 'sandbox', id));
+    assert.equal(await readFile(marker, 'utf8'), content);
+    assert.equal(await readFile(join(lease.root, 'retained.txt'), 'utf8'), 'keep');
+  }
+  await rm(marker);
+  await mkdir(marker);
+  await assert.rejects(allocator.allocate(root, 'sandbox', id), /清单无效/u);
+  await rm(marker, { recursive: true });
+  await writeFile(marker, original);
+  await (await allocator.allocate(root, 'sandbox', id)).cleanup();
+});
 
 test('持久任务队列恢复过期租约，并支持等待审批、恢复和完成', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-task-queue-'));

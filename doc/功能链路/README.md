@@ -1,6 +1,6 @@
 # EchoLens Agent 功能链路总览与数据字典
 
-> 适用版本：v0.7。更新日期：2026-09-21。本文档描述公开仓库当前实现。
+> 适用版本：v0.7。更新日期：2026-10-18。本文档描述公开仓库当前实现。
 
 ## 1. 这套文档怎么用
 
@@ -12,9 +12,9 @@
 | [对话运行、工具调用与会话恢复](./02-对话运行工具调用与会话恢复.md) | 提问、工具调用、暂停、取消、恢复、steering | Session JSONL、AgentCheckpoint |
 | [规则、上下文、MCP 与代码智能](./03-规则上下文MCP与代码智能.md) | 加载 AGENTS.md、压缩上下文、调用 MCP、查符号 | `.echolens/mcp.json`、内存目录与 LSP 状态 |
 | [审批、编辑、Sandbox 与验证](./04-审批编辑Sandbox与验证.md) | 审批、改文件、跑命令、回放 Sandbox 修改、回滚、验证 | approvals、checkpoints、artifacts、sandboxes |
-| [子 Agent、后台任务与隔离工作区](./05-子Agent后台任务与隔离工作区.md) | 委派 Explore/Test/Review、后台排队、取消和恢复 | background-tasks、租约、临时 Worktree |
+| [子 Agent、后台任务与隔离工作区](./05-子Agent后台任务与隔离工作区.md) | 委派 Explore/Test/Review、后台排队、暂停、取消和恢复 | background-tasks、子会话检查点、持久隔离工作区 |
 | [Model Gateway 认证、代理与用量](./06-Model-Gateway认证代理与用量.md) | 登录、刷新、注销、模型发现、推理代理、限流和配额 | SQLite 三张表、客户端 Token Store |
-| [Eval 评测与动态任务](./07-Eval评测与动态任务.md) | 运行本地评测、隐藏评分、动态题目轮换 | results.jsonl、catalog.json |
+| [Eval 评测与动态任务](./07-Eval评测与动态任务.md) | 运行 120 项固定任务、断言评分、动态题目轮换 | 任务/脚本 catalog、JSONL 结果、suite 汇总 |
 | [工作目录切换](./08-工作目录切换.md) | 查看目录、切换目录、命令候选、隔离 Session 和运行时资源 | 当前运行时引用；每个目录独立 `.echolens/` |
 | [测试工作台与 Issue 对比](./09-测试工作台与Issue对比.md) | 网页导入任务、模拟/真实对比、取消、质量检查、导出 | 浏览器结果、临时副本、内存运行槽；无数据库 |
 | [Plan 模式、计划确认与 Goal 证据链](./10-Plan模式计划确认与Goal证据链.md) | 切换执行阶段、批准计划、设置目标、记录证据与完成目标 | Session JSONL、路由阶段、AgentGoal |
@@ -48,13 +48,16 @@ flowchart LR
 
 | 位置 | 格式 | 写入方 | 读取方 | 内容 | 一致性策略 |
 | --- | --- | --- | --- | --- | --- |
-| `.env.local` | KEY=VALUE | `startup-config.ts`、`gateway-cli.ts` | Node `loadEnvFile`、`ModelRouter` | 本地路由和非 Gateway 直连配置 | 临时文件加 rename；拒绝换行注入 |
+| 用户级 `~/.echolens/.env.local`（可由 `ECHOLENS_HOME` 覆盖） | KEY=VALUE | `startup-config.ts`、`gateway-cli.ts` | Node `loadEnvFile`、`ModelRouter` | 本地路由和非 Gateway 直连配置 | 临时文件加 rename；拒绝换行注入 |
 | `.echolens/sessions/<sessionId>.jsonl` | JSONL | `JsonlEventStore` | `SessionRuntime`、CLI/TUI | Session、Turn、模型、工具、审批、检查点、用量事件 | 跨进程文件锁、单写队列、连续 seq、关键事件 datasync |
 | `.echolens/approvals.json` | JSON 数组 | `JsonApprovalStore` | `ToolExecutor` | 审批请求摘要和决策 | 进程内串行、临时文件加 rename、参数只存哈希 |
 | `.echolens/checkpoints/<id>.json` | JSON | `saveEditCheckpoint` | 回滚命令 | 编辑前文件内容、哈希和工作区版本 | 内容哈希 ID、0600、工作区归属校验 |
 | `.echolens/artifacts/<bundleId>/manifest.json` | JSON + 文件 | `collectSandboxArtifacts` | `apply_sandbox_patch` | Sandbox 文件变化、请求产物、结构化 Patch | 先完整收集再写 manifest；失败删除半成品目录 |
-| `.echolens/sandboxes/<id>/` | 临时目录 | `FileSystemWorkspaceStager` | Docker Adapter | 过滤后的工作区副本与 baseline | 排除秘密/私有/忽略文件；执行后清理 |
+| `.echolens/sandboxes/<id>/` | 隔离目录 | `FileSystemWorkspaceStager` | Docker Adapter、后台子 Agent | 过滤后的工作区副本与 baseline | 排除秘密/私有/忽略文件；普通调用后清理，后台非完成状态保留以恢复 |
 | `.echolens/background-tasks.json` | JSON 对象 | `PersistentTaskQueue` | Worker、CLI/TUI | 后台任务、状态、租约、重试和结果 | 进程内串行、跨进程锁、临时文件加 rename |
+| `.echolens/background-sessions/<task-id>.jsonl` | JSONL | 子任务 SessionRuntime | 后台恢复 | 子会话事件和检查点 | 复用单写者锁、事件重放；完成后仍保留日志 |
+| `.echolens/background-workspaces/<task-id>.json` | JSON | WorkspaceAllocator | 后台恢复 | 隔离类型及 Worktree 过滤基线 | 原子替换；按任务计算路径，拒绝目录链接 |
+| `.echolens/mcp-quota-<session-id>.json` | JSON | McpClientManager | 配额检查、`/mcp` | 每 Server 调用计数；无 Session 时使用 `mcp-quota.json` | 进程内串行计数并持久化 |
 | `.echolens/mcp.json` | JSON | 用户/部署配置 | `loadMcpConfig` | MCP Server、Transport、权限引用 | 路径/结构/秘密引用校验；只读加载 |
 | Windows `%LOCALAPPDATA%/EchoLens/gateway-token.dpapi` | DPAPI 密文 | Gateway CLI/Resolver | Gateway Credential Resolver | Access/Refresh Token 和过期时间 | 用户级 DPAPI、原子替换；明文不进命令行 |
 | 非 Windows `~/.echolens/gateway-token.json` | 0600 JSON | 同上 | 同上 | 同上 | 文件权限加原子替换 |
@@ -89,7 +92,7 @@ flowchart LR
 2. 对话问题按 `sessionId -> turnId -> runId -> seq` 查 Session JSONL。
 3. 工具未执行时先看 `guardrail.decision`、`approval.*`，再看 `tool.completed.error.code`。
 4. Sandbox 修改未回写时检查 bundle manifest、Patch 预览和 Checkpoint。
-5. 后台任务卡住时看 `state/workerId/leaseExpiresAt/cancellationRequested/attempts`。
+5. 后台任务卡住时看 `state/workerId/leaseExpiresAt/cancellationRequested/pauseRequested/attempts`，并核对子会话日志与持久工作区清单。
 6. Gateway 问题按 Request ID 对齐审计事件，再查 Token/Usage 表；不要输出令牌明文或数据库秘密。
 7. 目录切换失败时先看 `workspace_*` 错误码；新目录初始化失败不会关闭旧工作区。
 
