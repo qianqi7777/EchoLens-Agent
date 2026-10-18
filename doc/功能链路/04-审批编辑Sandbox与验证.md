@@ -1,6 +1,6 @@
 # 审批、编辑、Sandbox 与验证链路
 
-> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-09-03
+> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-10-18
 
 ## 1. 两条修改工作区的路径
 
@@ -73,7 +73,7 @@ sequenceDiagram
 | `create` | path、content | 目标必须不存在 |
 | `delete` | path、expectedFileHash | 必须匹配旧文件哈希 |
 
-默认上限：64 个操作、64 个文件、2 MiB 改动、20000 行。路径必须是工作区内普通相对路径，拒绝私有元数据、重解析点、ADS、短文件名、保留名和越界路径。
+默认上限：64 个操作、64 个文件、2 MiB 改动、20000 行。普通相对路径限于工作区；绝对路径必须交由 PathPolicy 判断，工作区外仅允许用户在 `.echolens/roots.json` 显式配置的可写授权根，且每次写入单独审批。私有元数据、重解析点、ADS、短文件名、保留名和未授权越界路径始终拒绝。
 
 ## 4. EditCheckpoint 数据字典
 
@@ -88,8 +88,9 @@ sequenceDiagram
 | `files[].path` | 被修改路径 |
 | `files[].contentBase64` | 修改前内容；原文件不存在时可无 |
 | `files[].existed/hash/afterHash` | 原存在性、修改前后哈希 |
+| `files[].afterContentBase64/afterExisted` | 新格式保存应用后的字节及存在性，用于从检查点重建任务 diff |
 
-回滚会校验当前文件仍等于 `afterHash`；用户在编辑后又手工改过同一文件时，不覆盖用户的新修改。
+回滚会校验当前文件仍等于应用后状态；用户在编辑后又手工修改或重建同一文件时，不覆盖用户的新修改。旧检查点缺少应用后证据时保守跳过；`/diff` 不从任务结束后的实时文件反推 Agent 变更。
 
 ## 5. Docker Sandbox 边界
 

@@ -59,7 +59,8 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
         }
       }
     }
-    const workspaceKey = path.resolve(lease.root);
+    // Use one canonical spelling for both the lease and its occupancy key.
+    const workspaceKey = path.resolve(await realpath(lease.root));
     if (this.activeWorkspaceKeys.has(workspaceKey)) {
       if (!marker) await lease.cleanup();
       throw new Error('后台任务工作区已被占用');
@@ -68,6 +69,7 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
     let released = false;
     return {
       ...lease,
+      root: workspaceKey,
       workspaceKey,
       ...(marker ? { suspend: async () => {
         released = true;
@@ -170,9 +172,12 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
     const target = mode === 'sandbox'
       ? path.join(workspaceRoot, '.echolens', 'sandboxes', `echolens-${taskId}`, 'workspace')
       : path.join(os.tmpdir(), 'echolens-worktrees', rootHash, `echolens-worktree-${taskId}`);
-    // Never accept a serialized path or a link redirecting the retained root.
-    if ((await lstat(target)).isSymbolicLink() || path.resolve(await realpath(target)).toLowerCase() !== path.resolve(target).toLowerCase()) {
-      throw new Error('持久工作区路径发生变化');
+    // Windows 8.3 aliases can differ from realpath without redirecting the directory.
+    // Inspect every component instead: checking only the leaf misses parent Junctions.
+    for (let directory = path.resolve(target); ; directory = path.dirname(directory)) {
+      const component = await lstat(directory);
+      if (!component.isDirectory() || component.isSymbolicLink()) throw new Error('持久工作区路径发生变化');
+      if (path.dirname(directory) === directory) break;
     }
     return { id: `${mode}-${taskId}`, mode, root: target, workspaceKey: path.resolve(target), baseline,
       changedFiles: mode === 'worktree' ? () => workspaceChanges(this.stager, target, baseline) : async () => [],

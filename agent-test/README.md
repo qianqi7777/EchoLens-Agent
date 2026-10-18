@@ -85,6 +85,9 @@ npm run agent-test:web
 
 ## 5. 回归验证
 
+完整命令范围、平台矩阵与覆盖率门禁见 [测试与 CI](../doc/测试与CI.md)。
+网页“质量检查”执行的 `check:ci` 包含类型检查和四类测试；覆盖率、依赖审计、打包及真实 Docker 验收是独立检查。
+
 ```powershell
 npm run agent-test:test
 npm run check:ci

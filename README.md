@@ -48,8 +48,8 @@ Worktree 子 Agent，并通过更严格的 TypeScript 门禁收敛运行时实�
 - 提供 `outline_file`、`find_symbols`、`go_to_definition`、`find_references`、`get_diagnostics`
 - TypeScript/JavaScript 代码智能优先使用 LSP，并在服务不可用时降级到 tree-sitter
 - 提供版本化 Eval Harness、隔离 Fixture、隐藏 Grader、动态任务轮换、任务域/难度元数据、结构/行为/效率分层评分和质量/成本/安全指标
-- 支持本地静态 Candidate 的 Eval CLI，默认不连接模型或付费 API
-- 支持版本锁定的 Eval Suite（静态任务 + 固定 seed 动态变体），归档逐任务原始结果与汇总报告；复现命令 `npm run eval:fixed`
+- Eval CLI 支持静态 Candidate 和本地脚本运行时两种模式，默认不连接模型或付费 API
+- `npm run eval:fixed` 默认运行锁定的 120 项脚本运行时任务；旧静态套件及固定 seed 动态变体另行保留，逐任务归档结果与汇总报告
 - 提供带跨进程锁的持久后台任务队列、可配置 Worker 池并发、工作区互斥、租约恢复、显式取消/恢复和状态通知
 - 提供 Explore、Test、Review 三种受限子 Agent，使用独立 Sandbox/Worktree、预算与工具白名单
 - 子 Agent profile 支持独立模型路由与 `$ECHOLENS_HOME/agent-memory/<profile>/` 记忆，读取/写入均有行数、大小和路径边界
@@ -105,8 +105,8 @@ npm run dev
 运行，`Ctrl+C` 取消当前 Turn。非 TTY 环境自动保留 readline 兼容模式。
 
 首次启动会进入终端设置向导，可选择 DeepSeek、自定义 OpenAI-compatible API
-或 EchoLens Gateway。全局安装时配置写入用户目录 `.echolens/.env.local`；从源码开发并显式传入
-项目根目录时才使用项目 `.env.local`。旧版本工作区中的 `.env.local` 会在首次启动时自动迁移。
+或 EchoLens Gateway。源码启动和全局安装都默认使用用户目录 `.echolens/.env.local`，可用
+`ECHOLENS_HOME` 指定配置目录。用户级配置不存在时，会迁移旧版本工作区中的 `.env.local`。
 需要更换模型路由时运行 `npm run setup`。完整变量示例见 `.env.example`；shell、
 IDE 和进程管理器显式注入的环境变量仍可使用。
 
@@ -139,17 +139,18 @@ npm run dev -- --resume latest
 - `/pwd` 或 `/workspace`：显示当前工作目录和 Session
 - `/cd <path>` 或 `/workspace <path>`：切换工作目录；相对路径以当前目录为基准
 - 在 TUI 中输入 `/`：打开带说明的命令候选菜单；`↑/↓` 选择、`Tab` 补全、`Enter` 确认、`Esc` 关闭
+- `/pause`：请求在安全点暂停当前 Turn，保留检查点
 - `/resume`：恢复当前 Session 的未完成 Turn
 - `/tasks`：查看后台 Worker 并发、运行中与排队数量及任务状态
 - `/task concurrency <1-32>`：运行时调整后台 Worker 池并发；默认按 CPU 线程数的一半计算，也可通过 `AGENT_WORKER_CONCURRENCY` 配置
 - `/steer 新要求`：运行中排队补充要求；暂停后写入并从当前检查点继续
 - `/plan [on|off|plan|execute|verify|status]`：查看或切换执行阶段；规划阶段只提供只读工具
 - `/goal <目标>`：设置长时目标；`/goal status|note <证据>|done|drop` 管理证据与状态
-- `/tasks`：列出最近后台任务
 - `/usage [session-id]`：汇总后台任务 token、模型步数、工具调用和估算成本；缺少模型单价时显示 `unknown`
 - `/task <explore|test|review> [sandbox|worktree] <目标>`：创建并启动受限后台任务
 - `/task cancel <id>`：取消后台任务
-- `/task resume <id>`：显式恢复待处理、失败或已取消任务
+- `/task pause <id>`：在安全点暂停后台任务；排队任务立即暂停
+- `/task resume <id>`：唤醒 pending 任务，或恢复 paused、waiting_approval、failed、cancelled 任务
 - `Ctrl+C`：只取消当前 Turn，不删除 Session
 - `/exit`：退出 CLI
 - `/audit verify`：校验当前 Session 的审计链并报告断链事件；`/audit export <path>`：导出审计记录供离线校验
@@ -165,9 +166,9 @@ Direct 路由默认启用流式响应；设置 `AGENT_DIRECT_STREAMING=false` �
 ## npm 发布通道
 
 受信任的 GitHub Actions 发布流程使用 npm Trusted Publishing（OIDC），仓库中不保存长期
-npm Token。`dev` 分支只运行 CI；推送到 `main` 会先执行完整质量门禁，再发布唯一的
+npm Token。`dev` 分支只运行 CI；推送到 `main` 会先执行类型检查、四类测试和打包验收，再发布唯一的
 `<package-version>-main.<run-number>` 版本到 `latest`。推送与 `package.json` 版本一致的
-`vX.Y.Z` 标签，也会发布到 `latest`。
+`vX.Y.Z` 标签，也会发布到 `latest`。覆盖率和依赖审计由独立 CI job 检查，发布工作流不等待这些 job；合并前应确认 PR 的检查均已通过。
 
 发布前可在本地复现构建、打包内容检查和安装验收：
 
@@ -221,7 +222,7 @@ npm run agent-test:web
 ```
 
 后台 Worker 不会在应用启动时自动运行待处理任务。创建或执行 `/task resume <id>` 才会启动；
-正常退出会释放运行中租约并回到 `pending`，不会把任务误标成用户取消。
+正常退出会释放运行中租约；已请求暂停的任务保留为 `paused`，其余回到 `pending`，不会把关机误标成用户取消。
 
 ## Sandbox
 
@@ -300,11 +301,11 @@ npm run audit
 
 真实 Docker Sandbox 验收仍使用 `npm run verify:docker`，需要本机预先准备镜像。
 
-测试分为 Unit、Contract、Security 和 Performance 四类。完整命令、CI 平台矩阵
-由 `package.json` 和 `.github/workflows/ci.yml` 定义。
+测试分为 Unit、Contract、Security 和 Performance 四类。命令范围、CI 平台矩阵及失败排查见
+[测试与 CI](./doc/测试与CI.md)，对应定义位于 `package.json` 和 `.github/workflows/ci.yml`。
 Security 当前为 72 个已登记测试用例（覆盖 PathPolicy、Guardrail、授权根和 Skill 边界；不等同于 72 个真实 Docker Sandbox 验收）；符号链接创建受限时会在输出中记录诊断，Junction 拒绝分支仍独立验证。覆盖率产物复现命令为 `npm run test:coverage`。
 `npm run eval:fixed` 运行 120 项固定版本地运行时任务套件（`fixed-coding@1.0.0`：60 项工程变更、60 项路径读取/写入安全任务），并在 `.echolens/evals/results/` 生成带时间戳的 JSONL 与 JSON 摘要；摘要包含固定任务 ID/版本/内容去重审计、域与难度分组、结构/行为/效率分层分数。该套件通过本地脚本 Provider 驱动真实 Agent、ToolExecutor、审批、Patch 和 Guardrail，保留实际事件；工程变更采用完整文件内容断言，安全任务校验真实拒绝事件。参考脚本已公开，不能据此推断模型修复质量或通过率。`npm run eval -- --suite sandbox-smoke --docker` 才会请求 Docker Sandbox，缺少 Docker 时按失败关闭。
-CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage 分为独立 job；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
+CI 将 quality（TypeScript + unit/contract/security）、performance、audit、coverage、package 分为独立 job；`check:ci` 只包含类型检查和四类测试；手动 `workflow_dispatch` 才会拉取沙箱镜像并执行 Docker 验收，相关原始日志以 artifact 上传。
 
 ## 目录
 
@@ -329,11 +330,11 @@ src/
     tool-registry.ts     工具注册表
     file-lock.ts         Session 与后台队列共用的跨进程文件锁
     workspace-manager.ts 工作目录命令、路径校验和运行时原子切换
-  commands/command-catalog.ts
-                         内置命令目录、别名、说明、参数提示和候选过滤
     workspace-tools.ts   安全的只读代码工具
     sandbox-tools.ts     Sandbox Shell、测试、构建与安装工具
     verifier.ts          声明验证基础
+  commands/command-catalog.ts
+                         内置命令目录、别名、说明、参数提示和候选过滤
   sandbox/
     docker-sandbox.ts    Docker 高隔离执行适配器
     workspace-stager.ts  排除秘密和忽略文件的临时工作区快照
@@ -354,12 +355,12 @@ v0.7 已完成持久状态的跨进程单写者加固、当前工作区 Worktree
 `sandbox_setup_required` 及可复制修复命令。
 自动验证默认开启（`AGENT_VERIFY_GATE=auto`）：本回合写入返回变更文件后，受控验证命令经 Sandbox 执行；缺少验证计划或 Sandbox 不可用时记录 skipped，不代表通过。`strict` 在 Sandbox 不可用时暂停；连续两次验证失败后均会暂停。此闭环依赖 Docker Sandbox 可用，自动验证也消耗单回合最多 24 次工具预算。
 失败解析目前依据 TAP、Jest、pytest、Go test 与 Cargo test 的文本形态；非标准/custom reporter 可能无法结构化，此时仍回传原有脱敏截断输出，不代表覆盖所有测试运行器。
-后台子 Agent 使用异步 I/O Worker 池；并发默认 `max(1, floor(os.cpus().length / 2))`，允许 1–32 并可由 `AGENT_WORKER_CONCURRENCY` 或 `/task concurrency` 覆盖。同一显式 workspace key 在队列认领时互斥，缺省任务由 allocator 分配独立 Sandbox/Worktree。Docker 主机建议从并发 2–4 起步并按内存/CPU 配额调节；该建议不是压力测试结论。
+后台子 Agent 使用异步 I/O Worker 池；并发默认 `min(32, max(1, floor(os.cpus().length / 2)))`，允许 1–32 并可由 `AGENT_WORKER_CONCURRENCY` 或 `/task concurrency` 覆盖。同一显式 workspace key 在队列认领时互斥，缺省任务由 allocator 分配独立 Sandbox/Worktree。Docker 主机建议从并发 2–4 起步并按内存/CPU 配额调节；该建议不是压力测试结论。
 后台任务用量按子 Agent 实际收到的 usage 事件累计；成本只复用已配置模型 Profile 的公开单价，任一单价缺失会记录并展示 `unknown`，不会把未知成本当作 0。CLI 入队时自动写入当前 Session ID；未提供该 metadata 的历史或外部入队任务归入 `unknown`。
 任务级 diff 只包含新格式检查点保存的前后内容；旧检查点缺少补丁后内容时会明确拒绝重建。diff 不重新读取任务结束后的工作区，因此后续用户修改不会被伪装成 Agent 变更；统一输出有字符上限，单文件可通过运行时变更包 API 查询。
 按索引回退使用当前工作区检查点目录中按 `createdAt` 排序的检查点，索引从 0 开始；中途失败会停止并报告已处理范围，不提供跨工作区或强制覆盖用户后续修改的回退。
 主会话 `/pause` 与后台 `/task pause <id>` 都在工具批次完成后、下一次模型调用前暂停；后台 `/task resume <id>` 复用原隔离工作区和持久子会话检查点，重启后不重放已完成工具。手动暂停只在安全点生效；模型请求或工具执行中不会被硬中断。命令行非交互执行不能在已阻塞的同步输入期间注入 `/pause`，TUI 支持运行中输入该命令。
-最近一次完整且全绿的覆盖率实测为全量 `src/` Statements/Lines 88.63%、Functions 94.29%、Branches 81.78%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）为 Statements/Lines 95.01%（14902/15685）。覆盖率门禁按全量行 84%、函数 88%、分支 76% 设置，并对固定六个核心目录单独要求行覆盖率不低于 95%；复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
+2026-10-18 在 Windows / Node.js 24 的本地覆盖率实测为全量 `src/` Statements/Lines 88.76%、Functions 94.37%、Branches 82.09%；固定核心集合（runtime、orchestration、providers、session、sandbox、skills）的行覆盖率为 95.21%（14939/15690）。平台与条件分支可能使统计略有差异，PR 是否通过以当前提交的 CI 结果为准。覆盖率门禁按全量行 84%、函数 88%、分支 76% 设置，并对固定六个核心目录单独要求行覆盖率不低于 95%；复现命令为 `npm run test:coverage`，LCOV 文件为 `coverage/lcov.info`。
 Security 的符号链接验证受当前运行账户权限影响：在不允许创建文件 symlink 的 Windows 环境，仅该能力分支会带诊断跳过；Junction 拒绝仍单独运行。该环境不能据此声称文件 symlink 创建成功分支已覆盖。
 A2A 暂不接入：当前编排没有跨服务、跨团队或远程 Agent Card/Task 互操作需求。Docker 缺失时 Sandbox 工具仍会明确失败，不会
 回退到低隔离宿主执行。LSP 语言覆盖仍限于 TypeScript/JavaScript；Skill 的 scripts 尚未提供独立执行命令，

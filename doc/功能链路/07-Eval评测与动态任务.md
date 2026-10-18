@@ -1,6 +1,6 @@
 # Eval 评测与动态任务链路
 
-> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-09-03
+> [返回功能链路索引](./README.md) | 适用版本：v0.7 | 更新日期：2026-10-18
 
 ## 1. 目标与默认边界
 
@@ -28,7 +28,7 @@ sequenceDiagram
   H->>W: 默认清理，失败诊断可选择保留
 ```
 
-Candidate 看不到 grader、fixture 定义和 generator 元数据，只得到公开任务字段，防止直接针对评分答案作弊。
+CandidateRunner 接口只收到公开任务字段与隔离工作区路径，不直接接收 grader、fixture 定义和 generator 元数据。工作区内仍可读取题目文件；仓库中公开的任务与参考答案不是保密评分集，这个接口隔离不能保证防泄题。
 
 ## 3. Task 数据字典
 
@@ -39,6 +39,7 @@ Candidate 看不到 grader、fixture 定义和 generator 元数据，只得到�
 | `introducedAt/lastUsedAt?` | 生命周期 |
 | `leakageRisk` | low/medium/high/known_leaked |
 | `tags?` | 分类 |
+| `domain/difficulty/source/split?` | 任务域、难度、来源和切分，用于报告分组 |
 | `fixture.files[]` | 写入隔离工作区的文件 |
 | `grader` | answer/patch/terminal/security 隐藏评分 |
 | `generator?` | templateId、seed、变量，仅动态任务存在 |
@@ -54,7 +55,8 @@ Fixture 路径必须是安全相对路径，拒绝 `.git`、`.echolens`、`study
 
 ## 4. Candidate 与结果记录
 
-Candidate 可返回：`answer`、`patch`、`events`、`evidenceIds`、有限类型 `metadata`。
+静态 Candidate 可返回 `answer`、`patch`、`events`、`evidenceIds` 和有限类型 `metadata`；其中事件是输入样本，只能用于 Harness 的结构与契约回归，不能据此声称实际运行过工具。
+`runtime-scripted` 模式输入为 `{calls:[{name,arguments}]}` 脚本，结果与事件由真实运行时产生，不接受 Candidate 自报事件。
 
 `EvalRunRecord` 字段：
 
@@ -82,9 +84,9 @@ Candidate 可返回：`answer`、`patch`、`events`、`evidenceIds`、有限类�
 
 同一模板和 seed 必须产生完全相同的任务 ID 和内容，便于跨运行比较。
 
-## 6. Eval Catalog
+## 6. 动态轮换 Catalog
 
-文件结构：`{ "version": 1, "entries": [...] }`。
+此 Catalog 保存动态模板的轮换状态，文件结构为 `{ "version": 1, "entries": [...] }`；它不同于第 9 节存放固定任务定义的 `.tasks.json` catalog。
 
 | 字段 | 含义 |
 | --- | --- |

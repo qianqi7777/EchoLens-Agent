@@ -78,6 +78,7 @@ jobs:
       - name: Run coverage gate
         run: npm run test:coverage
       - name: Upload LCOV report
+        if: ${{ !cancelled() && hashFiles('coverage/lcov.info') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: source-coverage-lcov

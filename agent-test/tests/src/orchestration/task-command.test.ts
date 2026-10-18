@@ -31,6 +31,46 @@ test('后台任务命令共享解析创建、列出、取消和恢复', async ()
   assert.match(invalid.lines[0] ?? '', /1 到 32/u);
 });
 
+test('后台控制命令拒绝缺失或多余参数，旧执行器不支持暂停时明确提示', async () => {
+  const service = new RecordingTaskCommands();
+  for (const action of ['pause', 'cancel', 'resume']) {
+    for (const args of ['', 'task-1 extra']) {
+      const result = await executeBackgroundTaskCommand(`/task ${action} ${args}`.trim(), service);
+      assert.deepEqual(result.lines, [`用法：/task ${action} <task-id>`]);
+    }
+  }
+  const legacy: BackgroundTaskCommands = {
+    enqueue: service.enqueue.bind(service), list: service.list.bind(service),
+    cancel: service.cancel.bind(service), resume: service.resume.bind(service),
+  };
+  assert.deepEqual((await executeBackgroundTaskCommand('/task pause task-1', legacy)).lines, ['当前后台执行器不支持安全点暂停']);
+  assert.deepEqual((await executeBackgroundTaskCommand('/task concurrency 2', legacy)).lines, ['Worker 并发配置不可用。']);
+  assert.deepEqual((await executeBackgroundTaskCommand('/tasks', legacy)).lines, ['暂无后台任务。']);
+  assert.deepEqual(service.tasks, []);
+});
+
+test('后台命令查询和错误输入保持只读，不意外创建任务', async () => {
+  const service = new RecordingTaskCommands();
+  assert.deepEqual(await executeBackgroundTaskCommand('ordinary prompt', service), { handled: false, lines: [] });
+  for (const input of ['/task', '/task help']) {
+    assert.ok((await executeBackgroundTaskCommand(input, service)).lines.includes('/task pause <task-id>：在工具批次安全点暂停任务'));
+  }
+  assert.match((await executeBackgroundTaskCommand('/task concurrency', service)).lines.join('\n'), /当前 Worker 并发：2/u);
+  assert.match((await executeBackgroundTaskCommand('/task unknown goal', service)).lines[0]!, /未知 Profile/u);
+  assert.match((await executeBackgroundTaskCommand('/task explore sandbox', service)).lines[0]!, /用法/u);
+  assert.deepEqual((await executeBackgroundTaskCommand('/usage one two', service)).lines, ['用法：/usage [session-id]']);
+  assert.deepEqual(service.tasks, []);
+});
+
+test('后台创建失败保持 Sandbox 预检提示，其他错误不伪装成已创建', async () => {
+  const service = new RecordingTaskCommands();
+  service.enqueue = async () => { throw Object.assign(new Error('not ready'), { code: 'sandbox_setup_required' }); };
+  assert.match((await executeBackgroundTaskCommand('/task test run checks', service)).lines[0]!, /sandbox_setup_required/u);
+  service.enqueue = async () => { throw new Error('queue unavailable'); };
+  await assert.rejects(executeBackgroundTaskCommand('/task explore inspect', service), /queue unavailable/u);
+  assert.deepEqual(service.tasks, []);
+});
+
 // 用内存桩代替真实队列，只验证命令解析与参数传递，不引入持久化 I/O。
 class RecordingTaskCommands implements BackgroundTaskCommands {
   readonly tasks: BackgroundTaskRecord[] = [];
