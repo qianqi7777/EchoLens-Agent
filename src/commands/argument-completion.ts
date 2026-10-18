@@ -30,9 +30,9 @@ export async function completeArguments(input: string, context: ArgumentCompleti
   if (command === '/task') {
     if (!args.includes(' ')) return values('', [
       ['explore', '探索代码'], ['test', '运行测试任务'], ['review', '审查代码'],
-      ['cancel', '取消后台任务'], ['resume', '恢复后台任务'],
+      ['pause', '暂停后台任务'], ['cancel', '取消后台任务'], ['resume', '恢复后台任务'],
     ], args);
-    const task = /^(cancel|resume)\s+(\S*)$/u.exec(args);
+    const task = /^(pause|cancel|resume)\s+(\S*)$/u.exec(args);
     if (task && context.listTasks) return values(`${task[1]} `,
       (await context.listTasks()).map((item) => [item.id, item.state]), task[2]!);
   }

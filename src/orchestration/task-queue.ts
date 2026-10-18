@@ -7,6 +7,7 @@ import { withFileLock, type FileLockOptions } from '../runtime/file-lock.js';
 export type BackgroundTaskState =
   | 'pending'
   | 'running'
+  | 'paused'
   | 'waiting_approval'
   | 'completed'
   | 'failed'
@@ -14,7 +15,7 @@ export type BackgroundTaskState =
 
 export type BackgroundTaskIsolation = 'sandbox' | 'worktree';
 const TASK_STATES = new Set<BackgroundTaskState>([
-  'pending', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled',
+  'pending', 'running', 'paused', 'waiting_approval', 'completed', 'failed', 'cancelled',
 ]);
 const ISOLATIONS = new Set<BackgroundTaskIsolation>(['sandbox', 'worktree']);
 
@@ -57,6 +58,7 @@ export interface BackgroundTaskRecord {
   workerId?: string;
   leaseExpiresAt?: string;
   cancellationRequested?: boolean;
+  pauseRequested?: boolean;
   waitingReason?: string;
   errorCode?: string;
   usage?: BackgroundTaskUsage;
@@ -98,7 +100,7 @@ export class PersistentTaskQueue {
       for (const task of file.tasks) {
         if (task.state !== 'running') continue;
         if (task.leaseExpiresAt && Date.parse(task.leaseExpiresAt) > current) continue;
-        task.state = task.cancellationRequested ? 'cancelled' : 'pending';
+        task.state = task.cancellationRequested ? 'cancelled' : task.pauseRequested ? 'paused' : 'pending';
         task.workerId = undefined;
         task.leaseExpiresAt = undefined;
         task.updatedAt = this.now().toISOString();
@@ -206,7 +208,7 @@ export class PersistentTaskQueue {
   async release(taskId: string, workerId: string): Promise<BackgroundTaskRecord> {
     return this.transition(taskId, (task) => {
       requireWorker(task, workerId);
-      task.state = task.cancellationRequested ? 'cancelled' : 'pending';
+      task.state = task.cancellationRequested ? 'cancelled' : task.pauseRequested ? 'paused' : 'pending';
       task.attempts = Math.max(0, task.attempts - 1);
       clearLease(task);
     });
@@ -221,13 +223,38 @@ export class PersistentTaskQueue {
     });
   }
 
+  /** Running work pauses cooperatively; queued work can be paused immediately. */
+  async requestPause(taskId: string): Promise<BackgroundTaskRecord> {
+    return this.transition(taskId, (task) => {
+      if (!['pending', 'running', 'paused'].includes(task.state)) throw new Error(`当前任务不能暂停：${task.state}`);
+      task.pauseRequested = true;
+      if (task.state === 'pending') task.state = 'paused';
+    });
+  }
+
+  async pause(taskId: string, workerId: string, reason: string, result?: BackgroundTaskResult): Promise<BackgroundTaskRecord> {
+    return this.transition(taskId, (task) => {
+      requireWorker(task, workerId);
+      task.state = 'paused';
+      task.pauseRequested = false;
+      task.waitingReason = reason.slice(0, 500);
+      task.result = result ? sanitizeResult(result) : undefined;
+      task.usage = task.result?.usage ? { ...task.result.usage } : undefined;
+      task.estimatedCost = task.result?.estimatedCost ? { ...task.result.estimatedCost } : undefined;
+      task.attempts = Math.max(0, task.attempts - 1);
+      clearLease(task);
+    });
+  }
+
   async resume(taskId: string): Promise<BackgroundTaskRecord> {
     return this.transition(taskId, (task) => {
-      if (task.state !== 'waiting_approval' && task.state !== 'failed' && task.state !== 'cancelled') {
+      if (task.state !== 'paused' && task.state !== 'waiting_approval' && task.state !== 'failed' && task.state !== 'cancelled') {
         throw new Error(`任务 ${task.id} 当前状态不能恢复：${task.state}`);
       }
       task.state = 'pending';
       task.cancellationRequested = false;
+      task.pauseRequested = false;
+      task.attempts = 0;
       task.waitingReason = undefined;
       task.errorCode = undefined;
       task.result = undefined;
@@ -378,6 +405,7 @@ function isTaskRecord(value: unknown): value is BackgroundTaskRecord {
   if (task.workerId !== undefined && (typeof task.workerId !== 'string' || task.workerId.length > 256)) return false;
   if (task.leaseExpiresAt !== undefined && !validDate(task.leaseExpiresAt)) return false;
   if (task.cancellationRequested !== undefined && typeof task.cancellationRequested !== 'boolean') return false;
+  if (task.pauseRequested !== undefined && typeof task.pauseRequested !== 'boolean') return false;
   if (task.waitingReason !== undefined && (typeof task.waitingReason !== 'string' || task.waitingReason.length > 500)) return false;
   if (task.errorCode !== undefined && (typeof task.errorCode !== 'string' || task.errorCode.length > 128)) return false;
   if (task.usage !== undefined && !isTaskUsage(task.usage)) return false;

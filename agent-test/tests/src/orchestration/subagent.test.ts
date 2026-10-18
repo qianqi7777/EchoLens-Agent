@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,12 +12,61 @@ import { LifecycleHookRunner } from '../../../../src/orchestration/lifecycle-hoo
 import type { AgentEvent } from '../../../../src/session/events.js';
 import { SubagentBackgroundService } from '../../../../src/orchestration/subagent-background.js';
 import { PersistentTaskQueue } from '../../../../src/orchestration/task-queue.js';
+import { AgentMemoryStore } from '../../../../src/orchestration/agent-memory.js';
 import {
   BUILTIN_SUBAGENT_PROFILES,
   createWorkspaceBoundSubagentRegistry,
   SubagentOrchestrator,
   type SubagentResult,
 } from '../../../../src/orchestration/subagent.js';
+
+test('后台子 Agent 跨实例从检查点续跑，保留原工作区且不重放已完成工具', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'echolens-subagent-resume-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'source.txt'), 'initial');
+  const taskId = '22222222-2222-4222-8222-222222222222';
+  const registry = new ToolRegistry();
+  let executions = 0;
+  let first!: SubagentOrchestrator;
+  registry.register({ name: 'list_files', description: '受控恢复探针', permission: 'workspace.read', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    async execute() { executions += 1; first.requestPause(taskId); return toolSuccess('source.txt', '探针完成'); } });
+  const profile = { ...BUILTIN_SUBAGENT_PROFILES.explore, tools: new Set(['list_files']) };
+  const capabilities = new RecordingModel().capabilities;
+  let initialModelCalls = 0;
+  const model: ModelProvider = { model: 'resume-probe', capabilities,
+    async complete() {
+      initialModelCalls += 1;
+      return { output: [textMessage('ask', 'assistant', ''), { type: 'tool_call', id: 'probe', callId: 'probe',
+        name: 'list_files', arguments: {}, callIndex: 0 }], stopReason: 'tool_calls' };
+    } };
+  const memory = new AgentMemoryStore({ homeDirectory: join(root, 'memory-home') });
+  first = new SubagentOrchestrator(model, registry, root, undefined, [profile], undefined, { memory });
+  const paused = await first.run({ profile: 'explore', objective: 'inspect source.txt', taskId });
+  assert.equal(paused.state, 'paused');
+  assert.equal(paused.pauseReason, 'user_paused');
+  assert.equal(executions, 1);
+  assert.equal(initialModelCalls, 1);
+  await writeFile(join(root, 'source.txt'), 'user modification');
+  const retained = join(root, '.echolens', 'sandboxes', `echolens-${taskId}`, 'workspace', 'source.txt');
+  assert.equal(await readFile(retained, 'utf8'), 'initial');
+  let resumeCalls = 0;
+  const resumeModel: ModelProvider = { model: 'resume-probe', capabilities,
+    async complete(request) {
+      resumeCalls += 1;
+      assert.equal(request.items.filter((item) => item.type === 'tool_result' && item.callId === 'probe').length, 1);
+      return { output: [textMessage('done', 'assistant', '完成')], stopReason: 'completed' };
+    } };
+  const second = new SubagentOrchestrator(resumeModel, registry, root, undefined, [profile], undefined, { memory });
+  const completed = await second.run({ profile: 'explore', objective: 'inspect source.txt', taskId });
+  assert.equal(completed.state, 'completed');
+  assert.equal(executions, 1);
+  assert.equal(resumeCalls, 1);
+  assert.equal(await readFile(join(root, 'source.txt'), 'utf8'), 'user modification');
+  const third = new SubagentOrchestrator(resumeModel, registry, root, undefined, [profile], undefined, { memory });
+  assert.equal((await third.run({ profile: 'explore', objective: 'inspect source.txt', taskId })).state, 'completed');
+  assert.equal(resumeCalls, 1, 'terminal checkpoint must not call the model again');
+});
 
 test('Explore 子 Agent 只看到白名单工具，父级只收到结构化摘要和证据', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'echolens-subagent-'));

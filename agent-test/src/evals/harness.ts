@@ -18,6 +18,8 @@ import type {
 import type { EvalResultStore } from './result-store.js';
 
 export interface EvalHarnessOptions {
+  /** Only trusted runtime runners may apply their patch through ToolExecutor themselves. */
+  candidateAppliesPatch?: boolean;
   sandbox?: SandboxAdapter;
   resultStore?: EvalResultStore;
   retainFailedWorkspace?: boolean;
@@ -54,7 +56,7 @@ export class EvalHarness {
       } catch (error) {
         assertions.push({ id: 'candidate-execution', passed: false, layer: 'structure', summary: `Candidate 执行失败：${safeMessage(error)}` });
       }
-      if (assertions.length === 0 && candidate.patch) {
+      if (assertions.length === 0 && candidate.patch && !this.options.candidateAppliesPatch) {
         try {
           await applyPatch(workspaceRoot, candidate.patch);
         } catch (error) {
@@ -138,7 +140,8 @@ async function grade(
       }
       const exists = content !== undefined;
       const passed = (check.exists === undefined || check.exists === exists)
-        && (check.contentIncludes === undefined || (content !== undefined && content.includes(check.contentIncludes)));
+        && (check.contentIncludes === undefined || (content !== undefined && content.includes(check.contentIncludes)))
+        && (check.contentEquals === undefined || content === check.contentEquals);
       assertions.push({
         id: `file:${relative}`,
         passed,

@@ -85,7 +85,8 @@ test('参数补全支持目录、任务、会话和检查点，仅读本地元�
   };
   assert.equal((await completeArguments('/cd 中', ctx))[0]?.replacement, `/cd "中文 space${sep}"`);
   assert.equal((await completeArguments('/cd "中文', ctx))[0]?.replacement, `/cd "中文 space${sep}"`);
-  assert.equal((await completeArguments('/task ', ctx)).length, 5);
+  assert.equal((await completeArguments('/task ', ctx)).length, 6);
+  assert.equal((await completeArguments('/task pause ', ctx))[0]?.replacement, '/task pause task-1 ');
   assert.equal((await completeArguments('/task cancel ', ctx))[0]?.replacement, '/task cancel task-1 ');
   assert.deepEqual((await completeArguments('/session delete ', ctx)).map((item) => item.name), ['older']);
   assert.equal((await completeArguments('/rollback ', ctx))[0]?.replacement, '/rollback checkpoint-1 ');

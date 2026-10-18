@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DynamicTaskGenerator, type EvalTaskTemplate } from './dynamic-task.js';
 import { assertEvalTask } from './task-validation.js';
+import { readEvalTask } from './task-catalog.js';
 import type { EvalTaskDefinition } from './types.js';
 
 export const EVAL_FIXTURE_ROOT = path.resolve('agent-test/fixtures/evals');
@@ -10,8 +11,10 @@ export interface EvalSuiteManifest {
   schemaVersion: 1;
   id: string;
   version: string;
+  candidateMode?: 'static-fixture' | 'runtime-scripted';
   entries: Array<{
     task?: string;
+    taskId?: string;
     template?: string;
     seed?: string;
     candidate: string;
@@ -56,7 +59,7 @@ export async function auditEvalSuite(suiteId: string): Promise<EvalSuiteAudit> {
     const missing = ['domain', 'difficulty', 'source', 'split']
       .filter((field) => task[field as keyof EvalTaskDefinition] === undefined);
     metadataMissing.push(...missing.map((field) => `${task.id}:${field}`));
-    const fingerprint = fingerprintTask(task);
+    const fingerprint = fingerprintTask(task, manifest.candidateMode === 'runtime-scripted');
     tasks.push({
       taskId: task.id,
       taskVersion: task.version,
@@ -92,10 +95,12 @@ export async function readSuiteManifest(suiteId: string): Promise<EvalSuiteManif
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/u.test(suiteId)) throw new Error('Suite 名称无效');
   const manifest = await readJson<Partial<EvalSuiteManifest>>(path.join(EVAL_FIXTURE_ROOT, 'suites', `${suiteId}.suite.json`));
   if (manifest.schemaVersion !== 1 || manifest.id !== suiteId
+    || (manifest.candidateMode !== undefined && !['static-fixture', 'runtime-scripted'].includes(manifest.candidateMode))
     || typeof manifest.version !== 'string' || !manifest.version
     || !Array.isArray(manifest.entries) || manifest.entries.length < 1 || manifest.entries.length > 500
     || manifest.entries.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
-      || typeof entry.candidate !== 'string' || Boolean(entry.task) === Boolean(entry.template))) {
+      || typeof entry.candidate !== 'string' || Boolean(entry.task) === Boolean(entry.template)
+      || (entry.taskId !== undefined && (typeof entry.taskId !== 'string' || !entry.taskId || !entry.task)))) {
     throw new Error(`Eval Suite 清单无效：${suiteId}`);
   }
   return manifest as EvalSuiteManifest;
@@ -120,7 +125,7 @@ async function loadTask(entry: EvalSuiteManifest['entries'][number]): Promise<Ev
   if (taskPath && entry.seed !== undefined) throw new Error('静态任务不得声明 seed');
   if (!entry.candidate) throw new Error('Suite 每项必须引用 Candidate');
   if (taskPath) {
-    const task = await readJson<EvalTaskDefinition>(taskPath);
+    const task = await readEvalTask(taskPath, entry.taskId);
     assertEvalTask(task);
     return task;
   }
@@ -128,7 +133,10 @@ async function loadTask(entry: EvalSuiteManifest['entries'][number]): Promise<Ev
   return new DynamicTaskGenerator().generate(template, entry.seed!);
 }
 
-function fingerprintTask(task: EvalTaskDefinition): string {
+function fingerprintTask(task: EvalTaskDefinition, acceptanceOnly: boolean): string {
+  // Labels, prompts and timestamps cannot turn the same acceptance scenario into a new task.
+  if (acceptanceOnly) return stableJson({ kind: task.kind, fixture: task.fixture, grader: task.grader });
+  // Preserve the fingerprint contract of already published static suites.
   const clone = structuredClone(task) as Partial<EvalTaskDefinition>;
   delete clone.id;
   delete clone.version;

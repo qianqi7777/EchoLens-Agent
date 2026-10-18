@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -9,6 +9,7 @@ import {
   type StagedFileSnapshot,
 } from '../sandbox/workspace-stager.js';
 import type { BackgroundTaskIsolation } from './task-queue.js';
+import { validateRelativePath } from '../runtime/path-policy.js';
 
 const execute = promisify(execFile);
 
@@ -20,10 +21,13 @@ export interface TaskWorkspaceLease {
   workspaceKey: string;
   changedFiles(): Promise<string[]>;
   cleanup(): Promise<void>;
+  /** Release the in-process lease while retaining the durable workspace. */
+  suspend?(): Promise<void>;
+  baseline?: readonly StagedFileSnapshot[];
 }
 
 export interface TaskWorkspaceAllocator {
-  allocate(workspaceRoot: string, mode: BackgroundTaskIsolation): Promise<TaskWorkspaceLease>;
+  allocate(workspaceRoot: string, mode: BackgroundTaskIsolation, taskId?: string): Promise<TaskWorkspaceLease>;
 }
 
 /**
@@ -35,13 +39,29 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
 
   constructor(private readonly stager = new FileSystemWorkspaceStager()) {}
 
-  async allocate(workspaceRoot: string, mode: BackgroundTaskIsolation): Promise<TaskWorkspaceLease> {
-    const lease = await (mode === 'worktree'
-      ? this.allocateWorktree(workspaceRoot)
-      : this.allocateSandbox(workspaceRoot));
+  async allocate(workspaceRoot: string, mode: BackgroundTaskIsolation, taskId?: string): Promise<TaskWorkspaceLease> {
+    if (taskId && !/^[a-f0-9-]{36}$/u.test(taskId)) throw new Error('持久工作区任务 ID 无效');
+    const marker = taskId ? path.join(workspaceRoot, '.echolens', 'background-workspaces', `${taskId}.json`) : undefined;
+    if (marker) await ensureManagedDirectory(workspaceRoot, path.dirname(marker));
+    let lease = marker ? await this.reopen(workspaceRoot, mode, taskId!, marker) : undefined;
+    if (!lease) {
+      lease = await (mode === 'worktree' ? this.allocateWorktree(workspaceRoot, taskId) : this.allocateSandbox(workspaceRoot, taskId));
+      if (marker) {
+        try {
+          await mkdir(path.dirname(marker), { recursive: true });
+          const temporary = `${marker}.${randomUUID()}.tmp`;
+          await writeFile(temporary, JSON.stringify({ version: 1, mode,
+            baseline: (lease.baseline ?? []).map((file) => ({ path: file.path, mode: file.mode, content: file.bytes.toString('base64') })) }), { mode: 0o600 });
+          await rename(temporary, marker);
+        } catch (error) {
+          await lease.cleanup();
+          throw error;
+        }
+      }
+    }
     const workspaceKey = path.resolve(lease.root);
     if (this.activeWorkspaceKeys.has(workspaceKey)) {
-      await lease.cleanup();
+      if (!marker) await lease.cleanup();
       throw new Error('后台任务工作区已被占用');
     }
     this.activeWorkspaceKeys.add(workspaceKey);
@@ -49,9 +69,14 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
     return {
       ...lease,
       workspaceKey,
+      ...(marker ? { suspend: async () => {
+        released = true;
+        this.activeWorkspaceKeys.delete(workspaceKey);
+      } } : {}),
       cleanup: async () => {
         if (released) return;
         await lease.cleanup();
+        if (marker) await rm(marker, { force: true });
         released = true;
         this.activeWorkspaceKeys.delete(workspaceKey);
       },
@@ -59,8 +84,8 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
   }
 
   // sandbox 使用临时暂存副本：只读分析或运行受控测试，改动随 cleanup 丢弃，因此 changedFiles 恒为空。
-  private async allocateSandbox(workspaceRoot: string): Promise<TaskWorkspaceLease> {
-    const id = `echolens-${randomUUID()}`;
+  private async allocateSandbox(workspaceRoot: string, taskId?: string): Promise<TaskWorkspaceLease> {
+    const id = `echolens-${taskId ?? randomUUID()}`;
     const staged = await this.stager.prepare(workspaceRoot, id);
     return {
       id,
@@ -72,8 +97,8 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
     };
   }
 
-  private async allocateWorktree(workspaceRoot: string): Promise<TaskWorkspaceLease> {
-    const allocationId = randomUUID();
+  private async allocateWorktree(workspaceRoot: string, taskId?: string): Promise<TaskWorkspaceLease> {
+    const allocationId = taskId ?? randomUUID();
     const id = `echolens-worktree-${allocationId}`;
     const rootHash = createHash('sha256').update(path.resolve(workspaceRoot)).digest('hex').slice(0, 12);
     const base = path.join(os.tmpdir(), 'echolens-worktrees', rootHash);
@@ -109,6 +134,7 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
       mode: 'worktree',
       root: target,
       workspaceKey: path.resolve(target),
+      baseline: staged.baseline,
       changedFiles: () => workspaceChanges(this.stager, target, staged.baseline),
       cleanup: async () => {
         // cleanup 只执行一次，确保外部多次调用时也只 remove 一次 worktree 并删除目录。
@@ -117,6 +143,52 @@ export class DefaultTaskWorkspaceAllocator implements TaskWorkspaceAllocator {
         cleaned = true;
       },
     };
+  }
+
+  private async reopen(workspaceRoot: string, mode: BackgroundTaskIsolation, taskId: string, marker: string): Promise<TaskWorkspaceLease | undefined> {
+    const info = await lstat(marker).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!info) return undefined;
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 96 * 1024 * 1024) throw new Error('持久工作区清单无效');
+    const saved: unknown = JSON.parse(await readFile(marker, 'utf8'));
+    const record = saved as { version?: unknown; mode?: unknown; baseline?: unknown } | null;
+    if (!record || record.version !== 1 || record.mode !== mode || !Array.isArray(record.baseline)
+      || record.baseline.length > 20_000) throw new Error('持久工作区清单不匹配');
+    let total = 0;
+    const baseline: StagedFileSnapshot[] = record.baseline.map((value: unknown) => {
+      const file = value as { path?: unknown; mode?: unknown; content?: unknown } | null;
+      if (!file || typeof file.path !== 'string' || typeof file.mode !== 'number' || typeof file.content !== 'string') throw new Error('持久基线无效');
+      validateRelativePath(file.path);
+      const bytes = Buffer.from(file.content, 'base64');
+      total += bytes.length;
+      if (bytes.length > 2 * 1024 * 1024 || total > 64 * 1024 * 1024) throw new Error('持久基线超过大小限制');
+      return { path: file.path, mode: file.mode, bytes };
+    });
+    const rootHash = createHash('sha256').update(path.resolve(workspaceRoot)).digest('hex').slice(0, 12);
+    const target = mode === 'sandbox'
+      ? path.join(workspaceRoot, '.echolens', 'sandboxes', `echolens-${taskId}`, 'workspace')
+      : path.join(os.tmpdir(), 'echolens-worktrees', rootHash, `echolens-worktree-${taskId}`);
+    // Never accept a serialized path or a link redirecting the retained root.
+    if ((await lstat(target)).isSymbolicLink() || path.resolve(await realpath(target)).toLowerCase() !== path.resolve(target).toLowerCase()) {
+      throw new Error('持久工作区路径发生变化');
+    }
+    return { id: `${mode}-${taskId}`, mode, root: target, workspaceKey: path.resolve(target), baseline,
+      changedFiles: mode === 'worktree' ? () => workspaceChanges(this.stager, target, baseline) : async () => [],
+      cleanup: () => mode === 'worktree' ? cleanupWorktree(workspaceRoot, target) : rm(path.dirname(target), { recursive: true, force: true }) };
+  }
+}
+
+async function ensureManagedDirectory(workspaceRoot: string, directory: string): Promise<void> {
+  const relative = path.relative(workspaceRoot, directory);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('持久目录越界');
+  let current = workspaceRoot;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    await mkdir(current).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
+    const info = await lstat(current);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('持久目录不能包含链接');
   }
 }
 

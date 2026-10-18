@@ -183,7 +183,7 @@ export const BUILTIN_COMMANDS: readonly CommandDescriptor[] = [
   {
     name: '/task',
     description: '创建、取消或恢复后台任务，或调整 Worker 并发',
-    usage: '/task <explore|test|review|cancel|resume|concurrency>',
+    usage: '/task <explore|test|review|pause|cancel|resume|concurrency>',
     category: 'task',
     acceptsArguments: true,
     availableDuringTask: false,

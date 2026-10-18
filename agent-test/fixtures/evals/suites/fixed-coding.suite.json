@@ -1,0 +1,608 @@
+{
+  "schemaVersion": 1,
+  "id": "fixed-coding",
+  "version": "1.0.0",
+  "candidateMode": "runtime-scripted",
+  "entries": [
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-trim-lines",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-unicode-length",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-escape-regex",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-strip-bom",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-line-endings",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-truncate-codepoints",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-prefix-once",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-suffix-once",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-split-first",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-utf8-size",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-clamp-bounds",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-empty-average",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-numeric-sort",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-finite-budget",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-positive-integer",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-zero-fallback",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-percent-denominator",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-backoff-cap",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-milliseconds",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-token-cost",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-stable-unique",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-immutable-reverse",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-chunk-tail",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-flatten-one",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-drop-nullish",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-unique-by-id",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-intersection",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-take-last",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-partition",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-map-value",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-sse-prefix",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-sse-done",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-retry-status",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-bearer-header",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-json-content-type",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-request-id",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-usage-sum",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-tool-arguments",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-stop-reason",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-casefold-header",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-await-cleanup",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-settled-results",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-promise-return",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-abort-preflight",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-lease-expiry",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-attempt-bound",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-completed-dedup",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-cost-unknown",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-retain-user-edits",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "coding-cooldown-window",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-default-route",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-protocol-name",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-no-network",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-read-only-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-capabilities",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-no-privilege",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-output-budget",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-approval-default",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-verification-default",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "config-unknown-price",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-git-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-git-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-git-nested",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-git-nested",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-git-casefold",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-git-casefold",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-private-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-private-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-private-nested",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-private-nested",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-parent",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-parent",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-mixed-parent",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-mixed-parent",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-ads",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-ads",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-ads-type",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-ads-type",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-shortname",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-shortname",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-console",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-console",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-printer",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-printer",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-auxiliary",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-auxiliary",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-null-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-null-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-serial-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-serial-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-parallel-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-parallel-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-trailing-dot",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-trailing-dot",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-trailing-space",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-trailing-space",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-question",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-question",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-wildcard",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-wildcard",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-left-angle",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-left-angle",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-right-angle",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-right-angle",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-pipe",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-pipe",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-quote",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-quote",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-control",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-control",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-long-component",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-long-component",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-unc",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-unc",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-device",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-drive-relative",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-drive-relative",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-read-external-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    },
+    {
+      "task": "catalogs/fixed-coding.tasks.json",
+      "taskId": "security-patch-external-root",
+      "candidate": "catalogs/fixed-coding.candidates.json"
+    }
+  ]
+}

@@ -101,3 +101,13 @@ npm run agent-test:web:test
 `AGENT_TEST_PLAYWRIGHT_MODULE` 可指向已安装的 Playwright 包目录；未指定则从项目依赖解析。`AGENT_TEST_URL` 可覆盖本地端口。浏览器测试覆盖模拟对比、导入导出、HTTP 错误、取消、日志注入和三种视口；截图仅写入被 Git 忽略的 `.echolens/web-check/`。浏览器测试里的质量接口使用 Mock，不运行真实 CLI。
 
 完整数据流见 [测试工作台功能链路](../doc/功能链路/09-测试工作台与Issue对比.md)。
+
+
+## 6. 固定任务与真实运行时回归
+
+`npm run eval:fixed` 运行 120 项固定版本任务（60 项工程变更、60 项读取/写入路径安全任务），
+使用本地脚本 Provider 调用真实 Agent 工具链，不连接真实模型。任务定义、参考脚本和 suite 清单
+位于 `fixtures/evals/catalogs/` 与 `fixtures/evals/suites/fixed-coding.suite.json`。
+JSONL 和汇总 JSON 写入 `.echolens/evals/results/`；报告记录模式、逐项断言、实际事件和去重审计。
+修复判据为锁定文件内容，安全判据为运行时拒绝事件；通过率不代表模型修复率。
+详见 [固定任务的执行边界](../doc/功能链路/07-Eval评测与动态任务.md)。

@@ -16,16 +16,20 @@ export class SubagentBackgroundService {
     onError?: (error: unknown) => void | Promise<void>,
     decorateObjective?: (objective: string) => string,
   ) {
-    // 把子 Agent 终态映射为后台任务态：paused→waiting_approval（等待显式恢复重跑）、cancelled→可重试失败、
-    // completed→完成；其余异常统一记为 failed 并带 subagent_ 前缀错误码。
+    // 审批暂停与用户/预算暂停分开持久化；恢复继续同一子会话，不重新执行已完成工具。
     const executor: BackgroundTaskExecutor = {
+      pause: (taskId) => orchestrator.requestPause(taskId),
       execute: async (task, signal) => {
+        if ((await queue.get(task.id))?.pauseRequested) orchestrator.requestPause(task.id);
         const result = await orchestrator.run({
+          taskId: task.id,
           profile: task.payload.profile,
           objective: decorateObjective?.(task.payload.objective) ?? task.payload.objective,
           workspaceMode: task.isolation,
         }, signal);
-        if (result.state === 'paused') return { state: 'waiting_approval', reason: '子 Agent 等待审批', result: taskResult(result) };
+        if (result.state === 'paused') return !result.pauseReason || result.pauseReason === 'approval_required'
+          ? { state: 'waiting_approval', reason: '子 Agent 等待审批', result: taskResult(result) }
+          : { state: 'paused', reason: result.pauseReason ?? '子 Agent 已暂停', result: taskResult(result) };
         if (result.state === 'completed') return { state: 'completed', result: taskResult(result) };
         return { state: 'failed', code: `subagent_${result.state}`, retryable: result.state === 'cancelled' };
       },
@@ -60,6 +64,10 @@ export class SubagentBackgroundService {
 
   cancel(taskId: string): Promise<BackgroundTaskRecord> {
     return this.worker.cancel(taskId);
+  }
+
+  pause(taskId: string): Promise<BackgroundTaskRecord> {
+    return this.worker.pause(taskId);
   }
 
   async resume(taskId: string): Promise<BackgroundTaskRecord> {

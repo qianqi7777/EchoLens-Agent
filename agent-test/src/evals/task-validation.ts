@@ -116,6 +116,10 @@ function assertGrader(kind: EvalTaskKind, grader: unknown): asserts grader is Ev
         && (typeof check.contentIncludes !== 'string' || check.contentIncludes.length > 20_000)) {
         fail('patch fileCheck contentIncludes 无效');
       }
+      if (check.contentEquals !== undefined
+        && (typeof check.contentEquals !== 'string' || check.contentEquals.length > 50_000)) {
+        fail('patch fileCheck contentEquals 无效');
+      }
     }
   }
 }

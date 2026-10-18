@@ -15,6 +15,8 @@ test('后台任务命令共享解析创建、列出、取消和恢复', async ()
   assert.equal(created.handled, true);
   assert.deepEqual(service.enqueued, { profile: 'test', objective: 'run focused tests', isolation: 'worktree' });
   const taskId = service.tasks[0]!.id;
+  await executeBackgroundTaskCommand(`/task pause ${taskId}`, service);
+  assert.equal(service.tasks[0]!.state, 'paused');
   await executeBackgroundTaskCommand(`/task cancel ${taskId}`, service);
   assert.equal(service.tasks[0]!.state, 'cancelled');
   await executeBackgroundTaskCommand(`/task resume ${taskId}`, service);
@@ -48,6 +50,10 @@ class RecordingTaskCommands implements BackgroundTaskCommands {
 
   async cancel(taskId: string) {
     return this.update(taskId, 'cancelled');
+  }
+
+  async pause(taskId: string) {
+    return this.update(taskId, 'paused');
   }
 
   async resume(taskId: string) {

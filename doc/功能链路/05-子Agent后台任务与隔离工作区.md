@@ -44,7 +44,10 @@ stateDiagram-v2
   [*] --> pending: enqueue/resume
   pending --> running: claim + attempts++ + lease
   running --> completed: 成功
-  running --> waiting_approval: 子 Agent paused
+  running --> waiting_approval: 审批等待
+  running --> paused: 用户暂停或预算耗尽
+  pending --> paused: 暂停排队任务
+  paused --> pending: 显式 resume
   running --> pending: 可重试失败且未超次数
   running --> failed: 不可重试或次数耗尽
   running --> cancelled: 用户取消
@@ -61,7 +64,7 @@ stateDiagram-v2
 | 字段 | 含义 |
 | --- | --- |
 | `schemaVersion/id` | 任务 schema 和 UUID |
-| `state` | pending/running/waiting_approval/completed/failed/cancelled |
+| `state` | pending/running/paused/waiting_approval/completed/failed/cancelled |
 | `isolation` | sandbox/worktree |
 | `payload.profile/objective/metadata?` | 执行目标 |
 | `createdAt/updatedAt` | 时间 |
@@ -102,8 +105,23 @@ stateDiagram-v2
 - `/tasks`：按创建时间倒序展示最近 20 条。
 - `/task ...`：入队并唤醒 Worker。
 - `/task cancel <id>`：写 cancelled，并 Abort 正在执行的任务。
-- `/task resume <id>`：waiting_approval/failed/cancelled 变回 pending 并唤醒 Worker。
+- `/task pause <id>`：排队任务立即变 paused；运行中任务设置持久暂停请求，在工具批次结束后的安全点暂停。
+- `/task resume <id>`：paused/waiting_approval/failed/cancelled 变回 pending 并唤醒 Worker；复用同一子会话检查点，不从头执行。
 
 ## 8. 关键测试
 
 `subagent.test.ts`、`task-queue.test.ts`、`task-command.test.ts`。工作区隔离还由 Sandbox、PathPolicy 和 Artifact 相关测试交叉覆盖。
+
+
+## 9. 后台检查点与持久隔离工作区
+
+后台任务以 task ID 作为子会话 ID，JSONL 事件保存在 `.echolens/background-sessions/`，
+复用主会话的单写者锁、检查点恢复和已完成工具结果合并。暂停、取消和可恢复失败时保留隔离工作区；
+完成后清理工作区，子会话事件继续保留以供审计。已完成检查点被再次调度时直接恢复完成结果，不再调用模型。
+
+`.echolens/background-workspaces/<task-id>.json` 保存隔离类型及 Worktree 的过滤后基线；
+路径由工作区与 task ID 重新计算，不接受清单提供的绝对路径。清单、目录链接或工作区身份不符时失败关闭。
+Sandbox 使用原有过滤快照目录，Worktree 使用固定任务路径，恢复时不会重新复制主工作区覆盖子任务状态。
+租约过期或 Worker 正常停止时，尚未完成的用户暂停请求仍保留为 paused，不会自动重新执行。
+
+取消保留检查点供显式恢复；暂停也不等于停止在途模型请求或命令。模型已输出、工具在途和租约归属仍遵守原有边界。

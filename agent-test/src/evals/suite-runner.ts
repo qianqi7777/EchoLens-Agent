@@ -11,7 +11,7 @@ export interface EvalSuiteResult {
   suiteId: string;
   suiteVersion: string;
   runAt: string;
-  candidateMode: 'static-fixture';
+  candidateMode: 'static-fixture' | 'runtime-scripted';
   taskCount: number;
   passedCount: number;
   failedCount: number;
@@ -25,7 +25,7 @@ export interface EvalSuiteResult {
   };
   results: Array<{
     taskId: string;
-    model: 'none (static-fixture)';
+    model: 'none (static-fixture)' | 'local-scripted-provider';
     seed?: string;
     passed: boolean;
     durationMs: number;
@@ -61,6 +61,8 @@ export async function runEvalSuite(
     if (taskPath && entry.seed !== undefined) throw new Error('静态任务不得声明 seed');
     const run = await runEvalFiles({
       taskPath,
+      taskId: entry.taskId,
+      candidateMode: manifest.candidateMode,
       templatePath,
       seed: entry.seed,
       candidatePath: resolveEvalFixture(entry.candidate),
@@ -79,7 +81,7 @@ export async function runEvalSuite(
     suiteId: manifest.id,
     suiteVersion: manifest.version,
     runAt: new Date().toISOString(),
-    candidateMode: 'static-fixture',
+    candidateMode: manifest.candidateMode ?? 'static-fixture',
     taskCount: records.length,
     passedCount,
     failedCount: records.length - passedCount,
@@ -93,7 +95,7 @@ export async function runEvalSuite(
     },
     results: records.map(({ record, seed }) => ({
       taskId: record.taskId,
-      model: 'none (static-fixture)',
+      model: manifest.candidateMode === 'runtime-scripted' ? 'local-scripted-provider' : 'none (static-fixture)',
       ...(seed === undefined ? {} : { seed }),
       passed: record.passed,
       durationMs: record.durationMs,

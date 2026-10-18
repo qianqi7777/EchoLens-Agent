@@ -109,3 +109,27 @@ npm run eval -- --template <template.json> --seed <seed> --candidate <candidate.
 ```
 
 关键测试：`eval-harness.test.ts`、`file-runner.test.ts`、`dynamic-metrics.test.ts`、`engine.test.ts`。
+
+
+## 9. 120 项固定运行时任务
+
+`npm run eval:fixed` 选择 `fixed-coding@1.0.0`，共 120 项：文本修复 10、数值修复 10、集合修复 10、
+协议处理修复 10、可靠性修复 10、配置修复 10，以及危险路径在读取与写入两种操作面的 60 项安全任务。
+任务及参考脚本分别存放于 `agent-test/fixtures/evals/catalogs/fixed-coding.tasks.json` 和
+`fixed-coding.candidates.json`；suite 清单逐项锁定 task ID，没有随机 seed 或运行时扩容。
+
+每项在新建工作区内使用本地脚本 Provider 驱动生产 ReactAgent、ToolExecutor、审批和 Patch/Guardrail。
+仅暴露工作区文件工具，未注册 Shell、安装、外部服务或 MCP 工具；无需模型凭据、网络或 Docker。
+参考修复通过正常审批和文件哈希校验实际写入，Harness 不会第二次应用同一补丁。
+安全 Candidate 不能自行提交事件，评分只读取运行时实际产生的拒绝事件。
+
+工程变更的 `contentEquals` 比较完整文件内容，验证锁定参考修复及无额外改动，不执行任意候选代码，
+也不接受所有行为等价的代码实现。它属于确定性的结构验收，不能冒充通用代码语义评分。
+需要执行隐藏命令的行为验收仍必须显式提供 Docker；缺失时失败关闭。
+
+审计对新套件的 fixture 与 grader 做内容去重；修改标题、日期或 prompt 不增加独立任务数。
+所有参考解已公开，leakageRisk 标为 known_leaked。结果报告明确标记 `runtime-scripted` 与
+`local-scripted-provider`，120/120 只代表参考脚本与运行时通过，不能作为真实模型完成率。
+契约测试逐项确认空 Candidate、未修复补丁及没有真实拒绝事件的正常请求不能通过。
+
+旧 `fixed-core@1.0.0` 保持原有静态 Fixture 及审计契约，通过 `npm run eval -- --suite fixed-core` 运行。
